@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.2.23
+// @version      1.2.27
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -9,151 +9,6 @@
 // @updateURL    https://raw.githubusercontent.com/Ke9318/lanis/main/lanis.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ke9318/lanis/main/lanis.user.js
 // ==/UserScript==
-
-// ============================================================================
-// 통합 매크로 v1.2
-// v1.1 대비 수정 사항:
-//   1) [던전] 모듈 신규 추가. 아래 5개 던전을 우선순위 순서로 순회하며 자동 클리어:
-//        [구] 수행자의 탑: 상층부 > 수행자의 탑: 상층부 >
-//        [구] 신비의 동굴 > 신비의 동굴 > 지하 하수도(일일 던전)
-//      (일일 던전 중 깊은 숲 속 / 각성의 탑은 현재 비활성화 - 수동 처리)
-//   2) [공용] 여러 창을 동시에 돌릴 때 클릭이 씹히거나 멈추는 문제 완화를 위해
-//      클릭 사이 기본 지연을 늘림(기존 300~800ms → 500~1300ms). 특히 확인/모달류
-//      클릭 뒤에는 다음 요소를 찾기 전 명시적으로 더 대기하도록 retryStep/waitFor
-//      기반으로 처리.
-//   3) [자동사냥] "보호용 기름 없이도 사냥" 체크옵션 추가. 체크하면 장비 보호(기름)가
-//      풀린 상태여도 정지하지 않고 계속 사냥을 진행함(기본값: 미체크 = 기존 동작 유지).
-//   4) [버그 수정] Core.allButtons()가 매크로 패널/배너 자체의 버튼(예: 숨겨진 배너의
-//      "확인" 버튼)까지 포함해서 찾는 바람에, findButtonByText('확인')이 캐릭터 정보
-//      모달의 진짜 확인 버튼 대신 숨겨진 배너 버튼을 잘못 클릭하던 문제 수정
-//      (던전 입장이 항상 멈추던 원인). 패널/배너 하위 버튼은 항상 검색에서 제외.
-//   5) [버그 수정] "던전 입장 확인" 팝업의 "입장" 버튼을 findButtonByText('입장')으로
-//      찾았는데, 던전 목록 페이지 자체에 카드마다 "입장" 버튼이 여러 개 있어서 문서
-//      전체에서 첫 번째로 매칭되는(팝업이 아닌 배경 목록의) "입장" 버튼을 잘못 클릭하던
-//      문제 수정. Core.findButtonInDialog()를 추가해 모달 컨테이너 안으로 검색 범위를
-//      좁혀서 "확인"/"입장" 등 흔한 텍스트의 버튼도 정확한 팝업 안에서만 찾도록 함.
-//   6) [던전] 던전마다 매번 메뉴를 다시 열어 하나씩 입장권을 확인하던 방식을 개선.
-//      던전 목록 화면을 한 번만 로드해서 5개 던전의 입장권/완료 여부를 전부 스캔한 뒤
-//      "입장 가능한 던전 큐"를 확정하고, 그 큐만 순서대로 입장하도록 변경(불필요한
-//      메뉴 재진입 제거로 속도 개선).
-//   7) [버그 수정] 던전 완료 화면에서 "보상 받고 던전 나가기" 버튼을 찾기만 하면 바로
-//      "클리어 완료"로 기록하던 문제 수정. 이제 버튼을 클릭한 뒤 실제로 완료 화면을
-//      벗어난 것까지 확인해야만 클리어로 카운트함(보상 수령 = 클리어라는 원칙에 맞춤).
-//   8) [던전] 전투 결과("승리!"/"패배..")를 못 찾으면 곧바로 던전 전체를 포기하고
-//      정지하던 문제 완화 - 전투 시작/결과 확인을 최대 3회까지 재시도한 뒤에만 포기하도록
-//      수정. 아직 진행 중인데(예: 3/15) 일시적 지연으로 결과를 못 읽어 통째로 멈추는
-//      상황을 줄임.
-//   9) [던전] 스크립트를 재시작했을 때 이미 던전 안(전투/상점/완료 화면)에 들어와 있는
-//      상태라면, 던전 목록으로 돌아가 새로 입장하지 않고 화면에 표시된 던전 이름을
-//      인식해서 바로 이어서 진행하도록 함(detectResumeDungeon).
-//   10) [버그 수정] detectResumeDungeon()과 getDungeonCardEl()이 매크로 패널 자체에
-//      있는 던전 이름 라벨(즉시완료 목표치 설정 UI)까지 검색 대상에 포함해서, 실제
-//      게임 화면과 무관하게 항상 목록 맨 앞 던전으로 잘못 인식하던 문제 수정(예: 실제
-//      화면은 "지하 하수도"인데 "[구] 수행자의 탑"으로 잘못 이어하기 시도함). 패널/배너
-//      하위 요소는 항상 검색에서 제외하도록 수정.
-//   11) [버그 수정] 상점 카드 인식(getShopCards)이 "텍스트 리프를 먼저 찾고 테두리
-//      있는 조상을 역추적"하는 방식이었는데 실제로는 카드를 계속 못 찾아서(토큰만 계속
-//      쌓이고 구매/리롤이 전혀 안 일어남) 사실상 상점 기능이 통째로 죽어 있었음.
-//      등급 테두리 색(금/칠색/은/동)이 정해져 있다는 걸 이용해 "테두리 색이 일치하는
-//      요소를 먼저 찾고 그 텍스트를 라벨로 쓰는" 방식으로 뒤집어서 재작성.
-//   12) [버그 수정] 위 카드 라벨을 el.textContent로 읽었는데, textContent는 자식
-//      요소 사이에 줄바꿈을 넣어주지 않아 라벨("행운 +98")과 바로 옆 가격 숫자("30")가
-//      구분자 없이 붙어 "행운 +9830" 같은 엉뚱한 라벨로 파싱되는 문제가 있었음.
-//      렌더링된 줄바꿈을 반영하는 el.innerText로 교체.
-//   13) [던전] 전투 결과 확인이 반복 실패하다 뒤늦게 성공하는 경우가 잦아 클릭 사이
-//      지연을 전반적으로 더 늘림(던전 모듈 전용: 대략 700~1400ms → 1100~2000ms 수준).
-//   14) [버그 수정] 즉시완료(즉시 최상층 도전) 판단이 던전 진입 직후(진행도 0)에만
-//      한 번 확인하고 끝났고, 그때 스탯이 기준 미달이면 이후 스탯이 올라 기준을 넘어도
-//      다시는 확인하지 않던 문제 수정. "기준 미달로 아직 시도조차 안 한 경우"와
-//      "실제로 도전했다가 진 경우"를 구분해서, 전자는 매 전투마다 계속 재확인하고
-//      후자(실제 도전 후 결과가 난 경우)만 그 던전에서 다시 시도하지 않도록 함.
-//   15) [개선] 캐릭터 카드의 "자세히"를 펼치면 실제 적중치/회피치 수치가 화면에 그대로
-//      표시된다는 것을 확인함. 근사 공식(무기 무게 미반영)으로만 판단하던 것을, 이제
-//      "자세히"를 자동으로 펼쳐서 실제 값을 우선 읽고, 확인이 안 될 때만 근사 공식으로
-//      대체하도록 개선(ensureDetailsExpanded/readRealACEV/getCurrentACEV 추가).
-//   16) [버그 수정] 이어하기(resume) 경로에서 instantClearTried를 무조건 true로 세워
-//      즉시완료 자체를 아예 시도하지 않던 잔재 코드 제거. 매 전투 재확인 로직(14번)과
-//      모순되어 이어하기 세션에서는 즉시완료가 영영 확인되지 않던 문제 수정.
-//   17) [개선] "자세히"를 눌러도 적중치/회피치 텍스트가 안 나와 계속 근사 공식으로만
-//      판단되던 경우가 있어, 클릭 1회+대기로 끝내지 않고 최대 3회까지 재시도하도록
-//      강화. 그래도 실패하면 근사 공식으로 대체한다는 로그를 남겨 원인 추적이 쉽도록 함.
-//   18) [버그 수정] 사용자 제보: "모든 스탯"을 살 수 있었는데도 구매하지 않고 넘어감.
-//      isAllStatsLabel/parseStatLabel/isGodStrikeFamily 등 라벨 매칭 정규식이 전부
-//      문자열 맨 앞(^) 고정 매칭이었는데, 라벨 앞에 예기치 않은 문자가 섞여 들어오면
-//      매칭이 실패해 그냥 지나칠 수 있었음 → 전부 ^ 고정 없이 느슨하게 매칭하도록 완화.
-//      또한 카드 선택→구매 클릭이 한 번에 안 먹히는 경우를 대비해 구매 시퀀스를 최대
-//      2회까지 재시도하도록 보강.
-//   19) [버그 수정] 사용자 제보: "자세히"는 힘/생명/정신/지능/행운/속도 원본 스탯과
-//      직업/메인 어빌리티를 보여주는 버튼이었고, 적중치/회피치는 캐릭터 이름 옆의
-//      화살표(▲/▼) 토글을 눌러야 나오는 완전히 별개의 버튼이었음. 엉뚱한 버튼("자세히")
-//      을 누르고 있었으니 실제 값이 계속 안 나왔던 것 - 캐릭터 카드(무기/HP/MP가 함께
-//      있는 컨테이너) 안에서 "자세히"가 아닌 버튼(이름 옆 토글)을 찾아 누르도록 수정.
-//   20) [버그 수정] 실제 값 읽기가 정상화된 뒤 "즉시 최상층 도전"을 클릭해도 여전히
-//      진행이 안 되던 문제 발견 - 클릭 후 별도의 확인 팝업("도전"/"취소")이 뜨는데
-//      이를 처리하는 코드가 없어 확인을 안 누른 채 전투 결과만 기다리며 계속 실패하고
-//      있었음. 팝업이 뜨면 Core.findButtonInDialog로 정확히 "도전" 버튼을 찾아 클릭하도록
-//      추가.
-//   21) [던전] "오늘 클리어한 던전" 개수가 새로고침/스크립트 재시작 때마다 0으로
-//      초기화되던 것을 localStorage에 저장해서 유지되도록 함(loadClearCount/
-//      saveClearCount). 날짜가 바뀌면 자동으로 0부터 다시 센다.
-//   22) [던전] 위 21번은 클리어 개수였는데, 실제 요청은 GUI에 입력하는 설정값
-//      (던전별 즉시완료 목표 적중치/회피치, 리롤 최소 토큰, 일일던전 체크)이 새로고침
-//      할 때마다 초기화되는 문제였음 - 이 설정값들도 localStorage에 저장/복원하도록
-//      추가(saveConfig/loadConfigIntoSelf, 패널 위치 저장 방식과 동일한 원리).
-//   23) [공용] 재전직/자동사냥/레어맵 탭의 GUI 입력값(목표 강함점수, 사냥터, 층,
-//      골드 입금 기준, 최소 행동력, 보호용 기름 무시, 최대 반복 사이클 등)도 던전
-//      탭과 동일하게 localStorage에 저장/복원되도록 확장(Core.saveModuleConfig/
-//      Core.loadModuleConfig 공용 헬퍼 추가).
-//   24) [버그 수정] 자동사냥이 매 사이클마다 무조건 "전투" 메뉴를 다시 열어 사냥터로
-//      재진입하고 있어서(메뉴 클릭+항목 클릭+대기가 매번 반복) 사냥 속도가 크게
-//      느려지는 문제 수정. 이미 사냥 버튼이 보이는 화면이면 재진입 없이 그대로 진행하고,
-//      은행/수리 등으로 자리를 옮겼을 때만 실제로 재진입하도록 함.
-//   25) [던전] 즉시완료 추가 조건 도입. 적중/회피 기준치를 충족해도 아래 조건까지
-//      만족해야만 즉시완료를 시도하도록 함(그 전까진 다음 전투에서 계속 재확인):
-//        - 신비의 동굴: 신의 일격 구매 + 모든 스탯 누적 2회 이상
-//        - 지하 하수도: 신의 일격 구매 + 모든 스탯 누적 3회 이상 + 힘/속도 각 1회 이상
-//      DUNGEONS 정의에 instantClearRequirement를 추가하고, 신의 일격 정확 구매 여부
-//      (boughtGodStrikeExact)와 모든 스탯 누적 횟수(allStatsBoughtCount)를 새로 추적함.
-//   26) [버그 수정] 즉시완료(즉시 최상층 도전)는 항상 매우어려움 고정으로 진행되는
-//      별개의 도전인데, 여기서 지면 정공법 전투 패배와 똑같이 취급해서 난이도를
-//      매우어려움→어려움으로 낮춰버리던 문제 수정. 이제 즉시완료 실패는 "이후 이
-//      던전에서 즉시완료를 다시 시도하지 않는다"는 의미로만 처리하고, 난이도는 그대로
-//      유지한 채 정공법으로 15단계까지 계속 진행함(난이도 하향은 정공법 전투 패배시에만).
-//   27) [버그 수정] 자동사냥 사냥터 옵션 라벨에 "에렌시아"(마을 이름, 계정마다 다를 수
-//      있음)가 하드코딩되어 있던 것을 지역명("평야"/"탑"/"광산" 등)만 표시하도록 수정.
-//      실제 이동 로직은 원래도 마을 이름과 무관하게 지역 접미사로만 동작해 기능상 문제는
-//      없었지만, 표시가 오해를 줄 수 있어 정리함.
-//   28) [최적화] "전투 시작" 클릭이 가끔 씹혀서(버튼은 찾았지만 실제로 전투가 시작되지
-//      않음) 결과 확인이 5번 재시도(약 30초)를 전부 채우고서야 다음 시도에서 성공하는
-//      패턴이 반복되던 문제 완화. 클릭 직후 3초 안에 "전투 중"/결과 문구 등 반응이
-//      있는지 짧게 확인하고, 반응이 없으면 그 자리에서 바로 한 번 더 클릭해서 30초를
-//      그냥 날리는 대신 몇 초 안에 복구하도록 함.
-//   29) [버그 수정] 패배 시 강제퇴장 여부를 판단하는 로직이, "돌아가기"를 누르기 전인
-//      결과 화면(원래 "진행도" 텍스트가 없는 화면)에서 텍스트 유무를 검사하고 있어서
-//      실제 퇴장 여부와 무관하게 매 패배마다 "강제 퇴장된 것으로 보임"으로 잘못 판정해
-//      던전을 통째로 포기하던 심각한 버그 수정(보스전 근처에서 자꾸 멈추던 주 원인으로
-//      추정). "돌아가기"를 먼저 누른 뒤 그 다음 화면이 던전 안(전투/상점)인지 목록
-//      화면인지로 판단하도록 순서를 바로잡음.
-//   30) [버그 수정] 리롤을 최대 15회로 임의 제한해뒀던 게, 토큰이 아직 50개 넘게
-//      남아있는데도 운 나쁘게 15번 안에 원하는 아이템이 안 뜨면 리롤을 그만두고 그냥
-//      넘어가버리는 원인이었음("토큰이 넘쳐도 리롤을 안 한다"는 제보와 일치). "토큰
-//      50 이상이면 계속 리롤"이라는 규칙대로, 안전장치용 상한만 대폭 상향(200회)해서
-//      토큰 잔량 자체가 자연스러운 멈춤 조건이 되도록 수정. 리롤 조건 미충족 시 토큰
-//      수치를 로그로 남겨 앞으로 원인 추적이 쉽도록 함.
-//   31) [던전] 리롤을 이미 한 번이라도 돌린 뒤에는(=첫 판단에 신의 일격/모든 스탯이
-//      없어서 리롤을 시작한 것이므로) 신의 일격 계열이나 모든 스탯이 아니면 사지 않고
-//      계속 리롤하도록 함. 리롤을 아예 안 한 최초 판단이거나 마지막 스테이지 직전
-//      상점에서는 기존 우선순위(단일 스탯 등)를 그대로 허용.
-//   32) [개선] 던전 입장 확인 모달에서 "N번 사망 시 강제 퇴장" 문구가 헤딩보다 한
-//      박자 늦게 렌더링되는 경우가 있어 "부활 허용: 알 수 없음"으로 로그되던 문제를
-//      완화 - 이 문구도 짧게 재시도해서 읽도록 함(참고: 이 값은 로그 표시용일 뿐 실제
-//      강제퇴장 판단에는 쓰이지 않아 게임 진행 자체에는 영향 없었음).
-//   33) [버그 수정] 재전직 모듈의 사냥 결과 화면 감지 정규식이 "레벨 1 → N 달성"
-//      패턴만 찾고 있었는데, 캐릭터가 이미 만렙(레벨 100)이라 더 오를 레벨이 없을 땐
-//      대신 "N회 전투 완료!" 형식으로 결과가 표시됨. 이 패턴이 빠져 있어서 만렙 상태로
-//      사냥할 때마다(예: 재전직 스킵 후 재사냥) 결과 화면을 못 찾고 재시도 끝에 모듈이
-//      정지해버리던 문제 수정(자동사냥 쪽 정규식엔 원래 포함되어 있었음).
-// ============================================================================
 
 (function () {
   'use strict';
@@ -168,6 +23,7 @@
     bannerEl: null,
     originalTitle: document.title,
     titleFlashInterval: null,
+    audioCtx: null, // 알림음 재생용 (v1.2.24)
   };
 
   const PANEL_POS_KEY = 'lrm-unified-panel-pos'; // 패널 위치 저장용 localStorage 키 (하나의 패널이므로 키도 하나)
@@ -191,10 +47,6 @@
   };
 
   Core.allButtons = function () {
-    // v1.2.1 버그 수정: 매크로 패널/배너 자체에도 "확인" 같은 흔한 텍스트의 버튼이 있어서
-    // (예: 배너 닫기 버튼) findButtonByText가 게임 모달의 진짜 버튼 대신 숨겨진 패널/배너
-    // 버튼을 잘못 집는 문제가 있었음(캐릭터 정보 모달의 "확인"을 못 누르던 원인).
-    // 패널/배너 하위 버튼은 항상 제외하고 찾도록 수정.
     return Array.from(document.querySelectorAll('button')).filter(
       (b) => !b.closest('#lrm-panel') && !b.closest('#lrm-banner')
     );
@@ -208,11 +60,6 @@
     return [...document.querySelectorAll(selector)].find((el) => el.textContent.trim() === text) || null;
   };
 
-  // v1.2.1 버그 수정: "확인", "입장" 같은 흔한 텍스트의 버튼은 페이지 안에 여러 개
-  // 동시에 존재할 수 있음(예: 던전 목록의 카드마다 "입장" 버튼이 있음). 문서 전체에서
-  // 첫 번째 매칭 버튼을 집는 findButtonByText를 모달 버튼에 쓰면 엉뚱한(배경의) 버튼을
-  // 잘못 클릭하게 됨. dialogMarkerText를 포함하는 가장 좁은 컨테이너를 먼저 찾고,
-  // 그 안에서만 buttonText 버튼을 찾도록 스코프를 좁힌 헬퍼.
   Core.findButtonInDialog = function (dialogMarkerText, buttonText) {
     const candidates = [...document.querySelectorAll('*')].filter((el) => {
       if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
@@ -234,7 +81,6 @@
     return null;
   };
 
-  // 타이밍에 예민한 지점(팝업/버튼 렌더링 등)을 위한 재시도 헬퍼.
   Core.retryStep = async function (label, checkFn, { attempts = 4, waits = [1000, 3000, 6000, 10000] } = {}) {
     for (let i = 0; i < attempts; i++) {
       const result = await checkFn();
@@ -256,15 +102,12 @@
     return null;
   };
 
-  // 클릭 하나 하고 나서 다음 조건이 충족될 때까지 여유있게 기다리는 헬퍼 (v1.2 신규).
-  // 여러 창을 동시에 돌릴 때 "확인" 등을 너무 빨리 눌러 씹히던 문제 완화용.
   Core.clickAndWaitFor = async function (el, checkFn, { minDelay = 500, maxDelay = 1300, timeoutMs = 15000 } = {}) {
     el.click();
     await Core.humanDelay(minDelay, maxDelay);
     return Core.waitFor(checkFn, timeoutMs, 300);
   };
 
-  // 상단 네비(전투/마을/캐릭) 클릭 후 드롭다운에서 정확히 일치하는 항목 클릭
   Core.clickNavMenuExact = async function (navLabel, itemText) {
     const navBtn = await Core.waitFor(() => Core.findButtonByText(navLabel), 15000);
     if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
@@ -278,7 +121,6 @@
     await Core.humanDelay(500, 1000);
   };
 
-  // 상단 네비 클릭 후 드롭다운에서 "접미어"로 끝나는 항목 클릭
   Core.clickNavMenuSuffix = async function (navLabel, suffixText) {
     const navBtn = await Core.waitFor(() => Core.findButtonByText(navLabel), 15000);
     if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
@@ -292,7 +134,6 @@
     await Core.humanDelay(500, 1000);
   };
 
-  // 은행 전액 입금 (재전직/자동사냥 모듈이 공용으로 사용)
   Core.bankDepositAll = async function (moduleId) {
     Core.log(moduleId, '은행으로 이동해 전액 입금 진행');
     await Core.clickNavMenuExact('마을', '은행');
@@ -308,7 +149,6 @@
     return true;
   };
 
-  // 장비(무기/방어구/장신구) 수리
   Core.repairAllEquipment = async function (moduleId) {
     Core.log(moduleId, '장비 내구도 부족 감지 → 장비 수리 진행');
     for (let attempt = 0; attempt < 12; attempt++) {
@@ -338,6 +178,52 @@
     }
   };
 
+  // ---------------- 알림음 (v1.2.24 신규) ----------------
+  Core.getAudioCtx = function () {
+    if (!Core.audioCtx) {
+      try {
+        Core.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (e) {
+        return null;
+      }
+    }
+    if (Core.audioCtx.state === 'suspended') {
+      Core.audioCtx.resume().catch(() => {});
+    }
+    return Core.audioCtx;
+  };
+
+  Core.beep = function (freq, durationMs, delayMs = 0, waveType = 'sine', volume = 0.2) {
+    const ctx = Core.getAudioCtx();
+    if (!ctx) return;
+    setTimeout(() => {
+      try {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = waveType;
+        osc.frequency.value = freq;
+        gain.gain.value = volume;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + durationMs / 1000);
+      } catch (e) {
+        /* 오디오 재생 불가 환경이면 조용히 무시 */
+      }
+    }, delayMs);
+  };
+
+  Core.playStopSound = function () {
+    Core.beep(300, 180, 0, 'square', 0.15);
+    Core.beep(220, 220, 220, 'square', 0.15);
+  };
+
+  Core.playCompleteSound = function () {
+    Core.beep(523.25, 150, 0, 'sine', 0.2);
+    Core.beep(659.25, 150, 150, 'sine', 0.2);
+    Core.beep(783.99, 260, 300, 'sine', 0.2);
+  };
+
   Core.startTitleFlash = function () {
     Core.stopTitleFlash();
     let on = false;
@@ -355,9 +241,10 @@
     }
   };
 
-  Core.showBanner = function (moduleId, msg) {
+  Core.showBanner = function (moduleId, msg, isSuccess = false) {
     if (!Core.bannerEl) return;
-    Core.bannerEl.querySelector('span').textContent = `⚠ [${MODULE_LABELS[moduleId] || moduleId}] ${msg}`;
+    Core.bannerEl.querySelector('span').textContent = `${isSuccess ? '✅' : '⚠'} [${MODULE_LABELS[moduleId] || moduleId}] ${msg}`;
+    Core.bannerEl.style.background = isSuccess ? '#2e7d32' : '#b71c1c';
     Core.bannerEl.style.display = 'flex';
     Core.startTitleFlash();
   };
@@ -369,7 +256,15 @@
 
   Core.notifyStopped = function (moduleId, msg) {
     Core.log(moduleId, `⚠ ${msg}`);
-    Core.showBanner(moduleId, msg);
+    Core.showBanner(moduleId, msg, false);
+    Core.playStopSound();
+    Core.stopModule(moduleId);
+  };
+
+  Core.notifyCompleted = function (moduleId, msg) {
+    Core.log(moduleId, `✅ ${msg}`);
+    Core.showBanner(moduleId, msg, true);
+    Core.playCompleteSound();
     Core.stopModule(moduleId);
   };
 
@@ -385,9 +280,6 @@
   };
 
   // ---------------- 모듈 설정값 저장/복원 (공용) ----------------
-  // v1.2.14: 재전직/자동사냥/레어맵 탭의 GUI 입력값(목표 강함점수, 사냥터, 최소 행동력,
-  // 골드 입금 기준, 최대 반복 횟수 등)도 던전 탭과 동일한 방식으로 localStorage에
-  // 저장해서 새로고침해도 유지되도록 하는 공용 헬퍼. moduleId별로 키 목록만 지정하면 됨.
   Core.saveModuleConfig = function (moduleId, keys) {
     try {
       const mod = Modules[moduleId];
@@ -456,6 +348,7 @@
       restEvery: [50, 65],
       restSeconds: [60, 180],
       clickDelay: [500, 1300],
+      useHiddenRoomMap: false, // v1.2.27: 체크 시 일반 사냥터(50연전) 대신 "숨겨진 방의 지도"로 깨달음의 탑을 만들어 1회 전투로 즉시 레벨 100을 만듦
     },
     expectedJobName: null,
     nextTierIndexOverride: null,
@@ -725,10 +618,6 @@
 
     let resultShown = await Core.retryStep(
       '사냥 결과 화면 확인',
-      // v1.2.23 버그 수정: "레벨 1 → N 달성" 패턴은 재전직 후 레벨업 도중에만 뜨고,
-      // 캐릭터가 이미 만렙(레벨 100)이라 더 오를 레벨이 없을 땐 대신 "N회 전투 완료!"
-      // 형식으로 결과가 표시됨. 이 패턴이 없어서 만렙 상태에서 사냥할 때마다 결과 화면을
-      // 못 찾고 재시도 끝에 정지해버리던 문제 수정(자동사냥 쪽 정규식엔 원래 있었음).
       () => (/레벨\s*1\s*→\s*\d+\s*달성|전투\s*후\s*중단|\d+\s*회\s*전투\s*완료/.test(Core.bodyText()) ? true : null),
       { attempts: 4, waits: [3000, 5000, 8000, 12000] }
     );
@@ -767,7 +656,103 @@
     };
   };
 
+  // v1.2.27 신규: "숨겨진 방의 지도"를 사용해 광산에서 "깨달음의 탑"을 생성하고
+  // 1회 전투로 즉시 레벨 100을 만드는 경로. 일반 사냥터(50연전, doHunt)와 달리
+  // 50회 전투 버튼을 누르는 방식이 아니므로 행동력 체크(refillEnergyIfNeeded)나
+  // 농축 경험의 물약 체크(refillExpPotion)를 전혀 거치지 않는다 - 행동력이 1만
+  // 있어도 그대로 진행 가능하고, 무조건 레벨 100으로 만들어주므로 물약도 불필요.
+  Modules.rejob.getHiddenRoomMapOption = function (dialog) {
+    const containers = [...dialog.querySelectorAll('label')].filter((l) => l.querySelector('input[type="radio"]'));
+    return containers.find((c) => c.textContent.includes('숨겨진 방의 지도')) || null;
+  };
+
+  Modules.rejob.findEnlightenmentTowerButton = function () {
+    const container = Modules.raremap.getMineContainer();
+    if (!container) return null;
+    return (
+      [...container.querySelectorAll('button.MuiButton-fullWidth')].find((b) => b.textContent.includes('깨달음의 탑')) || null
+    );
+  };
+
+  Modules.rejob.doHiddenRoomHunt = async function () {
+    const mod = this;
+    Core.log('rejob', '광산으로 이동 (숨겨진 방의 지도 사용)');
+    try {
+      await Core.clickNavMenuSuffix('전투', '광산');
+    } catch (e) {
+      Core.notifyStopped('rejob', `광산 이동 실패: ${e.message}`);
+      return null;
+    }
+    await Core.sleep(700);
+
+    const mapIcon = document.querySelector('div[aria-label="지도 아이템을 사용해 레어맵으로 이동하기"]');
+    if (!mapIcon) {
+      Core.notifyStopped('rejob', '지도 아이콘을 찾지 못했습니다.');
+      return null;
+    }
+    mapIcon.click();
+    await mod.clickDelayWait();
+
+    const dialog = await Core.retryStep('"지도 아이템 사용하기" 모달 찾기', () => {
+      const titleEl = [...document.querySelectorAll('h1, h2, h3')].find((el) => el.textContent.trim() === '지도 아이템 사용하기');
+      return titleEl ? titleEl.closest('[role="dialog"]') : null;
+    });
+    if (!dialog) {
+      Core.notifyStopped('rejob', '지도 아이템 모달을 찾지 못했습니다.');
+      return null;
+    }
+
+    const option = mod.getHiddenRoomMapOption(dialog);
+    const radio = option ? option.querySelector('input[type="radio"]') : null;
+    if (!option || !radio || radio.disabled || /\(?\s*0\s*개\s*\)?/.test(option.textContent)) {
+      Core.notifyCompleted('rejob', '숨겨진 방의 지도를 모두 사용했습니다 (재고 없음). 정지합니다.');
+      return null;
+    }
+    option.click();
+    await mod.clickDelayWait();
+
+    const useBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용하기');
+    if (!useBtn) {
+      Core.notifyStopped('rejob', '"사용하기" 버튼을 찾지 못했습니다.');
+      return null;
+    }
+    useBtn.click();
+    await mod.clickDelayWait();
+
+    const towerBtn = await Core.retryStep('"깨달음의 탑" 버튼 찾기', () => mod.findEnlightenmentTowerButton());
+    if (!towerBtn) {
+      Core.notifyStopped('rejob', '"깨달음의 탑"이 생성된 것을 확인하지 못했습니다.');
+      return null;
+    }
+    towerBtn.click();
+    await mod.clickDelayWait();
+
+    // 50회 전투 버튼이 아니라 1회 전투로 즉시 레벨 100을 만들어주는 경로이므로
+    // 행동력 체크/농축 경험의 물약 체크를 하지 않고 곧바로 결과 화면만 확인한다.
+    const resultShown = await Core.retryStep(
+      '깨달음의 탑 전투 결과 화면 확인',
+      () => (/레벨\s*1\s*→\s*\d+\s*달성|전투\s*후\s*중단|\d+\s*회\s*전투\s*완료/.test(Core.bodyText()) ? true : null),
+      { attempts: 4, waits: [2000, 4000, 6000, 9000] }
+    );
+    if (!resultShown) {
+      Core.notifyStopped('rejob', '깨달음의 탑 전투 결과 화면을 확인하지 못했습니다.');
+      return null;
+    }
+
+    const text = Core.bodyText();
+    const levelMatch = text.match(/레벨\s*\/\s*경험치[^\d]*(\d+)/);
+    const goldMatch = text.match(/골드\s*\n?\s*([\d,]+)/);
+
+    return {
+      level: levelMatch ? parseInt(levelMatch[1], 10) : null,
+      gold: goldMatch ? parseInt(goldMatch[1].replace(/,/g, ''), 10) : null,
+      tierUsed: { short: '숨겨진 방(깨달음의 탑)' },
+      viaHiddenRoomMap: true,
+    };
+  };
+
   Modules.rejob.refillExpPotion = async function () {
+    const mod = this;
     Core.log('rejob', '농축 경험의 물약 보충 시도 (인벤토리 이동)');
     await Core.clickNavMenuExact('캐릭', '인벤토리');
     await Core.waitFor(() => Core.bodyText().includes('보유 아이템'));
@@ -778,38 +763,69 @@
       await Core.humanDelay(500, 1000);
     }
 
-    const row = [...document.querySelectorAll('*')]
-      .filter((el) => el.textContent.trim().startsWith('농축 경험의 물약'))
-      .sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length)[0];
-    if (!row) {
-      Core.notifyStopped('rejob', '"농축 경험의 물약"이 없습니다! 인벤토리를 채워주세요.');
+    const rowContainer = await Core.retryStep('농축 경험의 물약 항목 컨테이너 찾기', () => {
+      const candidates = [...document.querySelectorAll('*')].filter((el) => {
+        if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
+        if (!el.textContent.trim().startsWith('농축 경험의 물약')) return false;
+        return [...el.querySelectorAll('button')].some((b) => b.textContent.trim() === '사용');
+      });
+      if (candidates.length === 0) return null;
+      return candidates.reduce((a, b) => (a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b));
+    });
+    if (!rowContainer) {
+      Core.notifyStopped('rejob', '"농축 경험의 물약" 항목을 찾지 못했습니다 (없거나 화면 구조가 다를 수 있음).');
       return false;
     }
-    if (/x\s*0\b/.test(row.textContent)) {
+    if (/x\s*0\b|보유:\s*0\b/.test(rowContainer.textContent)) {
       Core.notifyStopped('rejob', '농축 경험의 물약 없음! 수동으로 채워주세요.');
       return false;
     }
 
-    const rowContainer = row.closest('tr') || row.closest('li') || row.parentElement.parentElement;
-    const useBtn = await Core.retryStep('농축 경험의 물약 "사용" 버튼 찾기', () =>
-      rowContainer ? [...rowContainer.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용') || null : null
-    );
+    const useBtn = [...rowContainer.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
     if (!useBtn) {
-      Core.notifyStopped('rejob', '농축 경험의 물약 "사용" 버튼을 찾지 못했습니다 (여러 번 재시도 후에도 실패).');
+      Core.notifyStopped('rejob', '농축 경험의 물약 "사용" 버튼을 찾지 못했습니다.');
       return false;
     }
     useBtn.click();
-    await Core.humanDelay(500, 1000);
+    await mod.clickDelayWait();
 
-    const confirmDialog = await Core.waitFor(() => Core.bodyText().includes('사용하시겠습니까'), 3000);
-    if (confirmDialog) {
-      const confirmBtn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
+    const qtyDialogEl = await Core.retryStep(
+      '농축 경험의 물약 수량 확인 팝업 찾기',
+      () => {
+        const candidates = [...document.querySelectorAll('*')].filter((el) => {
+          if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
+          return el.textContent.includes('사용할 개수');
+        });
+        if (candidates.length === 0) return null;
+        return candidates.reduce((a, b) => (a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b));
+      },
+      { attempts: 2, waits: [800, 1500] }
+    );
+    if (qtyDialogEl) {
+      const qtyInput = qtyDialogEl.querySelector('input[type="number"]');
+      if (qtyInput) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeSetter.call(qtyInput, 1);
+        qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
+        await mod.clickDelayWait();
+      }
+      const qtyConfirmBtn = [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
+      if (qtyConfirmBtn) {
+        qtyConfirmBtn.click();
+        await mod.clickDelayWait();
+      }
+    } else {
+      const confirmBtn = await Core.retryStep(
+        '농축 경험의 물약 사용 확인 팝업의 "사용" 버튼 찾기',
+        () => (Core.bodyText().includes('사용하시겠습니까') ? Core.findButtonInDialog('사용하시겠습니까', '사용') : null),
+        { attempts: 2, waits: [800, 1500] }
+      );
       if (confirmBtn) {
         confirmBtn.click();
-        await Core.humanDelay(500, 1000);
+        await mod.clickDelayWait();
       }
     }
-    Core.log('rejob', '농축 경험의 물약 사용 완료');
+    Core.log('rejob', '농축 경험의 물약 1개 사용 완료');
     return true;
   };
 
@@ -831,6 +847,40 @@
     return score;
   };
 
+  // v1.2.27: 사냥 경로(일반 사냥터 / 숨겨진 방의 지도) 종류와 무관하게 공통으로
+  // 실행하는 마무리 단계(골드 입금, 강함점수 체크, 사이클 카운트, 휴식)를 하나로 묶음.
+  Modules.rejob.finishCycleCommon = async function (result) {
+    const mod = this;
+    if (result.gold !== null && result.gold > 1000000) {
+      await Core.bankDepositAll('rejob');
+    }
+    if (!mod.running) return;
+
+    const score = await mod.checkStrongScore();
+    if (score !== null && score > mod.config.targetScore) {
+      Core.notifyCompleted(
+        'rejob',
+        `강함 점수 ${score.toLocaleString()}이(가) 목표치(${mod.config.targetScore.toLocaleString()})를 초과했습니다! 목표를 달성하여 정지합니다.`
+      );
+      return;
+    }
+
+    mod.cycleCount += 1;
+    Core.updateModuleButtons();
+
+    if (mod.config.maxRejobCount > 0 && mod.cycleCount >= mod.config.maxRejobCount) {
+      Core.notifyCompleted('rejob', `설정하신 최대 재전직 횟수(${mod.config.maxRejobCount})에 도달하여 정지합니다.`);
+      return;
+    }
+
+    const restThreshold = Core.rand(mod.config.restEvery[0], mod.config.restEvery[1]);
+    if (mod.cycleCount % restThreshold === 0) {
+      const restSec = Core.rand(mod.config.restSeconds[0], mod.config.restSeconds[1]);
+      Core.log('rejob', `${restThreshold}사이클 도달 → ${restSec}초 휴식`);
+      await Core.sleep(restSec * 1000);
+    }
+  };
+
   Modules.rejob.runCycle = async function () {
     const mod = this;
     if (!mod.skipRejobThisCycle) {
@@ -840,8 +890,19 @@
       Core.log('rejob', '직전 사냥에서 100레벨 미달 → 재전직 생략하고 재사냥만 진행');
     }
 
-    const result = await mod.doHunt();
+    // v1.2.27: "숨겨진 방의 지도" 옵션이 켜져 있으면 일반 사냥터(50연전) 대신
+    // 광산에서 지도로 "깨달음의 탑"을 만들어 1회 전투로 레벨 100을 만든다.
+    const result = mod.config.useHiddenRoomMap ? await mod.doHiddenRoomHunt() : await mod.doHunt();
     if (!result || !mod.running) return;
+
+    if (result.viaHiddenRoomMap) {
+      Core.log('rejob', `결과(숨겨진 방의 지도) - 레벨:${result.level} 골드:${result.gold?.toLocaleString()}`);
+      // 깨달음의 탑은 무조건 레벨 100으로 만들어주므로 레벨 미달 재시도 로직이나
+      // 농축 경험의 물약/활력의 포션 보충 로직을 거치지 않고 바로 마무리 단계로 진행한다.
+      mod.skipRejobThisCycle = false;
+      await mod.finishCycleCommon(result);
+      return;
+    }
 
     Core.log(
       'rejob',
@@ -873,37 +934,10 @@
     }
     if (!mod.running) return;
 
-    if (result.gold !== null && result.gold > 1000000) {
-      await Core.bankDepositAll('rejob');
-    }
-    if (!mod.running) return;
-
     await mod.refillEnergyIfNeeded();
     if (!mod.running) return;
 
-    const score = await mod.checkStrongScore();
-    if (score !== null && score > mod.config.targetScore) {
-      Core.notifyStopped(
-        'rejob',
-        `강함 점수 ${score.toLocaleString()}이(가) 목표치(${mod.config.targetScore.toLocaleString()})를 초과했습니다! 목표를 달성하여 정지합니다.`
-      );
-      return;
-    }
-
-    mod.cycleCount += 1;
-    Core.updateModuleButtons();
-
-    if (mod.config.maxRejobCount > 0 && mod.cycleCount >= mod.config.maxRejobCount) {
-      Core.notifyStopped('rejob', `설정하신 최대 재전직 횟수(${mod.config.maxRejobCount})에 도달하여 정지합니다.`);
-      return;
-    }
-
-    const restThreshold = Core.rand(mod.config.restEvery[0], mod.config.restEvery[1]);
-    if (mod.cycleCount % restThreshold === 0) {
-      const restSec = Core.rand(mod.config.restSeconds[0], mod.config.restSeconds[1]);
-      Core.log('rejob', `${restThreshold}사이클 도달 → ${restSec}초 휴식`);
-      await Core.sleep(restSec * 1000);
-    }
+    await mod.finishCycleCommon(result);
   };
 
   Modules.rejob.mainLoop = async function () {
@@ -939,14 +973,10 @@
       floor: null,
       goldThreshold: 1000000,
       minEnergy: 100,
-      ignoreProtectionOff: false, // 체크 시 보호용 기름(장비 보호)이 없어도 정지하지 않고 계속 사냥
+      ignoreProtectionOff: false,
     },
   };
 
-  // v1.2.17 버그 수정: "에렌시아"는 마을 이름이라 계정마다 다를 수 있는데 라벨에
-  // 하드코딩되어 있었음. 실제 이동 로직(Core.clickNavMenuSuffix)은 마을 이름과 무관하게
-  // 지역 접미사("탑", "광산" 등)로만 메뉴 항목을 찾으므로 동작엔 문제없었지만, 라벨
-  // 표시가 오해를 줄 수 있어 지역명만 표시하도록 수정.
   Modules.autohunt.GROUND_OPTIONS = [
     { label: '평야', suffix: '평야', hasFloor: false },
     { label: '늪', suffix: '늪', hasFloor: false },
@@ -983,10 +1013,6 @@
     return { cur: this.parseNumber(m[1]), max: this.parseNumber(m[2]) };
   };
 
-  // v1.2.15 버그 수정: 매 사이클마다 무조건 "전투" 메뉴를 다시 열어 사냥터로
-  // 재진입하고 있어서(메뉴 클릭 + 항목 클릭 + 대기가 매번 반복됨) 사냥 속도가 크게
-  // 느려지는 문제가 있었음. 이미 사냥 버튼("x50")이 보이는 화면이면 재진입 없이
-  // 그대로 진행하고, 은행/수리 등으로 자리를 옮겼을 때만 실제로 재진입하도록 수정.
   Modules.autohunt.ensureOnGround = async function (groundSuffix, floor) {
     if (this.findHuntX50Button()) {
       if (floor) {
@@ -1365,54 +1391,45 @@
     Core.updateModuleButtons();
   };
 
-  // -------------------------- 모듈 4: 던전 (v1.2 신규) --------------------------
-  // 5개 던전을 아래 우선순위로 순회: 입장권이 있는 던전만 실제로 입장한다.
-  //   [구] 수행자의 탑: 상층부 > 수행자의 탑: 상층부 > [구] 신비의 동굴 > 신비의 동굴 > 지하 하수도(일일)
+  // -------------------------- 모듈 4: 던전 --------------------------
   Modules.dungeon = {
     id: 'dungeon',
     running: false,
     stopRequested: false,
-    cycleCount: 0, // 오늘 클리어한 던전 개수
+    cycleCount: 0,
     config: {
-      enableDailySewer: true, // 일일 던전 중 "지하 하수도"만 자동화 대상 (깊은 숲속/각성의 탑은 비활성화)
-      rerollMinTokens: 50, // 이 값 미만이면 리롤 안 하고 넘어가기
-      // 던전별 즉시완료(즉시 최상층 도전) 시도 기준 - 0으로 두면 해당 던전은 즉시완료 시도 안 함.
-      // 정확한 적중치/회피치는 게임 화면에 표시되지 않아, 아래 공식으로 근사 계산함(공격속도 ≈ 속도로 근사, 무기 무게 미반영 - 추후 보정 필요):
-      //   회피치(EV) ≈ 지능*3.5 + 행운*2 + 속도*2
-      //   적중치(AC) ≈ 정신*2.8 + 행운*1.6 + 속도*1.6
+      enableDailySewer: true,
+      rerollMinTokens: 50,
       instantClear: {
         oldMasterTower: { targetAC: 4000, targetEV: 4500 },
         masterTower: { targetAC: 4000, targetEV: 4500 },
         oldMysticCave: { targetAC: 5500, targetEV: 6000 },
         mysticCave: { targetAC: 5500, targetEV: 6000 },
-        sewer: { targetAC: 0, targetEV: 0 }, // 확인된 기준치 없음 - 기본은 시도 안 함(0=비활성)
+        sewer: { targetAC: 0, targetEV: 0 },
       },
     },
-    // 실행 중 상태
     currentDungeonId: null,
-    difficulty: '매우어려움', // 'shim' 상태에서 항상 최우선. 패배 시 '어려움'으로 하향(다시 못 올림).
+    difficulty: '매우어려움',
     deathLimit: null,
     instantClearTried: false,
-    boughtGodStrikeOrEquiv: false, // 신의 일격/일격필살/회심의 일격 (신비의동굴/수행자의탑: 동급 1회 한정)
-    boughtGodStrikeExact: false, // 그 중 정확히 "신의 일격"이 구매됐는지 (즉시완료 추가조건 판단용)
-    allStatsBoughtCount: 0, // "모든 스탯" 구매 누적 횟수 (즉시완료 추가조건 판단용)
-    boughtSingleStat: {}, // { 속도:true, 행운:true, 정신:true, 지능:true, 힘:true, 생명:true, 체력:true, 마나:true }
-    // 일일 던전(지하 하수도) 전용: 신의일격/일격필살/회심의일격을 개별 우선순위로 취급
+    boughtGodStrikeOrEquiv: false,
+    boughtGodStrikeExact: false,
+    allStatsBoughtCount: 0,
+    boughtSingleStat: {},
     boughtGodStrike: false,
-    boughtCertainHit: false, // 일격필살
-    boughtCritStrike: false, // 회심의 일격
+    boughtCertainHit: false,
+    boughtCritStrike: false,
     boughtRegen: false,
   };
 
-  // 던전 정의 (우선순위 순서 그대로)
   Modules.dungeon.DUNGEONS = [
     {
       id: 'oldMasterTower',
       label: '[구] 수행자의 탑: 상층부',
       requiredItemName: '수행자의 열쇠',
       daily: false,
-      statMode: 'standard', // 속도/행운/정신/지능 각 1회, 금/칠색 등급만
-      abilityMode: 'equalPriority', // 신의일격/일격필살/회심의일격 동급 취급
+      statMode: 'standard',
+      abilityMode: 'equalPriority',
     },
     {
       id: 'masterTower',
@@ -1437,8 +1454,6 @@
       daily: false,
       statMode: 'standard',
       abilityMode: 'equalPriority',
-      // v1.2.16 신규: 즉시완료(즉시 최상층 도전) 추가 조건 - 적중/회피 기준치를
-      // 충족해도, 신의 일격과 모든 스탯을 충분히 먹기 전에는 시도하지 않도록 함.
       instantClearRequirement: { requireGodStrike: true, minAllStats: 2, requireStats: [] },
     },
     {
@@ -1446,10 +1461,8 @@
       label: '지하 하수도',
       requiredItemName: null,
       daily: true,
-      statMode: 'extended', // 재생4/5, 힘/생명/체력/마나까지 포함
-      abilityMode: 'ordered', // 신의일격 > 일격필살 > 회심의일격 순서 (동급 아님)
-      // v1.2.16 신규: 신의 일격 + 모든 스탯 3회 이상 + 힘/속도 각 1회 이상 먹었을 때만
-      // 즉시완료를 시도하도록 함.
+      statMode: 'extended',
+      abilityMode: 'ordered',
       instantClearRequirement: { requireGodStrike: true, minAllStats: 3, requireStats: ['힘', '속도'] },
     },
   ];
@@ -1457,15 +1470,14 @@
   const STAT_TARGET_ORDER = ['속도', '행운', '정신', '지능'];
   const STAT_EXTENDED_ORDER = ['속도', '행운', '정신', '지능', '힘', '생명', '체력', '마나'];
   const GRADE_COLOR = {
-    gold: 'rgb(255, 215, 0)', // 금 등급
-    rainbow: 'rgb(255, 20, 147)', // 칠색 등급 (실제로는 진한 핑크색으로 렌더링됨)
+    gold: 'rgb(255, 215, 0)',
+    rainbow: 'rgb(255, 20, 147)',
   };
 
   Modules.dungeon.bodyTextClean = function () {
     return Core.bodyText();
   };
 
-  // ---- 던전 목록 화면 파싱 ----
   Modules.dungeon.getDungeonCardEl = function (label) {
     const heading = [...document.querySelectorAll('*')].find(
       (el) =>
@@ -1475,7 +1487,6 @@
         !el.closest('#lrm-banner')
     );
     if (!heading) return null;
-    // 카드 컨테이너: "입장" 버튼을 포함하는 가장 가까운 조상
     let node = heading;
     for (let i = 0; i < 8; i++) {
       node = node.parentElement;
@@ -1488,7 +1499,7 @@
   };
 
   Modules.dungeon.getTicketCount = function (dungeonDef) {
-    if (dungeonDef.daily) return Infinity; // 일일 던전은 별도 소모 아이템 없음(입장 횟수 공유로 별도 체크)
+    if (dungeonDef.daily) return Infinity;
     const card = this.getDungeonCardEl(dungeonDef.label);
     if (!card) return 0;
     const m = card.textContent.match(new RegExp(`${dungeonDef.requiredItemName}\\s*\\(([\\d,]+)개\\s*보유\\)`));
@@ -1506,9 +1517,6 @@
     await Core.waitFor(() => Core.bodyText().includes('일일 던전'));
   };
 
-  // v1.2.2 신규: 던전 목록 화면에서 한 번에 5개 던전 전부의 입장권/완료 여부를 확인해
-  // "입장 가능한 던전 큐"를 만든다. 예전에는 던전마다 매번 메뉴를 다시 열어 하나씩
-  // 확인하느라 시간이 걸렸는데, 이제 목록 화면 한 번 로드로 전부 판단한다.
   Modules.dungeon.scanEligibleDungeons = function () {
     const queue = [];
     for (const dungeonDef of this.DUNGEONS) {
@@ -1536,7 +1544,6 @@
     return queue;
   };
 
-  // ---- 던전 입장 (캐릭터 정보 확인 모달 → 던전 입장 확인 모달) ----
   Modules.dungeon.enterDungeon = async function (dungeonDef) {
     const card = this.getDungeonCardEl(dungeonDef.label);
     if (!card) {
@@ -1552,7 +1559,6 @@
     enterBtn.click();
     await Core.humanDelay(1000, 1800);
 
-    // 1) 캐릭터 정보 확인 모달
     const charModalConfirm = await Core.retryStep(
       '캐릭터 정보 모달의 확인 버튼 찾기',
       () => {
@@ -1566,14 +1572,12 @@
       await Core.humanDelay(1000, 1900);
     }
 
-    // 캐릭터 정보 모달이 실제로 닫혔는지 확인 (안 닫혔으면 아직 남은 다른 확인 절차가 있을 수 있음)
     await Core.retryStep(
       '캐릭터 정보 모달 닫힘 확인',
       () => (!Core.bodyText().includes('캐릭터 정보') ? true : null),
       { attempts: 3, waits: [1000, 2000, 3000] }
     );
 
-    // 2) 던전 입장 확인 모달 (사망 허용 횟수 파싱)
     const entryModalFound = await Core.retryStep(
       '던전 입장 확인 모달 찾기',
       () => (Core.bodyText().includes('던전 입장 확인') ? true : null),
@@ -1582,10 +1586,6 @@
     if (!entryModalFound) {
       Core.log('dungeon', '"던전 입장 확인" 모달을 확인하지 못했습니다 (이미 입장됐을 수 있음).');
     } else {
-      // v1.2.22 개선: 모달 헤딩은 떴지만 안의 "N번 사망 시..." 문구는 한 박자 늦게
-      // 렌더링되는 경우가 있어("부활 허용: 알 수 없음"으로 로그되던 원인) 짧게 재시도.
-      // 참고: deathLimit은 로그 표시용일 뿐 실제 강제퇴장 판단에는 쓰이지 않으므로
-      // 여기서 못 읽어도 게임 진행 자체에는 영향 없음.
       const deathMatch = await Core.retryStep(
         '부활 허용 횟수 문구 찾기',
         () => Core.bodyText().match(/(\d+)\s*번\s*사망\s*시\s*던전에서\s*강제\s*퇴장/),
@@ -1613,7 +1613,6 @@
       return false;
     }
 
-    // 새 던전 진입 시 상태 초기화
     this.difficulty = '매우어려움';
     this.instantClearTried = false;
     this.boughtGodStrikeOrEquiv = false;
@@ -1627,7 +1626,6 @@
     return true;
   };
 
-  // ---- 진행도/전투 화면 ----
   Modules.dungeon.readProgress = function () {
     const m = Core.bodyText().match(/진행도\s*\n?\s*(\d+)\s*\/\s*15/);
     return m ? parseInt(m[1], 10) : null;
@@ -1644,7 +1642,6 @@
     return true;
   };
 
-  // 캐릭터 스탯 읽기 (자세히 패널이 아니라 상단 요약 or 게임 메인 정보 패널의 힘/생명/정신/지능/행운/속도)
   Modules.dungeon.readStats = function () {
     const text = Core.bodyText();
     const grab = (label) => {
@@ -1661,7 +1658,6 @@
     };
   };
 
-  // 무기 무게 데이터가 없어 공격속도 ≈ 속도로 근사 계산 (아래 getCurrentACEV의 폴백용)
   Modules.dungeon.estimateACEV = function () {
     const s = this.readStats();
     if (!s || s.속도 == null) return null;
@@ -1671,13 +1667,6 @@
     return { AC, EV };
   };
 
-  // v1.2.7: "자세히"를 펼치면 실제 적중치/회피치 수치가 화면에 그대로 표시된다는 것을
-  // 확인함. 근사 공식 대신 이 실제 값을 우선 사용하도록 수정(근사식은 폴백으로만 유지).
-  // v1.2.10 버그 수정: "자세히" 버튼은 힘/생명/정신/지능/행운/속도 원본 스탯과
-  // 직업/메인 어빌리티를 보여주는 별개의 토글이었고, 적중치/회피치는 캐릭터 이름 옆의
-  // 화살표(▲/▼) 토글을 눌러야 나오는 것이었음(사용자가 스크린샷으로 확인해줌).
-  // 캐릭터 카드(무기/방어구/장신구 + HP/MP가 함께 있는 컨테이너) 안에서 "자세히"가
-  // 아닌 버튼(이름 옆 화살표 토글)을 찾아 클릭하도록 수정.
   Modules.dungeon.findCombatStatsToggleButton = function () {
     const cardCandidates = [...document.querySelectorAll('*')].filter((el) => {
       if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
@@ -1727,8 +1716,6 @@
     return est ? { AC: est.AC, EV: est.EV, isReal: false } : null;
   };
 
-  // v1.2.16 신규: 던전별 즉시완료 추가 조건(신의 일격 구매 여부, 모든 스탯 누적 구매
-  // 횟수, 특정 단일 스탯 구매 여부) 검사. 조건이 없으면 항상 통과.
   Modules.dungeon.meetsInstantClearRequirement = function (dungeonDef) {
     const req = dungeonDef.instantClearRequirement;
     if (!req) return { ok: true };
@@ -1764,26 +1751,18 @@
         'dungeon',
         `즉시완료 기준 미달 (${tag} 적중 ${Math.round(est.AC)}/${target.targetAC}, ${tag} 회피 ${Math.round(est.EV)}/${target.targetEV}) → 다음 전투에서 다시 확인`
       );
-      // v1.2.6 버그 수정: 여기서 instantClearTried를 true로 세우면 스탯이 나중에 기준을
-      // 넘어도 다시는 확인하지 않게 됨(그래서 "회피/적중을 초과했는데도 즉완을 누르지
-      // 않는다"는 문제가 발생). "실패"는 실제로 도전을 시도했다가 진 경우를 말하는
-      // 것이므로, 기준 미달로 아직 시도조차 안 한 경우엔 플래그를 세우지 않고 다음
-      // 전투에서 다시 확인하도록 둔다.
       return false;
     }
 
     const btn = Core.findButtonByText('즉시 최상층 도전');
     if (!btn || btn.disabled) {
       Core.log('dungeon', '"즉시 최상층 도전" 버튼을 사용할 수 없는 상태입니다 (캐릭터 등급 제한 등). 이후 재확인하지 않습니다.');
-      this.instantClearTried = true; // 버튼 자체를 못 쓰는 경우는 스탯이 올라도 의미 없으므로 여기서만 비활성화
+      this.instantClearTried = true;
       return false;
     }
     Core.log('dungeon', `즉시완료 기준 충족 (${tag} 적중 ${Math.round(est.AC)}/${target.targetAC}, ${tag} 회피 ${Math.round(est.EV)}/${target.targetEV}) → 즉시 최상층 도전 시도`);
     btn.click();
     await Core.humanDelay(1100, 2000);
-    // v1.2.11 버그 수정: "즉시 최상층 도전" 클릭 후 별도의 확인 팝업("도전"/"취소")이
-    // 뜨는데 이걸 처리하는 코드가 없어서, 확인을 안 누른 채로 전투 결과만 기다리다
-    // 계속 실패하던 문제 수정. 팝업이 뜨면 "도전" 버튼을 찾아 눌러서 확정한다.
     const confirmBtn = await Core.retryStep(
       '즉시 최상층 도전 확인 팝업의 "도전" 버튼 찾기',
       () => (Core.bodyText().includes('즉시 최상층 도전') ? Core.findButtonInDialog('즉시 최상층 도전', '도전') : null),
@@ -1795,15 +1774,10 @@
     } else {
       Core.log('dungeon', '즉시 최상층 도전 확인 팝업을 찾지 못했습니다 (이미 진행됐을 수 있음).');
     }
-    this.instantClearTried = true; // 실제로 도전을 시도했으므로 결과(승/패)와 무관하게 이후 재시도하지 않음
+    this.instantClearTried = true;
     return true;
   };
 
-  // v1.2.18 최적화: "전투 시작" 클릭이 가끔 씹혀서(버튼은 찾았지만 실제로 전투가
-  // 시작되지 않음) waitForBattleResult가 5번 재시도(약 30초)를 전부 채우고서야
-  // 다음 시도에서 성공하는 패턴이 반복되고 있었음. 클릭 직후 3초 안에 "전투 중"이나
-  // 결과 문구 등 반응이 있는지 짧게 확인하고, 반응이 없으면 그 자리에서 바로 한 번 더
-  // 클릭해서 30초를 그냥 날리는 대신 몇 초 안에 복구하도록 함.
   Modules.dungeon.startBattle = async function () {
     await this.selectDifficultyTab();
     const btn = await Core.retryStep('전투 시작 버튼 찾기', () => Core.findButtonByText('전투 시작'));
@@ -1846,7 +1820,6 @@
     return true;
   };
 
-  // ---- 상점 처리 ----
   Modules.dungeon.isShopScreen = function () {
     return /아이템\s*상점/.test(Core.bodyText());
   };
@@ -1860,17 +1833,11 @@
     return m ? parseInt(m[1], 10) : 0;
   };
 
-  // 상점 카드 3개를 { el, label, cost, gradeColor } 형태로 파싱
-  // v1.2.4: 예전 방식(텍스트 리프를 먼저 찾고 테두리 있는 조상을 역추적)이 실제
-  // 게임에서 카드 인식에 계속 실패해(토큰만 계속 쌓이고 구매/리롤이 전혀 안 됨) 아예
-  // 안 통했던 것으로 확인됨. 등급 테두리 색(금/칠색/은/동)이 정해져 있다는 걸 이용해
-  // "테두리 색이 일치하는 요소를 먼저 찾고, 그 요소의 텍스트를 라벨로 쓰는" 방식으로
-  // 완전히 뒤집어서 재작성 - 수동 테스트 때 실제로 안정적으로 동작을 확인한 방식.
   Modules.dungeon.GRADE_COLORS_ALL = [
-    'rgb(255, 215, 0)', // 금
-    'rgb(255, 20, 147)', // 칠색
-    'rgb(192, 192, 192)', // 은
-    'rgb(205, 127, 50)', // 동
+    'rgb(255, 215, 0)',
+    'rgb(255, 20, 147)',
+    'rgb(192, 192, 192)',
+    'rgb(205, 127, 50)',
   ];
 
   Modules.dungeon.getShopCards = function () {
@@ -1884,10 +1851,6 @@
     const seen = new Set();
     const cards = [];
     for (const el of bordered) {
-      // v1.2.5 버그 수정: el.textContent는 자식 요소 사이에 줄바꿈을 넣어주지 않아서,
-      // 라벨("행운 +98")과 바로 옆의 가격 숫자("30")가 구분자 없이 그대로 붙어
-      // "행운 +9830" 같은 엉뚱한 라벨로 파싱되는 문제가 있었음. 렌더링된 줄바꿈을
-      // 반영하는 innerText를 사용해 첫 줄(라벨)만 정확히 가져오도록 수정.
       const label = (el.innerText || el.textContent).trim().split('\n')[0].trim();
       if (!label || label.length > 30 || seen.has(label)) continue;
       seen.add(label);
@@ -1897,9 +1860,6 @@
     return cards;
   };
 
-  // v1.2.9: 라벨 앞에 아이콘/공백 등 예기치 않은 문자가 섞여 들어와 ^ 고정 매칭이
-  // 실패하는 사례가 있어(예: "모든 스탯 +42"를 못 알아보고 그냥 넘어감), 문자열 시작
-  // 고정(^) 없이 어디에 있어도 매칭되도록 전부 완화함.
   Modules.dungeon.isRegenLabel = function (label) {
     return /재생\s*LV\s*[45]/.test(label);
   };
@@ -1927,9 +1887,7 @@
     return borderColor === GRADE_COLOR.gold || borderColor === GRADE_COLOR.rainbow;
   };
 
-  // 우선순위대로 이번 상점에서 살 카드를 고른다. 없으면 null 반환.
   Modules.dungeon.pickShopCard = function (dungeonDef, cards, isLastShopBeforeBoss) {
-    // 1) 어빌리티 (신의 일격 / 일격필살 / 회심의 일격)
     if (dungeonDef.abilityMode === 'equalPriority') {
       if (!this.boughtGodStrikeOrEquiv) {
         const abilityCard = cards.find((c) => this.isGodStrikeFamily(c.label));
@@ -1945,7 +1903,6 @@
         }
       }
     } else {
-      // 일일 던전: 신의일격 > 일격필살 > 회심의일격 순서
       if (!this.boughtGodStrike) {
         const c = cards.find((c) => /신의\s*일격/.test(c.label));
         if (c)
@@ -1959,14 +1916,12 @@
       }
     }
 
-    // 2) 모든 스탯 (수치 높은 것 우선)
     const allStatCards = cards.filter((c) => this.isAllStatsLabel(c.label));
     if (allStatCards.length > 0) {
       allStatCards.sort((a, b) => this.parseAllStatsValue(b.label) - this.parseAllStatsValue(a.label));
       return { card: allStatCards[0], onBought: () => (this.allStatsBoughtCount += 1) };
     }
 
-    // 3) (일일 던전만) 일격필살 > 회심의 일격
     if (dungeonDef.abilityMode === 'ordered') {
       if (!this.boughtCertainHit) {
         const c = cards.find((c) => /일격\s*필살/.test(c.label));
@@ -1976,14 +1931,12 @@
         const c = cards.find((c) => /회심의\s*일격/.test(c.label));
         if (c) return { card: c, onBought: () => (this.boughtCritStrike = true) };
       }
-      // 4) 재생4/5
       if (!this.boughtRegen) {
         const c = cards.find((c) => this.isRegenLabel(c.label));
         if (c) return { card: c, onBought: () => (this.boughtRegen = true) };
       }
     }
 
-    // 5) 단일 스탯 (금/칠색 등급만, 스탯당 1회) - 던전 종류에 따라 대상 스탯 범위 다름
     const statOrder = dungeonDef.statMode === 'extended' ? STAT_EXTENDED_ORDER : STAT_TARGET_ORDER;
     const statCandidates = cards
       .map((c) => ({ c, parsed: this.parseStatLabel(c.label) }))
@@ -2000,7 +1953,6 @@
       return { card: best.c, onBought: () => (this.boughtSingleStat[best.parsed.stat] = true) };
     }
 
-    // 6) 마지막 스테이지(15번째) 직전 상점: 위 우선순위에 맞는 게 없으면 아무거나 수치 높은 것 구매
     if (isLastShopBeforeBoss && cards.length > 0) {
       const withValue = cards.map((c) => {
         const stat = this.parseStatLabel(c.label);
@@ -2015,7 +1967,7 @@
   };
 
   Modules.dungeon.handleShop = async function (dungeonDef, progress) {
-    const isLastShopBeforeBoss = progress === 14; // 14번째 몬스터를 잡은 직후 상점 = 15번째(보스) 직전
+    const isLastShopBeforeBoss = progress === 14;
     let rerollGuard = 0;
     while (this.running) {
       const tokens = this.getShopTokenCount();
@@ -2026,10 +1978,6 @@
       }
 
       const pick = this.pickShopCard(dungeonDef, cards, isLastShopBeforeBoss);
-      // v1.2.21 신규: 리롤을 이미 한 번이라도 돌린 뒤에는(=첫 판단에 신의 일격/모든
-      // 스탯이 없어서 리롤을 시작한 것이므로) 신의 일격 계열이나 모든 스탯이 아니면
-      // 사지 않고 계속 리롤한다. 리롤을 아예 안 한 최초 판단(rerollGuard===0)이거나
-      // 마지막 스테이지 직전 상점(isLastShopBeforeBoss)에서는 기존 우선순위 그대로 허용.
       const isPremiumPick = pick && (this.isGodStrikeFamily(pick.card.label) || this.isAllStatsLabel(pick.card.label));
       const shouldBuyNow = pick && (isLastShopBeforeBoss || rerollGuard === 0 || isPremiumPick);
 
@@ -2055,10 +2003,8 @@
         if (bought) {
           pick.onBought();
           Core.log('dungeon', `상점 구매: ${pick.card.label}`);
-          // 구매하면 자동으로 다음 화면으로 넘어감
           return;
         }
-        // 구매 실패(토큰 부족 등으로 선택이 안 먹었을 가능성) - 넘어가기로 폴백
         Core.log('dungeon', `"${pick.card.label}" 구매를 확인하지 못함(재시도 포함) - 넘어가기로 진행`);
         break;
       }
@@ -2066,12 +2012,6 @@
         Core.log('dungeon', `리롤 중 - "${pick.card.label}"은 신의 일격/모든 스탯이 아니라 구매하지 않고 계속 리롤합니다.`);
       }
 
-      // 우선순위에 맞는 게 없음: 토큰 충분하면 리롤, 아니면 넘어가기
-      // v1.2.20 버그 수정: 리롤 최대 횟수를 15회로 임의 제한해뒀던 게, 토큰이 아직
-      // 50개 넘게 남아있는데도 운 나쁘게 15번 안에 원하는 게 안 뜨면 리롤을 그만두고
-      // 그냥 넘어가버리는 원인이었음("토큰이 넘쳐도 리롤을 안 한다"는 제보와 일치).
-      // "토큰 50 이상이면 계속 리롤"이라는 규칙 그대로, 안전장치용 상한만 훨씬 높여서
-      // 사실상 토큰 잔량 자체가 자연스러운 멈춤 조건이 되도록 함.
       if (!isLastShopBeforeBoss && tokens >= this.config.rerollMinTokens && rerollGuard < 200) {
         const rerollBtn = Core.findButtonByText('리롤');
         if (rerollBtn && !rerollBtn.disabled) {
@@ -2094,9 +2034,6 @@
     }
   };
 
-  // ---- 한 던전 전체 클리어 루프 ----
-  // opts.resume === true 이면 이미 던전 안에 들어와 있는 상태(스크립트 재시작 등)로 보고
-  // enterDungeon()을 건너뛰고 현재 화면부터 바로 이어서 처리한다.
   Modules.dungeon.runOneDungeon = async function (dungeonDef, opts = {}) {
     if (!opts.resume) {
       Core.log('dungeon', `"${dungeonDef.label}" 입장 시도`);
@@ -2104,12 +2041,6 @@
       if (!entered || !this.running) return false;
     } else {
       Core.log('dungeon', `"${dungeonDef.label}" 이미 진행 중이던 상태에서 이어서 진행합니다.`);
-      // 이어하기 시에는 이전 실행에서 무엇을 샀었는지 알 수 없으므로 안전하게 리셋.
-      // (최악의 경우 이미 가진 단일 스탯을 한 번 더 사는 정도의 사소한 손해만 발생)
-      // v1.2.8 버그 수정: 여기서 instantClearTried를 true로 세우면 이어하기 세션에서는
-      // 즉시완료를 영영 확인하지 않게 됨(스탯이 기준을 넘겨도 매 전투 재확인하는 최신
-      // 로직과 모순됨). 이어하기여도 아직 실제로 도전한 적은 없으므로 false로 유지해서
-      // 정상적으로 매 전투 재확인하도록 함.
       this.instantClearTried = false;
       this.boughtGodStrikeOrEquiv = false;
       this.boughtGodStrikeExact = false;
@@ -2142,9 +2073,6 @@
         }
         claimBtn.click();
         await Core.humanDelay(1100, 2000);
-        // v1.2.3: 실제로 보상을 받고 화면을 벗어났는지 확인한 뒤에만 "클리어"로 카운트.
-        // (버튼만 찾으면 바로 클리어로 기록하던 예전 로직은 클릭이 실패해도 클리어로
-        // 잘못 기록될 수 있었음 - 보상 수령 = 클리어라는 원칙에 맞게 수정)
         const left = await Core.retryStep(
           '보상 수령 후 화면 전환 확인',
           () => (!this.isDungeonCompleteScreen() ? true : null),
@@ -2167,7 +2095,6 @@
         continue;
       }
 
-      // 전투 화면 (진행도 X/15, 난이도 선택 + 전투 시작)
       if (/이번\s*전투에서\s*상대할/.test(Core.bodyText())) {
         let result = null;
         let resultWasInstant = false;
@@ -2199,10 +2126,6 @@
           continue;
         }
         if (result === 'lose') {
-          // v1.2.17 버그 수정: 즉시완료(즉시 최상층 도전)는 항상 매우어려움 고정으로
-          // 진행되는 별개의 도전이라, 여기서 지면 그건 "정공법 전투에서 진 것"이 아님.
-          // 즉시완료 실패는 그냥 이후 이 던전에서 즉시완료를 다시 시도하지 않는다는
-          // 의미일 뿐, 정공법 난이도(매우어려움→어려움 하향)에는 영향을 주면 안 됨.
           if (resultWasInstant) {
             Core.log('dungeon', '즉시완료(즉시 최상층 도전) 실패 - 난이도는 그대로 유지하고 정공법으로 15단계까지 계속 진행합니다.');
           } else {
@@ -2212,13 +2135,6 @@
               Core.log('dungeon', '매우어려움에서 패배 → 이후 어려움으로 난이도를 낮춰서 계속 진행 (다시 올리지 않음)');
             }
           }
-          // v1.2.19 버그 수정: 패배 직후 "결과 화면"에는 원래부터 "진행도" 텍스트가
-          // 없어서(그 화면 자체가 승리/패배 결과만 보여주는 화면이라 진행도 바가 없음),
-          // "돌아가기"를 누르기 전에 이 텍스트 유무로 강제퇴장 여부를 판단하면 실제
-          // 퇴장 여부와 무관하게 매번 "퇴장된 것으로 보임"으로 잘못 판정되고 있었음
-          // (그래서 보스전 근처에서 패배할 때마다 던전을 통째로 포기하던 원인).
-          // "돌아가기"를 먼저 누른 뒤, 그 다음 화면이 던전 안(전투/상점)인지 목록
-          // 화면인지로 정확히 판단하도록 순서를 바꿈.
           await this.clickBackFromResult();
           const stillInDungeon = await Core.waitFor(
             () => (/진행도|아이템\s*상점/.test(Core.bodyText()) ? true : null),
@@ -2234,7 +2150,6 @@
         return false;
       }
 
-      // 어느 화면인지 판별 못한 경우: 잠시 대기 후 재확인
       await Core.sleep(1500);
       if (!/진행도|아이템\s*상점|던전\s*완료\s*보상/.test(Core.bodyText())) {
         Core.log('dungeon', '알 수 없는 화면 상태 - 정지합니다.');
@@ -2244,8 +2159,6 @@
     return false;
   };
 
-  // v1.2.3 신규: 스크립트를 다시 시작했을 때 이미 던전 안(전투/상점/완료 화면)에
-  // 들어와 있는 상태라면 그 던전 이름을 인식해서 이어서 진행할 수 있게 한다.
   Modules.dungeon.detectResumeDungeon = function () {
     if (!/진행도/.test(Core.bodyText())) return null;
     for (const d of this.DUNGEONS) {
@@ -2261,10 +2174,8 @@
     return null;
   };
 
-  const DUNGEON_CONFIG_KEY = 'lrm-dungeon-config'; // GUI 설정값(즉시완료 목표치, 리롤 기준 등) 저장용
+  const DUNGEON_CONFIG_KEY = 'lrm-dungeon-config';
 
-  // v1.2.13: 적중치/회피치 즉시완료 목표치, 리롤 최소 토큰, 일일 던전 체크 등 GUI
-  // 설정값이 새로고침할 때마다 초기화되던 것을 localStorage에 저장해서 유지되도록 함.
   Modules.dungeon.saveConfig = function () {
     try {
       localStorage.setItem(
@@ -2300,16 +2211,13 @@
     }
   };
 
-  const DUNGEON_CLEAR_COUNT_KEY = 'lrm-dungeon-cleared-today'; // 오늘 클리어한 던전 개수 저장용 (새로고침해도 유지)
+  const DUNGEON_CLEAR_COUNT_KEY = 'lrm-dungeon-cleared-today';
 
   Modules.dungeon.getTodayDateStr = function () {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   };
 
-  // v1.2.12 신규: "오늘 클리어한 던전" 개수가 페이지 새로고침/스크립트 재시작 때마다
-  // 0으로 초기화되던 것을 localStorage에 저장해서 유지되도록 함. 날짜가 바뀌면(다음 날)
-  // 자동으로 0부터 다시 센다.
   Modules.dungeon.loadClearCount = function () {
     try {
       const raw = localStorage.getItem(DUNGEON_CLEAR_COUNT_KEY);
@@ -2335,7 +2243,6 @@
     mod.cycleCount = mod.loadClearCount();
     Core.log('dungeon', `던전 자동클리어 시작 (오늘 이미 클리어한 던전: ${mod.cycleCount}개)`);
 
-    // 이미 던전 진행 중이던 화면이면(스크립트 재시작 등) 목록 화면으로 가지 않고 바로 이어서 처리
     const resumeDungeon = mod.detectResumeDungeon();
     if (resumeDungeon) {
       Core.log('dungeon', `이미 진행 중이던 "${resumeDungeon.label}"을(를) 인식했습니다 - 이어서 진행합니다.`);
@@ -2365,8 +2272,6 @@
     for (const dungeonDef of queue) {
       if (!mod.running) break;
 
-      // 이전 던전을 막 클리어했다면 "보상 받고 던전 나가기" 후 자동으로 던전 목록 화면에
-      // 돌아와 있으므로, 목록 화면이 아닐 때만 메뉴를 통해 다시 이동한다(불필요한 재진입 방지).
       if (!/일일\s*던전/.test(Core.bodyText())) {
         await mod.goToDungeonSelect();
       }
@@ -2450,7 +2355,7 @@
     return `flex:1; padding:6px; border:none; border-radius:4px; color:#fff; background:${color}; cursor:pointer; font-weight:bold;`;
   }
 
-  const REJOB_PERSIST_KEYS = ['targetScore', 'tierIndex', 'maxRejobCount'];
+  const REJOB_PERSIST_KEYS = ['targetScore', 'tierIndex', 'maxRejobCount', 'useHiddenRoomMap'];
 
   function buildRejobTab(container) {
     const mod = Modules.rejob;
@@ -2494,6 +2399,24 @@
     });
     container.appendChild(maxInput);
 
+    // v1.2.27 신규: "숨겨진 방의 지도" 사용 옵션. 체크 시 일반 사냥터(50연전) 대신
+    // 광산에서 지도로 "깨달음의 탑"을 만들어 1회 전투로 레벨 100을 만든다.
+    const hiddenRoomRow = document.createElement('div');
+    hiddenRoomRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
+    const hiddenRoomCheck = document.createElement('input');
+    hiddenRoomCheck.type = 'checkbox';
+    hiddenRoomCheck.checked = mod.config.useHiddenRoomMap;
+    hiddenRoomCheck.addEventListener('change', (e) => {
+      mod.config.useHiddenRoomMap = e.target.checked;
+      Core.saveModuleConfig('rejob', REJOB_PERSIST_KEYS);
+    });
+    const hiddenRoomLabel = document.createElement('span');
+    hiddenRoomLabel.textContent = '숨겨진 방의 지도로 사냥 대체 (광산 지도 → 깨달음의 탑, 1전투로 즉시 레벨100)';
+    hiddenRoomLabel.style.cssText = 'font-size:11px; color:#ccc;';
+    hiddenRoomRow.appendChild(hiddenRoomCheck);
+    hiddenRoomRow.appendChild(hiddenRoomLabel);
+    container.appendChild(hiddenRoomRow);
+
     const btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
     const startBtn = document.createElement('button');
@@ -2516,7 +2439,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [scoreInput, tierSelect, maxInput];
+    refs.inputs = [scoreInput, tierSelect, maxInput, hiddenRoomCheck];
   }
 
   const AUTOHUNT_PERSIST_KEYS = ['groundSuffix', 'floor', 'goldThreshold', 'minEnergy', 'ignoreProtectionOff'];
@@ -2685,7 +2608,7 @@
   function buildDungeonTab(container) {
     const mod = Modules.dungeon;
     const refs = UIRefs.dungeon;
-    mod.loadConfigIntoSelf(); // 저장된 GUI 설정값 복원 (즉시완료 목표치, 리롤 기준, 일일던전 체크)
+    mod.loadConfigIntoSelf();
 
     const dailyRow = document.createElement('div');
     dailyRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
@@ -2814,7 +2737,6 @@
     header.style.cssText = 'cursor:move; font-weight:bold; padding:8px 10px; background:#262626; border-radius:8px 8px 0 0; user-select:none;';
     panel.appendChild(header);
 
-    // 탭 바
     const tabBar = document.createElement('div');
     tabBar.style.cssText = 'display:flex; border-bottom:1px solid #444;';
     const tabButtons = {};
@@ -2853,7 +2775,6 @@
     }
     switchTab(activeTab);
 
-    // 공용 로그
     const logLabel = document.createElement('div');
     logLabel.textContent = '로그';
     logLabel.style.cssText = 'color:#ccc; font-size:11px; padding:0 10px;';
@@ -2867,7 +2788,6 @@
 
     document.body.appendChild(panel);
 
-    // 배너
     const banner = document.createElement('div');
     banner.id = 'lrm-banner';
     banner.style.cssText = `
@@ -2881,7 +2801,6 @@
     banner.querySelector('#lrm-banner-close').addEventListener('click', () => Core.hideBanner());
     Core.bannerEl = banner;
 
-    // 저장된 위치 복원
     const savedPos = Core.loadPanelPosition();
     if (savedPos && typeof savedPos.left === 'number' && typeof savedPos.top === 'number') {
       panel.style.left = `${savedPos.left}px`;
@@ -2889,7 +2808,6 @@
       panel.style.right = 'auto';
     }
 
-    // 드래그 이동 + 위치 저장
     let dragging = false,
       offsetX = 0,
       offsetY = 0;
