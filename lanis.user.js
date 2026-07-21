@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.2.16
+// @version      1.2.21
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -114,6 +114,36 @@
 //        - 지하 하수도: 신의 일격 구매 + 모든 스탯 누적 3회 이상 + 힘/속도 각 1회 이상
 //      DUNGEONS 정의에 instantClearRequirement를 추가하고, 신의 일격 정확 구매 여부
 //      (boughtGodStrikeExact)와 모든 스탯 누적 횟수(allStatsBoughtCount)를 새로 추적함.
+//   26) [버그 수정] 즉시완료(즉시 최상층 도전)는 항상 매우어려움 고정으로 진행되는
+//      별개의 도전인데, 여기서 지면 정공법 전투 패배와 똑같이 취급해서 난이도를
+//      매우어려움→어려움으로 낮춰버리던 문제 수정. 이제 즉시완료 실패는 "이후 이
+//      던전에서 즉시완료를 다시 시도하지 않는다"는 의미로만 처리하고, 난이도는 그대로
+//      유지한 채 정공법으로 15단계까지 계속 진행함(난이도 하향은 정공법 전투 패배시에만).
+//   27) [버그 수정] 자동사냥 사냥터 옵션 라벨에 "에렌시아"(마을 이름, 계정마다 다를 수
+//      있음)가 하드코딩되어 있던 것을 지역명("평야"/"탑"/"광산" 등)만 표시하도록 수정.
+//      실제 이동 로직은 원래도 마을 이름과 무관하게 지역 접미사로만 동작해 기능상 문제는
+//      없었지만, 표시가 오해를 줄 수 있어 정리함.
+//   28) [최적화] "전투 시작" 클릭이 가끔 씹혀서(버튼은 찾았지만 실제로 전투가 시작되지
+//      않음) 결과 확인이 5번 재시도(약 30초)를 전부 채우고서야 다음 시도에서 성공하는
+//      패턴이 반복되던 문제 완화. 클릭 직후 3초 안에 "전투 중"/결과 문구 등 반응이
+//      있는지 짧게 확인하고, 반응이 없으면 그 자리에서 바로 한 번 더 클릭해서 30초를
+//      그냥 날리는 대신 몇 초 안에 복구하도록 함.
+//   29) [버그 수정] 패배 시 강제퇴장 여부를 판단하는 로직이, "돌아가기"를 누르기 전인
+//      결과 화면(원래 "진행도" 텍스트가 없는 화면)에서 텍스트 유무를 검사하고 있어서
+//      실제 퇴장 여부와 무관하게 매 패배마다 "강제 퇴장된 것으로 보임"으로 잘못 판정해
+//      던전을 통째로 포기하던 심각한 버그 수정(보스전 근처에서 자꾸 멈추던 주 원인으로
+//      추정). "돌아가기"를 먼저 누른 뒤 그 다음 화면이 던전 안(전투/상점)인지 목록
+//      화면인지로 판단하도록 순서를 바로잡음.
+//   30) [버그 수정] 리롤을 최대 15회로 임의 제한해뒀던 게, 토큰이 아직 50개 넘게
+//      남아있는데도 운 나쁘게 15번 안에 원하는 아이템이 안 뜨면 리롤을 그만두고 그냥
+//      넘어가버리는 원인이었음("토큰이 넘쳐도 리롤을 안 한다"는 제보와 일치). "토큰
+//      50 이상이면 계속 리롤"이라는 규칙대로, 안전장치용 상한만 대폭 상향(200회)해서
+//      토큰 잔량 자체가 자연스러운 멈춤 조건이 되도록 수정. 리롤 조건 미충족 시 토큰
+//      수치를 로그로 남겨 앞으로 원인 추적이 쉽도록 함.
+//   31) [던전] 리롤을 이미 한 번이라도 돌린 뒤에는(=첫 판단에 신의 일격/모든 스탯이
+//      없어서 리롤을 시작한 것이므로) 신의 일격 계열이나 모든 스탯이 아니면 사지 않고
+//      계속 리롤하도록 함. 리롤을 아예 안 한 최초 판단이거나 마지막 스테이지 직전
+//      상점에서는 기존 우선순위(단일 스탯 등)를 그대로 허용.
 // ============================================================================
 
 (function () {
@@ -900,13 +930,17 @@
     },
   };
 
+  // v1.2.17 버그 수정: "에렌시아"는 마을 이름이라 계정마다 다를 수 있는데 라벨에
+  // 하드코딩되어 있었음. 실제 이동 로직(Core.clickNavMenuSuffix)은 마을 이름과 무관하게
+  // 지역 접미사("탑", "광산" 등)로만 메뉴 항목을 찾으므로 동작엔 문제없었지만, 라벨
+  // 표시가 오해를 줄 수 있어 지역명만 표시하도록 수정.
   Modules.autohunt.GROUND_OPTIONS = [
-    { label: '에렌시아의 평야 (평야)', suffix: '평야', hasFloor: false },
-    { label: '에렌시아의 늪 (늪)', suffix: '늪', hasFloor: false },
-    { label: '에렌시아의 숲 (숲)', suffix: '숲', hasFloor: false },
-    { label: '에렌시아의 탑 (탑)', suffix: '탑', hasFloor: false },
-    { label: '에렌시아의 지하 (지하)', suffix: '지하', hasFloor: false },
-    { label: '에렌시아의 광산 (광산)', suffix: '광산', hasFloor: true },
+    { label: '평야', suffix: '평야', hasFloor: false },
+    { label: '늪', suffix: '늪', hasFloor: false },
+    { label: '숲', suffix: '숲', hasFloor: false },
+    { label: '탑', suffix: '탑', hasFloor: false },
+    { label: '지하', suffix: '지하', hasFloor: false },
+    { label: '광산', suffix: '광산', hasFloor: true },
   ];
 
   Modules.autohunt.leafTextEls = function () {
@@ -1744,11 +1778,28 @@
     return true;
   };
 
+  // v1.2.18 최적화: "전투 시작" 클릭이 가끔 씹혀서(버튼은 찾았지만 실제로 전투가
+  // 시작되지 않음) waitForBattleResult가 5번 재시도(약 30초)를 전부 채우고서야
+  // 다음 시도에서 성공하는 패턴이 반복되고 있었음. 클릭 직후 3초 안에 "전투 중"이나
+  // 결과 문구 등 반응이 있는지 짧게 확인하고, 반응이 없으면 그 자리에서 바로 한 번 더
+  // 클릭해서 30초를 그냥 날리는 대신 몇 초 안에 복구하도록 함.
   Modules.dungeon.startBattle = async function () {
     await this.selectDifficultyTab();
     const btn = await Core.retryStep('전투 시작 버튼 찾기', () => Core.findButtonByText('전투 시작'));
     if (!btn) return false;
     btn.click();
+    const registered = await Core.waitFor(
+      () => (/전투\s*중|승리!|패배\.{2,}/.test(Core.bodyText()) ? true : null),
+      3000,
+      300
+    );
+    if (!registered) {
+      Core.log('dungeon', '전투 시작 클릭 반응이 없어 다시 클릭합니다.');
+      const btnAgain = Core.findButtonByText('전투 시작');
+      if (btnAgain && !btnAgain.disabled) {
+        btnAgain.click();
+      }
+    }
     await Core.humanDelay(1100, 2000);
     return true;
   };
@@ -1954,7 +2005,14 @@
       }
 
       const pick = this.pickShopCard(dungeonDef, cards, isLastShopBeforeBoss);
-      if (pick) {
+      // v1.2.21 신규: 리롤을 이미 한 번이라도 돌린 뒤에는(=첫 판단에 신의 일격/모든
+      // 스탯이 없어서 리롤을 시작한 것이므로) 신의 일격 계열이나 모든 스탯이 아니면
+      // 사지 않고 계속 리롤한다. 리롤을 아예 안 한 최초 판단(rerollGuard===0)이거나
+      // 마지막 스테이지 직전 상점(isLastShopBeforeBoss)에서는 기존 우선순위 그대로 허용.
+      const isPremiumPick = pick && (this.isGodStrikeFamily(pick.card.label) || this.isAllStatsLabel(pick.card.label));
+      const shouldBuyNow = pick && (isLastShopBeforeBoss || rerollGuard === 0 || isPremiumPick);
+
+      if (shouldBuyNow) {
         let bought = false;
         for (let buyAttempt = 0; buyAttempt < 2 && !bought; buyAttempt++) {
           pick.card.selectEl.click();
@@ -1983,9 +2041,17 @@
         Core.log('dungeon', `"${pick.card.label}" 구매를 확인하지 못함(재시도 포함) - 넘어가기로 진행`);
         break;
       }
+      if (pick && !isPremiumPick) {
+        Core.log('dungeon', `리롤 중 - "${pick.card.label}"은 신의 일격/모든 스탯이 아니라 구매하지 않고 계속 리롤합니다.`);
+      }
 
       // 우선순위에 맞는 게 없음: 토큰 충분하면 리롤, 아니면 넘어가기
-      if (!isLastShopBeforeBoss && tokens >= this.config.rerollMinTokens && rerollGuard < 15) {
+      // v1.2.20 버그 수정: 리롤 최대 횟수를 15회로 임의 제한해뒀던 게, 토큰이 아직
+      // 50개 넘게 남아있는데도 운 나쁘게 15번 안에 원하는 게 안 뜨면 리롤을 그만두고
+      // 그냥 넘어가버리는 원인이었음("토큰이 넘쳐도 리롤을 안 한다"는 제보와 일치).
+      // "토큰 50 이상이면 계속 리롤"이라는 규칙 그대로, 안전장치용 상한만 훨씬 높여서
+      // 사실상 토큰 잔량 자체가 자연스러운 멈춤 조건이 되도록 함.
+      if (!isLastShopBeforeBoss && tokens >= this.config.rerollMinTokens && rerollGuard < 200) {
         const rerollBtn = Core.findButtonByText('리롤');
         if (rerollBtn && !rerollBtn.disabled) {
           rerollBtn.click();
@@ -1993,6 +2059,9 @@
           rerollGuard += 1;
           continue;
         }
+        Core.log('dungeon', '리롤 버튼을 찾지 못했거나 비활성 상태입니다.');
+      } else if (!isLastShopBeforeBoss) {
+        Core.log('dungeon', `리롤 조건 미충족 (토큰 ${tokens}/${this.config.rerollMinTokens}) - 넘어가기로 진행`);
       }
       break;
     }
@@ -2080,6 +2149,7 @@
       // 전투 화면 (진행도 X/15, 난이도 선택 + 전투 시작)
       if (/이번\s*전투에서\s*상대할/.test(Core.bodyText())) {
         let result = null;
+        let resultWasInstant = false;
         for (let battleAttempt = 0; battleAttempt < 3 && !result && this.running; battleAttempt++) {
           let usedInstant = false;
           if (!this.instantClearTried) {
@@ -2095,7 +2165,9 @@
             }
           }
           result = await this.waitForBattleResult();
-          if (!result) {
+          if (result) {
+            resultWasInstant = usedInstant;
+          } else {
             Core.log('dungeon', `전투 결과 확인 실패 (시도 ${battleAttempt + 1}/3) - 재시도`);
             await Core.sleep(2000);
           }
@@ -2106,14 +2178,32 @@
           continue;
         }
         if (result === 'lose') {
-          Core.log('dungeon', `전투 패배 (난이도: ${this.difficulty})`);
-          if (this.difficulty === '매우어려움') {
-            this.difficulty = '어려움';
-            Core.log('dungeon', '매우어려움에서 패배 → 이후 어려움으로 난이도를 낮춰서 계속 진행 (다시 올리지 않음)');
+          // v1.2.17 버그 수정: 즉시완료(즉시 최상층 도전)는 항상 매우어려움 고정으로
+          // 진행되는 별개의 도전이라, 여기서 지면 그건 "정공법 전투에서 진 것"이 아님.
+          // 즉시완료 실패는 그냥 이후 이 던전에서 즉시완료를 다시 시도하지 않는다는
+          // 의미일 뿐, 정공법 난이도(매우어려움→어려움 하향)에는 영향을 주면 안 됨.
+          if (resultWasInstant) {
+            Core.log('dungeon', '즉시완료(즉시 최상층 도전) 실패 - 난이도는 그대로 유지하고 정공법으로 15단계까지 계속 진행합니다.');
+          } else {
+            Core.log('dungeon', `전투 패배 (난이도: ${this.difficulty})`);
+            if (this.difficulty === '매우어려움') {
+              this.difficulty = '어려움';
+              Core.log('dungeon', '매우어려움에서 패배 → 이후 어려움으로 난이도를 낮춰서 계속 진행 (다시 올리지 않음)');
+            }
           }
-          const kickedOut = await Core.waitFor(() => !/진행도/.test(Core.bodyText()), 3000);
+          // v1.2.19 버그 수정: 패배 직후 "결과 화면"에는 원래부터 "진행도" 텍스트가
+          // 없어서(그 화면 자체가 승리/패배 결과만 보여주는 화면이라 진행도 바가 없음),
+          // "돌아가기"를 누르기 전에 이 텍스트 유무로 강제퇴장 여부를 판단하면 실제
+          // 퇴장 여부와 무관하게 매번 "퇴장된 것으로 보임"으로 잘못 판정되고 있었음
+          // (그래서 보스전 근처에서 패배할 때마다 던전을 통째로 포기하던 원인).
+          // "돌아가기"를 먼저 누른 뒤, 그 다음 화면이 던전 안(전투/상점)인지 목록
+          // 화면인지로 정확히 판단하도록 순서를 바꿈.
           await this.clickBackFromResult();
-          if (kickedOut) {
+          const stillInDungeon = await Core.waitFor(
+            () => (/진행도|아이템\s*상점/.test(Core.bodyText()) ? true : null),
+            4000
+          );
+          if (!stillInDungeon) {
             Core.log('dungeon', '부활 허용 횟수를 초과하여 던전에서 강제 퇴장된 것으로 보입니다.');
             return false;
           }
