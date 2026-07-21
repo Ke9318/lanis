@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.2.21
+// @version      1.2.23
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -144,6 +144,15 @@
 //      없어서 리롤을 시작한 것이므로) 신의 일격 계열이나 모든 스탯이 아니면 사지 않고
 //      계속 리롤하도록 함. 리롤을 아예 안 한 최초 판단이거나 마지막 스테이지 직전
 //      상점에서는 기존 우선순위(단일 스탯 등)를 그대로 허용.
+//   32) [개선] 던전 입장 확인 모달에서 "N번 사망 시 강제 퇴장" 문구가 헤딩보다 한
+//      박자 늦게 렌더링되는 경우가 있어 "부활 허용: 알 수 없음"으로 로그되던 문제를
+//      완화 - 이 문구도 짧게 재시도해서 읽도록 함(참고: 이 값은 로그 표시용일 뿐 실제
+//      강제퇴장 판단에는 쓰이지 않아 게임 진행 자체에는 영향 없었음).
+//   33) [버그 수정] 재전직 모듈의 사냥 결과 화면 감지 정규식이 "레벨 1 → N 달성"
+//      패턴만 찾고 있었는데, 캐릭터가 이미 만렙(레벨 100)이라 더 오를 레벨이 없을 땐
+//      대신 "N회 전투 완료!" 형식으로 결과가 표시됨. 이 패턴이 빠져 있어서 만렙 상태로
+//      사냥할 때마다(예: 재전직 스킵 후 재사냥) 결과 화면을 못 찾고 재시도 끝에 모듈이
+//      정지해버리던 문제 수정(자동사냥 쪽 정규식엔 원래 포함되어 있었음).
 // ============================================================================
 
 (function () {
@@ -716,7 +725,11 @@
 
     let resultShown = await Core.retryStep(
       '사냥 결과 화면 확인',
-      () => (/레벨\s*1\s*→\s*\d+\s*달성|전투\s*후\s*중단/.test(Core.bodyText()) ? true : null),
+      // v1.2.23 버그 수정: "레벨 1 → N 달성" 패턴은 재전직 후 레벨업 도중에만 뜨고,
+      // 캐릭터가 이미 만렙(레벨 100)이라 더 오를 레벨이 없을 땐 대신 "N회 전투 완료!"
+      // 형식으로 결과가 표시됨. 이 패턴이 없어서 만렙 상태에서 사냥할 때마다 결과 화면을
+      // 못 찾고 재시도 끝에 정지해버리던 문제 수정(자동사냥 쪽 정규식엔 원래 있었음).
+      () => (/레벨\s*1\s*→\s*\d+\s*달성|전투\s*후\s*중단|\d+\s*회\s*전투\s*완료/.test(Core.bodyText()) ? true : null),
       { attempts: 4, waits: [3000, 5000, 8000, 12000] }
     );
     if (!resultShown) {
@@ -734,7 +747,7 @@
       if (!huntBtnAgain) break;
       huntBtnAgain.click();
       await mod.clickDelayWait();
-      resultShown = await Core.waitFor(() => /레벨\s*1\s*→\s*\d+\s*달성|전투\s*후\s*중단/.test(Core.bodyText()), 15000);
+      resultShown = await Core.waitFor(() => /레벨\s*1\s*→\s*\d+\s*달성|전투\s*후\s*중단|\d+\s*회\s*전투\s*완료/.test(Core.bodyText()), 15000);
       if (!resultShown) break;
     }
 
@@ -1569,7 +1582,15 @@
     if (!entryModalFound) {
       Core.log('dungeon', '"던전 입장 확인" 모달을 확인하지 못했습니다 (이미 입장됐을 수 있음).');
     } else {
-      const deathMatch = Core.bodyText().match(/(\d+)\s*번\s*사망\s*시\s*던전에서\s*강제\s*퇴장/);
+      // v1.2.22 개선: 모달 헤딩은 떴지만 안의 "N번 사망 시..." 문구는 한 박자 늦게
+      // 렌더링되는 경우가 있어("부활 허용: 알 수 없음"으로 로그되던 원인) 짧게 재시도.
+      // 참고: deathLimit은 로그 표시용일 뿐 실제 강제퇴장 판단에는 쓰이지 않으므로
+      // 여기서 못 읽어도 게임 진행 자체에는 영향 없음.
+      const deathMatch = await Core.retryStep(
+        '부활 허용 횟수 문구 찾기',
+        () => Core.bodyText().match(/(\d+)\s*번\s*사망\s*시\s*던전에서\s*강제\s*퇴장/),
+        { attempts: 3, waits: [500, 1000, 1500] }
+      );
       this.deathLimit = deathMatch ? parseInt(deathMatch[1], 10) : null;
       Core.log('dungeon', `"${dungeonDef.label}" 부활 허용: ${this.deathLimit ?? '알 수 없음'}회`);
 
