@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.2.13
+// @version      1.2.15
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -100,6 +100,14 @@
 //      (던전별 즉시완료 목표 적중치/회피치, 리롤 최소 토큰, 일일던전 체크)이 새로고침
 //      할 때마다 초기화되는 문제였음 - 이 설정값들도 localStorage에 저장/복원하도록
 //      추가(saveConfig/loadConfigIntoSelf, 패널 위치 저장 방식과 동일한 원리).
+//   23) [공용] 재전직/자동사냥/레어맵 탭의 GUI 입력값(목표 강함점수, 사냥터, 층,
+//      골드 입금 기준, 최소 행동력, 보호용 기름 무시, 최대 반복 사이클 등)도 던전
+//      탭과 동일하게 localStorage에 저장/복원되도록 확장(Core.saveModuleConfig/
+//      Core.loadModuleConfig 공용 헬퍼 추가).
+//   24) [버그 수정] 자동사냥이 매 사이클마다 무조건 "전투" 메뉴를 다시 열어 사냥터로
+//      재진입하고 있어서(메뉴 클릭+항목 클릭+대기가 매번 반복) 사냥 속도가 크게
+//      느려지는 문제 수정. 이미 사냥 버튼이 보이는 화면이면 재진입 없이 그대로 진행하고,
+//      은행/수리 등으로 자리를 옮겼을 때만 실제로 재진입하도록 함.
 // ============================================================================
 
 (function () {
@@ -329,6 +337,35 @@
     }
     Core.log(moduleId, '모듈 정지됨');
     Core.updateModuleButtons();
+  };
+
+  // ---------------- 모듈 설정값 저장/복원 (공용) ----------------
+  // v1.2.14: 재전직/자동사냥/레어맵 탭의 GUI 입력값(목표 강함점수, 사냥터, 최소 행동력,
+  // 골드 입금 기준, 최대 반복 횟수 등)도 던전 탭과 동일한 방식으로 localStorage에
+  // 저장해서 새로고침해도 유지되도록 하는 공용 헬퍼. moduleId별로 키 목록만 지정하면 됨.
+  Core.saveModuleConfig = function (moduleId, keys) {
+    try {
+      const mod = Modules[moduleId];
+      const data = {};
+      keys.forEach((k) => (data[k] = mod.config[k]));
+      localStorage.setItem(`lrm-config-${moduleId}`, JSON.stringify(data));
+    } catch (e) {
+      /* localStorage 사용 불가 환경이면 조용히 무시 */
+    }
+  };
+
+  Core.loadModuleConfig = function (moduleId, keys) {
+    try {
+      const raw = localStorage.getItem(`lrm-config-${moduleId}`);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      const mod = Modules[moduleId];
+      keys.forEach((k) => {
+        if (saved[k] !== undefined && saved[k] !== null) mod.config[k] = saved[k];
+      });
+    } catch (e) {
+      /* 저장된 값이 손상됐으면 기본값 그대로 사용 */
+    }
   };
 
   // ---------------- 패널 위치 저장/복원 ----------------
@@ -893,7 +930,17 @@
     return { cur: this.parseNumber(m[1]), max: this.parseNumber(m[2]) };
   };
 
+  // v1.2.15 버그 수정: 매 사이클마다 무조건 "전투" 메뉴를 다시 열어 사냥터로
+  // 재진입하고 있어서(메뉴 클릭 + 항목 클릭 + 대기가 매번 반복됨) 사냥 속도가 크게
+  // 느려지는 문제가 있었음. 이미 사냥 버튼("x50")이 보이는 화면이면 재진입 없이
+  // 그대로 진행하고, 은행/수리 등으로 자리를 옮겼을 때만 실제로 재진입하도록 수정.
   Modules.autohunt.ensureOnGround = async function (groundSuffix, floor) {
+    if (this.findHuntX50Button()) {
+      if (floor) {
+        await this.selectFloor(floor);
+      }
+      return true;
+    }
     try {
       await Core.clickNavMenuSuffix('전투', groundSuffix);
     } catch (e) {
@@ -2234,15 +2281,21 @@
     return `flex:1; padding:6px; border:none; border-radius:4px; color:#fff; background:${color}; cursor:pointer; font-weight:bold;`;
   }
 
+  const REJOB_PERSIST_KEYS = ['targetScore', 'tierIndex', 'maxRejobCount'];
+
   function buildRejobTab(container) {
     const mod = Modules.rejob;
     const refs = UIRefs.rejob;
+    Core.loadModuleConfig('rejob', REJOB_PERSIST_KEYS);
     container.appendChild(labelEl('목표 강함점수'));
     const scoreInput = document.createElement('input');
     scoreInput.type = 'number';
     scoreInput.value = mod.config.targetScore;
     scoreInput.style.cssText = inputStyle();
-    scoreInput.addEventListener('change', (e) => (mod.config.targetScore = parseInt(e.target.value, 10) || 5000));
+    scoreInput.addEventListener('change', (e) => {
+      mod.config.targetScore = parseInt(e.target.value, 10) || 5000;
+      Core.saveModuleConfig('rejob', REJOB_PERSIST_KEYS);
+    });
     container.appendChild(scoreInput);
 
     container.appendChild(labelEl('사냥터'));
@@ -2255,7 +2308,10 @@
       if (i === mod.config.tierIndex) o.selected = true;
       tierSelect.appendChild(o);
     });
-    tierSelect.addEventListener('change', (e) => (mod.config.tierIndex = parseInt(e.target.value, 10)));
+    tierSelect.addEventListener('change', (e) => {
+      mod.config.tierIndex = parseInt(e.target.value, 10);
+      Core.saveModuleConfig('rejob', REJOB_PERSIST_KEYS);
+    });
     container.appendChild(tierSelect);
 
     container.appendChild(labelEl('최대 재전직 횟수 (0=무제한)'));
@@ -2263,7 +2319,10 @@
     maxInput.type = 'number';
     maxInput.value = mod.config.maxRejobCount;
     maxInput.style.cssText = inputStyle();
-    maxInput.addEventListener('change', (e) => (mod.config.maxRejobCount = parseInt(e.target.value, 10) || 0));
+    maxInput.addEventListener('change', (e) => {
+      mod.config.maxRejobCount = parseInt(e.target.value, 10) || 0;
+      Core.saveModuleConfig('rejob', REJOB_PERSIST_KEYS);
+    });
     container.appendChild(maxInput);
 
     const btnRow = document.createElement('div');
@@ -2291,9 +2350,12 @@
     refs.inputs = [scoreInput, tierSelect, maxInput];
   }
 
+  const AUTOHUNT_PERSIST_KEYS = ['groundSuffix', 'floor', 'goldThreshold', 'minEnergy', 'ignoreProtectionOff'];
+
   function buildAutohuntTab(container) {
     const mod = Modules.autohunt;
     const refs = UIRefs.autohunt;
+    Core.loadModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
 
     container.appendChild(labelEl('사냥터'));
     const groundSelect = document.createElement('select');
@@ -2315,7 +2377,12 @@
       const o = document.createElement('option');
       o.value = n;
       o.textContent = `${n}층`;
+      if (mod.config.floor === n) o.selected = true;
       floorSelect.appendChild(o);
+    });
+    floorSelect.addEventListener('change', (e) => {
+      mod.config.floor = Number(e.target.value);
+      Core.saveModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
     });
     floorRow.appendChild(floorSelect);
     container.appendChild(floorRow);
@@ -2327,6 +2394,7 @@
     groundSelect.addEventListener('change', () => {
       mod.config.groundSuffix = groundSelect.value;
       syncFloorVisibility();
+      Core.saveModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
     });
     syncFloorVisibility();
 
@@ -2335,7 +2403,10 @@
     goldInput.type = 'number';
     goldInput.value = mod.config.goldThreshold;
     goldInput.style.cssText = inputStyle();
-    goldInput.addEventListener('change', (e) => (mod.config.goldThreshold = parseInt(e.target.value, 10) || 0));
+    goldInput.addEventListener('change', (e) => {
+      mod.config.goldThreshold = parseInt(e.target.value, 10) || 0;
+      Core.saveModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
+    });
     container.appendChild(goldInput);
 
     container.appendChild(labelEl('최소 행동력 (미만이면 정지)'));
@@ -2343,7 +2414,10 @@
     energyInput.type = 'number';
     energyInput.value = mod.config.minEnergy;
     energyInput.style.cssText = inputStyle();
-    energyInput.addEventListener('change', (e) => (mod.config.minEnergy = parseInt(e.target.value, 10) || 0));
+    energyInput.addEventListener('change', (e) => {
+      mod.config.minEnergy = parseInt(e.target.value, 10) || 0;
+      Core.saveModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
+    });
     container.appendChild(energyInput);
 
     const protRow = document.createElement('div');
@@ -2351,7 +2425,10 @@
     const protCheck = document.createElement('input');
     protCheck.type = 'checkbox';
     protCheck.checked = mod.config.ignoreProtectionOff;
-    protCheck.addEventListener('change', (e) => (mod.config.ignoreProtectionOff = e.target.checked));
+    protCheck.addEventListener('change', (e) => {
+      mod.config.ignoreProtectionOff = e.target.checked;
+      Core.saveModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
+    });
     const protLabel = document.createElement('span');
     protLabel.textContent = '보호용 기름 없이도 사냥 (체크 시 기름 없어도 정지 안 함)';
     protLabel.style.cssText = 'font-size:11px; color:#ccc;';
@@ -2388,16 +2465,22 @@
     refs.inputs = [groundSelect, floorSelect, goldInput, energyInput, protCheck];
   }
 
+  const RAREMAP_PERSIST_KEYS = ['maxCycles'];
+
   function buildRaremapTab(container) {
     const mod = Modules.raremap;
     const refs = UIRefs.raremap;
+    Core.loadModuleConfig('raremap', RAREMAP_PERSIST_KEYS);
 
     container.appendChild(labelEl('최대 반복 사이클 (안전장치)'));
     const maxCyclesInput = document.createElement('input');
     maxCyclesInput.type = 'number';
     maxCyclesInput.value = mod.config.maxCycles;
     maxCyclesInput.style.cssText = inputStyle();
-    maxCyclesInput.addEventListener('change', (e) => (mod.config.maxCycles = parseInt(e.target.value, 10) || 200));
+    maxCyclesInput.addEventListener('change', (e) => {
+      mod.config.maxCycles = parseInt(e.target.value, 10) || 200;
+      Core.saveModuleConfig('raremap', RAREMAP_PERSIST_KEYS);
+    });
     container.appendChild(maxCyclesInput);
 
     const btnRow = document.createElement('div');
