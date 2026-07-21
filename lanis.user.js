@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.2.15
+// @version      1.2.16
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -108,6 +108,12 @@
 //      재진입하고 있어서(메뉴 클릭+항목 클릭+대기가 매번 반복) 사냥 속도가 크게
 //      느려지는 문제 수정. 이미 사냥 버튼이 보이는 화면이면 재진입 없이 그대로 진행하고,
 //      은행/수리 등으로 자리를 옮겼을 때만 실제로 재진입하도록 함.
+//   25) [던전] 즉시완료 추가 조건 도입. 적중/회피 기준치를 충족해도 아래 조건까지
+//      만족해야만 즉시완료를 시도하도록 함(그 전까진 다음 전투에서 계속 재확인):
+//        - 신비의 동굴: 신의 일격 구매 + 모든 스탯 누적 2회 이상
+//        - 지하 하수도: 신의 일격 구매 + 모든 스탯 누적 3회 이상 + 힘/속도 각 1회 이상
+//      DUNGEONS 정의에 instantClearRequirement를 추가하고, 신의 일격 정확 구매 여부
+//      (boughtGodStrikeExact)와 모든 스탯 누적 횟수(allStatsBoughtCount)를 새로 추적함.
 // ============================================================================
 
 (function () {
@@ -1341,6 +1347,8 @@
     deathLimit: null,
     instantClearTried: false,
     boughtGodStrikeOrEquiv: false, // 신의 일격/일격필살/회심의 일격 (신비의동굴/수행자의탑: 동급 1회 한정)
+    boughtGodStrikeExact: false, // 그 중 정확히 "신의 일격"이 구매됐는지 (즉시완료 추가조건 판단용)
+    allStatsBoughtCount: 0, // "모든 스탯" 구매 누적 횟수 (즉시완료 추가조건 판단용)
     boughtSingleStat: {}, // { 속도:true, 행운:true, 정신:true, 지능:true, 힘:true, 생명:true, 체력:true, 마나:true }
     // 일일 던전(지하 하수도) 전용: 신의일격/일격필살/회심의일격을 개별 우선순위로 취급
     boughtGodStrike: false,
@@ -1382,6 +1390,9 @@
       daily: false,
       statMode: 'standard',
       abilityMode: 'equalPriority',
+      // v1.2.16 신규: 즉시완료(즉시 최상층 도전) 추가 조건 - 적중/회피 기준치를
+      // 충족해도, 신의 일격과 모든 스탯을 충분히 먹기 전에는 시도하지 않도록 함.
+      instantClearRequirement: { requireGodStrike: true, minAllStats: 2, requireStats: [] },
     },
     {
       id: 'sewer',
@@ -1390,6 +1401,9 @@
       daily: true,
       statMode: 'extended', // 재생4/5, 힘/생명/체력/마나까지 포함
       abilityMode: 'ordered', // 신의일격 > 일격필살 > 회심의일격 순서 (동급 아님)
+      // v1.2.16 신규: 신의 일격 + 모든 스탯 3회 이상 + 힘/속도 각 1회 이상 먹었을 때만
+      // 즉시완료를 시도하도록 함.
+      instantClearRequirement: { requireGodStrike: true, minAllStats: 3, requireStats: ['힘', '속도'] },
     },
   ];
 
@@ -1548,6 +1562,8 @@
     this.difficulty = '매우어려움';
     this.instantClearTried = false;
     this.boughtGodStrikeOrEquiv = false;
+    this.boughtGodStrikeExact = false;
+    this.allStatsBoughtCount = 0;
     this.boughtSingleStat = {};
     this.boughtGodStrike = false;
     this.boughtCertainHit = false;
@@ -1656,10 +1672,34 @@
     return est ? { AC: est.AC, EV: est.EV, isReal: false } : null;
   };
 
+  // v1.2.16 신규: 던전별 즉시완료 추가 조건(신의 일격 구매 여부, 모든 스탯 누적 구매
+  // 횟수, 특정 단일 스탯 구매 여부) 검사. 조건이 없으면 항상 통과.
+  Modules.dungeon.meetsInstantClearRequirement = function (dungeonDef) {
+    const req = dungeonDef.instantClearRequirement;
+    if (!req) return { ok: true };
+    const missing = [];
+    if (req.requireGodStrike && !this.boughtGodStrikeExact) missing.push('신의 일격 미구매');
+    if (req.minAllStats && this.allStatsBoughtCount < req.minAllStats) {
+      missing.push(`모든 스탯 ${this.allStatsBoughtCount}/${req.minAllStats}회`);
+    }
+    if (req.requireStats) {
+      req.requireStats.forEach((stat) => {
+        if (!this.boughtSingleStat[stat]) missing.push(`${stat} 미구매`);
+      });
+    }
+    return { ok: missing.length === 0, missing };
+  };
+
   Modules.dungeon.tryInstantClear = async function (dungeonDef) {
     if (this.instantClearTried) return false;
     const target = this.config.instantClear[dungeonDef.id];
     if (!target || (!target.targetAC && !target.targetEV)) return false;
+
+    const reqCheck = this.meetsInstantClearRequirement(dungeonDef);
+    if (!reqCheck.ok) {
+      Core.log('dungeon', `즉시완료 추가 조건 미충족 (${reqCheck.missing.join(', ')}) → 다음 전투에서 다시 확인`);
+      return false;
+    }
 
     const est = await this.getCurrentACEV();
     if (!est) return false;
@@ -1821,13 +1861,29 @@
     if (dungeonDef.abilityMode === 'equalPriority') {
       if (!this.boughtGodStrikeOrEquiv) {
         const abilityCard = cards.find((c) => this.isGodStrikeFamily(c.label));
-        if (abilityCard) return { card: abilityCard, onBought: () => (this.boughtGodStrikeOrEquiv = true) };
+        if (abilityCard) {
+          const isExactGodStrike = /신의\s*일격/.test(abilityCard.label);
+          return {
+            card: abilityCard,
+            onBought: () => {
+              this.boughtGodStrikeOrEquiv = true;
+              if (isExactGodStrike) this.boughtGodStrikeExact = true;
+            },
+          };
+        }
       }
     } else {
       // 일일 던전: 신의일격 > 일격필살 > 회심의일격 순서
       if (!this.boughtGodStrike) {
         const c = cards.find((c) => /신의\s*일격/.test(c.label));
-        if (c) return { card: c, onBought: () => (this.boughtGodStrike = true) };
+        if (c)
+          return {
+            card: c,
+            onBought: () => {
+              this.boughtGodStrike = true;
+              this.boughtGodStrikeExact = true;
+            },
+          };
       }
     }
 
@@ -1835,7 +1891,7 @@
     const allStatCards = cards.filter((c) => this.isAllStatsLabel(c.label));
     if (allStatCards.length > 0) {
       allStatCards.sort((a, b) => this.parseAllStatsValue(b.label) - this.parseAllStatsValue(a.label));
-      return { card: allStatCards[0], onBought: () => {} };
+      return { card: allStatCards[0], onBought: () => (this.allStatsBoughtCount += 1) };
     }
 
     // 3) (일일 던전만) 일격필살 > 회심의 일격
@@ -1966,6 +2022,8 @@
       // 정상적으로 매 전투 재확인하도록 함.
       this.instantClearTried = false;
       this.boughtGodStrikeOrEquiv = false;
+      this.boughtGodStrikeExact = false;
+      this.allStatsBoughtCount = 0;
       this.boughtSingleStat = {};
       this.boughtGodStrike = false;
       this.boughtCertainHit = false;
