@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.1
-// @description  재전직 / 자동사냥 / 레어맵 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
+// @version      1.2
+// @description  재전직 / 자동사냥 / 레어맵 / 던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
 // @grant        none
@@ -11,17 +11,95 @@
 // ==/UserScript==
 
 // ============================================================================
-// 통합 매크로 v1.1
-// v1.0 대비 수정 사항:
-//   1) [재전직] 직업명 파싱 정규식이 \S+ 라서 두 단어 이상인 직업명(예: "○○ ○○")은
-//      첫 단어만 잘려서 저장됨 → 이후 "직업명 (5차)" 카드를 절대 못 찾아서(실제로는
-//      카드가 있는데 잘린 이름으로 찾으니 매번 실패) 재전직 도중 계속 멈추는 원인이었음.
-//      전체 줄을 캡처하도록 정규식 수정 + 카드 검색에 보조(포함 매칭) 로직 추가.
-//   2) [자동사냥] 모듈에는 애초에 "농축 경험의 물약" 잔여량을 확인하는 로직이 없었음
-//      (재전직 모듈에만 있었음) → 물약이 다 떨어져도 계속 사냥을 반복하던 원인.
-//      자동사냥 사이클마다 잔여량을 확인해서 0이 되면 정지하도록 추가.
-//   3) [재전직] 활력의 포션 사용 개수가 Math.min(1, held)로 고정되어 있어 항상 1개씩만
-//      사용됨 → 3개씩 사용하도록 변경(Math.min(3, held)).
+// 통합 매크로 v1.2
+// v1.1 대비 수정 사항:
+//   1) [던전] 모듈 신규 추가. 아래 5개 던전을 우선순위 순서로 순회하며 자동 클리어:
+//        [구] 수행자의 탑: 상층부 > 수행자의 탑: 상층부 >
+//        [구] 신비의 동굴 > 신비의 동굴 > 지하 하수도(일일 던전)
+//      (일일 던전 중 깊은 숲 속 / 각성의 탑은 현재 비활성화 - 수동 처리)
+//   2) [공용] 여러 창을 동시에 돌릴 때 클릭이 씹히거나 멈추는 문제 완화를 위해
+//      클릭 사이 기본 지연을 늘림(기존 300~800ms → 500~1300ms). 특히 확인/모달류
+//      클릭 뒤에는 다음 요소를 찾기 전 명시적으로 더 대기하도록 retryStep/waitFor
+//      기반으로 처리.
+//   3) [자동사냥] "보호용 기름 없이도 사냥" 체크옵션 추가. 체크하면 장비 보호(기름)가
+//      풀린 상태여도 정지하지 않고 계속 사냥을 진행함(기본값: 미체크 = 기존 동작 유지).
+//   4) [버그 수정] Core.allButtons()가 매크로 패널/배너 자체의 버튼(예: 숨겨진 배너의
+//      "확인" 버튼)까지 포함해서 찾는 바람에, findButtonByText('확인')이 캐릭터 정보
+//      모달의 진짜 확인 버튼 대신 숨겨진 배너 버튼을 잘못 클릭하던 문제 수정
+//      (던전 입장이 항상 멈추던 원인). 패널/배너 하위 버튼은 항상 검색에서 제외.
+//   5) [버그 수정] "던전 입장 확인" 팝업의 "입장" 버튼을 findButtonByText('입장')으로
+//      찾았는데, 던전 목록 페이지 자체에 카드마다 "입장" 버튼이 여러 개 있어서 문서
+//      전체에서 첫 번째로 매칭되는(팝업이 아닌 배경 목록의) "입장" 버튼을 잘못 클릭하던
+//      문제 수정. Core.findButtonInDialog()를 추가해 모달 컨테이너 안으로 검색 범위를
+//      좁혀서 "확인"/"입장" 등 흔한 텍스트의 버튼도 정확한 팝업 안에서만 찾도록 함.
+//   6) [던전] 던전마다 매번 메뉴를 다시 열어 하나씩 입장권을 확인하던 방식을 개선.
+//      던전 목록 화면을 한 번만 로드해서 5개 던전의 입장권/완료 여부를 전부 스캔한 뒤
+//      "입장 가능한 던전 큐"를 확정하고, 그 큐만 순서대로 입장하도록 변경(불필요한
+//      메뉴 재진입 제거로 속도 개선).
+//   7) [버그 수정] 던전 완료 화면에서 "보상 받고 던전 나가기" 버튼을 찾기만 하면 바로
+//      "클리어 완료"로 기록하던 문제 수정. 이제 버튼을 클릭한 뒤 실제로 완료 화면을
+//      벗어난 것까지 확인해야만 클리어로 카운트함(보상 수령 = 클리어라는 원칙에 맞춤).
+//   8) [던전] 전투 결과("승리!"/"패배..")를 못 찾으면 곧바로 던전 전체를 포기하고
+//      정지하던 문제 완화 - 전투 시작/결과 확인을 최대 3회까지 재시도한 뒤에만 포기하도록
+//      수정. 아직 진행 중인데(예: 3/15) 일시적 지연으로 결과를 못 읽어 통째로 멈추는
+//      상황을 줄임.
+//   9) [던전] 스크립트를 재시작했을 때 이미 던전 안(전투/상점/완료 화면)에 들어와 있는
+//      상태라면, 던전 목록으로 돌아가 새로 입장하지 않고 화면에 표시된 던전 이름을
+//      인식해서 바로 이어서 진행하도록 함(detectResumeDungeon).
+//   10) [버그 수정] detectResumeDungeon()과 getDungeonCardEl()이 매크로 패널 자체에
+//      있는 던전 이름 라벨(즉시완료 목표치 설정 UI)까지 검색 대상에 포함해서, 실제
+//      게임 화면과 무관하게 항상 목록 맨 앞 던전으로 잘못 인식하던 문제 수정(예: 실제
+//      화면은 "지하 하수도"인데 "[구] 수행자의 탑"으로 잘못 이어하기 시도함). 패널/배너
+//      하위 요소는 항상 검색에서 제외하도록 수정.
+//   11) [버그 수정] 상점 카드 인식(getShopCards)이 "텍스트 리프를 먼저 찾고 테두리
+//      있는 조상을 역추적"하는 방식이었는데 실제로는 카드를 계속 못 찾아서(토큰만 계속
+//      쌓이고 구매/리롤이 전혀 안 일어남) 사실상 상점 기능이 통째로 죽어 있었음.
+//      등급 테두리 색(금/칠색/은/동)이 정해져 있다는 걸 이용해 "테두리 색이 일치하는
+//      요소를 먼저 찾고 그 텍스트를 라벨로 쓰는" 방식으로 뒤집어서 재작성.
+//   12) [버그 수정] 위 카드 라벨을 el.textContent로 읽었는데, textContent는 자식
+//      요소 사이에 줄바꿈을 넣어주지 않아 라벨("행운 +98")과 바로 옆 가격 숫자("30")가
+//      구분자 없이 붙어 "행운 +9830" 같은 엉뚱한 라벨로 파싱되는 문제가 있었음.
+//      렌더링된 줄바꿈을 반영하는 el.innerText로 교체.
+//   13) [던전] 전투 결과 확인이 반복 실패하다 뒤늦게 성공하는 경우가 잦아 클릭 사이
+//      지연을 전반적으로 더 늘림(던전 모듈 전용: 대략 700~1400ms → 1100~2000ms 수준).
+//   14) [버그 수정] 즉시완료(즉시 최상층 도전) 판단이 던전 진입 직후(진행도 0)에만
+//      한 번 확인하고 끝났고, 그때 스탯이 기준 미달이면 이후 스탯이 올라 기준을 넘어도
+//      다시는 확인하지 않던 문제 수정. "기준 미달로 아직 시도조차 안 한 경우"와
+//      "실제로 도전했다가 진 경우"를 구분해서, 전자는 매 전투마다 계속 재확인하고
+//      후자(실제 도전 후 결과가 난 경우)만 그 던전에서 다시 시도하지 않도록 함.
+//   15) [개선] 캐릭터 카드의 "자세히"를 펼치면 실제 적중치/회피치 수치가 화면에 그대로
+//      표시된다는 것을 확인함. 근사 공식(무기 무게 미반영)으로만 판단하던 것을, 이제
+//      "자세히"를 자동으로 펼쳐서 실제 값을 우선 읽고, 확인이 안 될 때만 근사 공식으로
+//      대체하도록 개선(ensureDetailsExpanded/readRealACEV/getCurrentACEV 추가).
+//   16) [버그 수정] 이어하기(resume) 경로에서 instantClearTried를 무조건 true로 세워
+//      즉시완료 자체를 아예 시도하지 않던 잔재 코드 제거. 매 전투 재확인 로직(14번)과
+//      모순되어 이어하기 세션에서는 즉시완료가 영영 확인되지 않던 문제 수정.
+//   17) [개선] "자세히"를 눌러도 적중치/회피치 텍스트가 안 나와 계속 근사 공식으로만
+//      판단되던 경우가 있어, 클릭 1회+대기로 끝내지 않고 최대 3회까지 재시도하도록
+//      강화. 그래도 실패하면 근사 공식으로 대체한다는 로그를 남겨 원인 추적이 쉽도록 함.
+//   18) [버그 수정] 사용자 제보: "모든 스탯"을 살 수 있었는데도 구매하지 않고 넘어감.
+//      isAllStatsLabel/parseStatLabel/isGodStrikeFamily 등 라벨 매칭 정규식이 전부
+//      문자열 맨 앞(^) 고정 매칭이었는데, 라벨 앞에 예기치 않은 문자가 섞여 들어오면
+//      매칭이 실패해 그냥 지나칠 수 있었음 → 전부 ^ 고정 없이 느슨하게 매칭하도록 완화.
+//      또한 카드 선택→구매 클릭이 한 번에 안 먹히는 경우를 대비해 구매 시퀀스를 최대
+//      2회까지 재시도하도록 보강.
+//   19) [버그 수정] 사용자 제보: "자세히"는 힘/생명/정신/지능/행운/속도 원본 스탯과
+//      직업/메인 어빌리티를 보여주는 버튼이었고, 적중치/회피치는 캐릭터 이름 옆의
+//      화살표(▲/▼) 토글을 눌러야 나오는 완전히 별개의 버튼이었음. 엉뚱한 버튼("자세히")
+//      을 누르고 있었으니 실제 값이 계속 안 나왔던 것 - 캐릭터 카드(무기/HP/MP가 함께
+//      있는 컨테이너) 안에서 "자세히"가 아닌 버튼(이름 옆 토글)을 찾아 누르도록 수정.
+//   20) [버그 수정] 실제 값 읽기가 정상화된 뒤 "즉시 최상층 도전"을 클릭해도 여전히
+//      진행이 안 되던 문제 발견 - 클릭 후 별도의 확인 팝업("도전"/"취소")이 뜨는데
+//      이를 처리하는 코드가 없어 확인을 안 누른 채 전투 결과만 기다리며 계속 실패하고
+//      있었음. 팝업이 뜨면 Core.findButtonInDialog로 정확히 "도전" 버튼을 찾아 클릭하도록
+//      추가.
+//   21) [던전] "오늘 클리어한 던전" 개수가 새로고침/스크립트 재시작 때마다 0으로
+//      초기화되던 것을 localStorage에 저장해서 유지되도록 함(loadClearCount/
+//      saveClearCount). 날짜가 바뀌면 자동으로 0부터 다시 센다.
+//   22) [던전] 위 21번은 클리어 개수였는데, 실제 요청은 GUI에 입력하는 설정값
+//      (던전별 즉시완료 목표 적중치/회피치, 리롤 최소 토큰, 일일던전 체크)이 새로고침
+//      할 때마다 초기화되는 문제였음 - 이 설정값들도 localStorage에 저장/복원하도록
+//      추가(saveConfig/loadConfigIntoSelf, 패널 위치 저장 방식과 동일한 원리).
 // ============================================================================
 
 (function () {
@@ -43,10 +121,11 @@
 
   Core.sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   Core.rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+  // v1.2: 여러 창을 동시에 돌릴 때 클릭이 씹히는 문제 완화 - 기본 지연 증가
   Core.humanDelay = (minMs, maxMs) => Core.sleep(minMs + Math.random() * (maxMs - minMs));
 
   // 패널/배너 자기 자신의 텍스트가 페이지 텍스트 파싱과 혼동되는 걸 막기 위해,
-  // 잠깐 숨긴 상태로 읽고 되돌려놓음 (예전 재전직 매크로에서 실제로 겪었던 버그의 재발 방지)
+  // 잠깐 숨긴 상태로 읽고 되돌려놓음
   Core.bodyText = function () {
     const prevPanelDisplay = Core.panelEl ? Core.panelEl.style.display : null;
     const prevBannerDisplay = Core.bannerEl ? Core.bannerEl.style.display : null;
@@ -59,7 +138,13 @@
   };
 
   Core.allButtons = function () {
-    return Array.from(document.querySelectorAll('button'));
+    // v1.2.1 버그 수정: 매크로 패널/배너 자체에도 "확인" 같은 흔한 텍스트의 버튼이 있어서
+    // (예: 배너 닫기 버튼) findButtonByText가 게임 모달의 진짜 버튼 대신 숨겨진 패널/배너
+    // 버튼을 잘못 집는 문제가 있었음(캐릭터 정보 모달의 "확인"을 못 누르던 원인).
+    // 패널/배너 하위 버튼은 항상 제외하고 찾도록 수정.
+    return Array.from(document.querySelectorAll('button')).filter(
+      (b) => !b.closest('#lrm-panel') && !b.closest('#lrm-banner')
+    );
   };
 
   Core.findButtonByText = function (text) {
@@ -70,7 +155,23 @@
     return [...document.querySelectorAll(selector)].find((el) => el.textContent.trim() === text) || null;
   };
 
-  Core.waitFor = async function (fn, timeoutMs = 15000, intervalMs = 250) {
+  // v1.2.1 버그 수정: "확인", "입장" 같은 흔한 텍스트의 버튼은 페이지 안에 여러 개
+  // 동시에 존재할 수 있음(예: 던전 목록의 카드마다 "입장" 버튼이 있음). 문서 전체에서
+  // 첫 번째 매칭 버튼을 집는 findButtonByText를 모달 버튼에 쓰면 엉뚱한(배경의) 버튼을
+  // 잘못 클릭하게 됨. dialogMarkerText를 포함하는 가장 좁은 컨테이너를 먼저 찾고,
+  // 그 안에서만 buttonText 버튼을 찾도록 스코프를 좁힌 헬퍼.
+  Core.findButtonInDialog = function (dialogMarkerText, buttonText) {
+    const candidates = [...document.querySelectorAll('*')].filter((el) => {
+      if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
+      if (!el.textContent.includes(dialogMarkerText)) return false;
+      return [...el.querySelectorAll('button')].some((b) => b.textContent.trim() === buttonText);
+    });
+    if (candidates.length === 0) return null;
+    const smallest = candidates.reduce((a, b) => (a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b));
+    return [...smallest.querySelectorAll('button')].find((b) => b.textContent.trim() === buttonText) || null;
+  };
+
+  Core.waitFor = async function (fn, timeoutMs = 15000, intervalMs = 300) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const result = fn();
@@ -81,7 +182,6 @@
   };
 
   // 타이밍에 예민한 지점(팝업/버튼 렌더링 등)을 위한 재시도 헬퍼.
-  // 서버가 잠깐 재연결되는 경우를 감지하면 추가로 조금 더 기다렸다가 재확인함.
   Core.retryStep = async function (label, checkFn, { attempts = 4, waits = [1000, 3000, 6000, 10000] } = {}) {
     for (let i = 0; i < attempts; i++) {
       const result = await checkFn();
@@ -103,33 +203,40 @@
     return null;
   };
 
+  // 클릭 하나 하고 나서 다음 조건이 충족될 때까지 여유있게 기다리는 헬퍼 (v1.2 신규).
+  // 여러 창을 동시에 돌릴 때 "확인" 등을 너무 빨리 눌러 씹히던 문제 완화용.
+  Core.clickAndWaitFor = async function (el, checkFn, { minDelay = 500, maxDelay = 1300, timeoutMs = 15000 } = {}) {
+    el.click();
+    await Core.humanDelay(minDelay, maxDelay);
+    return Core.waitFor(checkFn, timeoutMs, 300);
+  };
+
   // 상단 네비(전투/마을/캐릭) 클릭 후 드롭다운에서 정확히 일치하는 항목 클릭
   Core.clickNavMenuExact = async function (navLabel, itemText) {
     const navBtn = await Core.waitFor(() => Core.findButtonByText(navLabel), 15000);
     if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
     navBtn.click();
-    await Core.humanDelay(300, 800);
+    await Core.humanDelay(500, 1000);
     const item = await Core.waitFor(() =>
       [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim() === itemText)
     );
     if (!item) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
     item.click();
-    await Core.humanDelay(300, 800);
+    await Core.humanDelay(500, 1000);
   };
 
   // 상단 네비 클릭 후 드롭다운에서 "접미어"로 끝나는 항목 클릭
-  // (마을마다 "에렌시아의 탑" / "르인의 탑"처럼 접두어가 달라서 접미어로 매칭)
   Core.clickNavMenuSuffix = async function (navLabel, suffixText) {
     const navBtn = await Core.waitFor(() => Core.findButtonByText(navLabel), 15000);
     if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
     navBtn.click();
-    await Core.humanDelay(300, 800);
+    await Core.humanDelay(500, 1000);
     const item = await Core.waitFor(() =>
       [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim().endsWith(suffixText))
     );
     if (!item) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
     item.click();
-    await Core.humanDelay(300, 800);
+    await Core.humanDelay(500, 1000);
   };
 
   // 은행 전액 입금 (재전직/자동사냥 모듈이 공용으로 사용)
@@ -143,19 +250,19 @@
       return false;
     }
     depositBtn.click();
-    await Core.humanDelay(600, 1300);
+    await Core.humanDelay(800, 1600);
     Core.log(moduleId, '전액 입금 완료');
     return true;
   };
 
-  // 장비(무기/방어구/장신구) 수리 - 활성화된 수리 버튼이 없어질 때까지 반복 클릭
+  // 장비(무기/방어구/장신구) 수리
   Core.repairAllEquipment = async function (moduleId) {
     Core.log(moduleId, '장비 내구도 부족 감지 → 장비 수리 진행');
     for (let attempt = 0; attempt < 12; attempt++) {
       const target = Core.allButtons().find((b) => /수리/.test(b.textContent) && !b.disabled);
       if (!target) break;
       target.click();
-      await Core.humanDelay(500, 900);
+      await Core.humanDelay(600, 1100);
     }
     const remaining = Core.allButtons().filter((b) => /수리/.test(b.textContent) && !b.disabled);
     if (remaining.length > 0) {
@@ -207,8 +314,6 @@
     Core.stopTitleFlash();
   };
 
-  // 정말로 모듈을 멈춰야 하는 상황(목표 달성/오류 등)에서 호출. alert() 대신 배너로만
-  // 알리므로 화면이 멈추지 않음 - 사람이 와서 원인을 보고 다시 시작만 누르면 됨.
   Core.notifyStopped = function (moduleId, msg) {
     Core.log(moduleId, `⚠ ${msg}`);
     Core.showBanner(moduleId, msg);
@@ -226,7 +331,7 @@
     Core.updateModuleButtons();
   };
 
-  // ---------------- 패널 위치 저장/복원 (모든 모듈이 하나의 패널을 공유) ----------------
+  // ---------------- 패널 위치 저장/복원 ----------------
   Core.savePanelPosition = function (left, top) {
     try {
       localStorage.setItem(PANEL_POS_KEY, JSON.stringify({ left, top }));
@@ -245,13 +350,13 @@
   };
 
   // ==========================================================================
-  // 모듈 정의: 재전직 / 자동사냥 / 레어맵
-  // 각 모듈은 자기 상태(running 등)와 설정, 사이클 로직, 시작 함수를 가짐.
+  // 모듈 정의: 재전직 / 자동사냥 / 레어맵 / 던전
   // ==========================================================================
   const MODULE_LABELS = {
     rejob: '재전직',
     autohunt: '자동사냥',
     raremap: '레어맵',
+    dungeon: '던전',
   };
 
   const Modules = {};
@@ -268,7 +373,7 @@
       maxRejobCount: 500, // 0 = 무제한
       restEvery: [50, 65],
       restSeconds: [60, 180],
-      clickDelay: [300, 800],
+      clickDelay: [500, 1300],
     },
     expectedJobName: null,
     nextTierIndexOverride: null,
@@ -290,8 +395,6 @@
     return Core.humanDelay(this.config.clickDelay[0], this.config.clickDelay[1]);
   };
 
-  // 행동력 "+" 버튼: aria-label로 직접 찾음 (좌표 추측은 폴백으로만 남김 - 예전에
-  // 좌표 추측 방식이 바로 옆의 "?" 안내 아이콘과 혼동되던 버그가 있었음)
   Modules.rejob.findEnergyPlusButton = function () {
     const byLabel = document.querySelector('[aria-label="활력의 포션 사용"]');
     if (byLabel) return byLabel;
@@ -416,12 +519,6 @@
     targetBtn.click();
     await mod.clickDelayWait();
 
-    // v1.0 버그 수정(유지): "사용할 개수" 팝업이 뜨면 document.querySelector('input[type="number"]')로
-    // 페이지 전체에서 첫 번째 number input을 찾으면, 우리 패널의 "목표 강함점수" 입력칸도
-    // type="number"이고 DOM상 게임 팝업보다 먼저 붙어있어서, 실제로는 그 입력칸을 잘못 집어
-    // 값을 덮어써버리는 문제가 있었음(목표점수가 갑자기 1로 바뀌는 것처럼 보이던 원인).
-    // 수정: 패널/배너를 제외한 요소들 중 "사용할 개수" 텍스트를 포함하는 가장 좁은 범위의
-    // 요소(실제 팝업 컨테이너)를 먼저 찾고, 그 안에서만 number input과 "사용" 버튼을 찾도록 함
     const qtyDialogEl = await Core.retryStep('수량 확인 팝업 컨테이너 찾기', () => {
       const candidates = [...document.querySelectorAll('*')].filter((el) => {
         if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
@@ -438,7 +535,6 @@
       if (qtyInput) {
         const holdMatch = qtyDialogEl.textContent.match(/보유 수량:\s*([\d,]+)개/);
         const held = holdMatch ? parseInt(holdMatch[1].replace(/,/g, ''), 10) : 1;
-        // v1.1 변경: 1개씩 사용하던 것을 3개씩 사용하도록 변경 (보유 수량이 3개 미만이면 있는 만큼만 사용)
         const useQty = Math.min(3, held);
         const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         nativeSetter.call(qtyInput, useQty);
@@ -468,10 +564,6 @@
       return 'skip';
     }
 
-    // v1.1 수정: 기존 정규식(\S+)은 공백이 없는 한 단어짜리 직업명만 제대로 캡처됨.
-    // 직업명이 "○○ ○○"처럼 공백이 포함된 두 단어 이상이면 첫 단어만 잘려서 저장되어
-    // 이후 "(직업명) (5차)" 카드를 절대 찾지 못하는 문제가 있었음(재전직 도중 반복 정지의
-    // 주 원인으로 추정). 줄 끝까지 캡처하도록 변경.
     const jobMatch = Core.bodyText().match(/현재 직업:\s*\n?\s*([^\n]+)/);
     const currentJob = jobMatch ? jobMatch[1].trim() : null;
     if (!currentJob) {
@@ -486,8 +578,6 @@
       return false;
     }
 
-    // v1.1 수정: 직업명 파싱이 잘못됐던 과거 상태와의 호환 및 추가 안전장치로,
-    // 정확히 일치하는 카드가 없으면 "직업명을 포함 + (5차)를 포함"하는 카드도 보조로 찾음.
     const cardHeading = await Core.retryStep(
       `"${mod.expectedJobName} (5차)" 카드 찾기`,
       () =>
@@ -599,7 +689,7 @@
     const consumTab = Core.findButtonByText('소모품') || Core.findByExactText('button, [role="tab"]', '소모품');
     if (consumTab) {
       consumTab.click();
-      await Core.humanDelay(300, 800);
+      await Core.humanDelay(500, 1000);
     }
 
     const row = [...document.querySelectorAll('*')]
@@ -623,14 +713,14 @@
       return false;
     }
     useBtn.click();
-    await Core.humanDelay(300, 800);
+    await Core.humanDelay(500, 1000);
 
     const confirmDialog = await Core.waitFor(() => Core.bodyText().includes('사용하시겠습니까'), 3000);
     if (confirmDialog) {
       const confirmBtn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
       if (confirmBtn) {
         confirmBtn.click();
-        await Core.humanDelay(300, 800);
+        await Core.humanDelay(500, 1000);
       }
     }
     Core.log('rejob', '농축 경험의 물약 사용 완료');
@@ -763,6 +853,7 @@
       floor: null,
       goldThreshold: 1000000,
       minEnergy: 100,
+      ignoreProtectionOff: false, // 체크 시 보호용 기름(장비 보호)이 없어도 정지하지 않고 계속 사냥
     },
   };
 
@@ -809,7 +900,7 @@
       Core.log('autohunt', `오류: ${e.message}`);
       return false;
     }
-    await Core.sleep(500);
+    await Core.sleep(600);
     if (floor) {
       await this.selectFloor(floor);
     }
@@ -825,7 +916,7 @@
     }
     if (btn.getAttribute('aria-pressed') !== 'true') {
       btn.click();
-      await Core.sleep(400);
+      await Core.sleep(500);
     }
     return true;
   };
@@ -867,8 +958,6 @@
     return { hp, mp };
   };
 
-  // v1.1 신규: 농축 경험의 물약 잔여 회수 확인 (기존 자동사냥 모듈에는 이 체크가 아예 없었음 →
-  // 물약이 다 떨어져도 계속 사냥을 반복하던 버그의 원인)
   Modules.autohunt.readExpPotionRemaining = function () {
     const m = Core.bodyText().match(/농축 경험의 물약 효과 \(5배\):\s*([\d,]+)회 남음/);
     if (!m) return null;
@@ -937,7 +1026,7 @@
         Core.notifyStopped('autohunt', '포션이 부족해 체력이 0인 상태로 전투가 불가능합니다 — 정지합니다.');
         break;
       }
-      if (mod.isProtectionOff()) {
+      if (!mod.config.ignoreProtectionOff && mod.isProtectionOff()) {
         Core.notifyStopped('autohunt', '장비 보호(기름)가 풀린 상태입니다 — 정지합니다.');
         break;
       }
@@ -948,7 +1037,6 @@
         break;
       }
 
-      // v1.1 신규: 사냥 전 농축 경험의 물약이 이미 0회 남음이면(효과 종료) 굳이 사냥을 더 진행하지 않고 정지
       const preExpPotion = mod.readExpPotionRemaining();
       if (preExpPotion !== null && preExpPotion <= 0) {
         Core.notifyStopped('autohunt', '농축 경험의 물약 효과가 모두 소진되었습니다 — 정지합니다. 인벤토리에서 물약을 채워주세요.');
@@ -970,7 +1058,7 @@
         continue;
       }
 
-      await Core.sleep(800);
+      await Core.sleep(1000);
       const result = await mod.waitForResult(25000);
       if (!result) {
         if (mod.isHpZeroBlocked()) {
@@ -991,18 +1079,17 @@
       if (result === 'durability') {
         await Core.repairAllEquipment('autohunt');
         await mod.checkAndDepositGold();
-        await Core.sleep(500);
+        await Core.sleep(600);
         continue;
       }
 
       if (result === 'defeat') {
         Core.log('autohunt', '패배 감지 → 은행에 남은 골드를 모두 입금한 뒤 다시 사냥을 이어갑니다.');
         await Core.bankDepositAll('autohunt');
-        await Core.sleep(500);
+        await Core.sleep(600);
         continue;
       }
 
-      // v1.1 신규: 사냥 결과 화면에서도 잔여 물약 회수를 다시 확인 (전투 도중 0이 된 경우 즉시 정지)
       const postExpPotion = mod.readExpPotionRemaining();
       if (postExpPotion !== null && postExpPotion <= 0) {
         Core.notifyStopped('autohunt', '농축 경험의 물약 효과가 모두 소진되었습니다 — 정지합니다. 인벤토리에서 물약을 채워주세요.');
@@ -1016,7 +1103,7 @@
       }
 
       await mod.checkAndDepositGold();
-      await Core.sleep(800 + Math.random() * 1200);
+      await Core.sleep(1000 + Math.random() * 1400);
     }
 
     mod.running = false;
@@ -1032,14 +1119,14 @@
     stopRequested: false,
     cycleCount: 0,
     config: {
-      maxCycles: 200, // 안전장치: 최대 반복 횟수
+      maxCycles: 200,
     },
   };
 
-  Modules.raremap.EXCLUDE_TEXTS = ['전투', '마을', '캐릭', '설정', '취소', '사용하기', '닫기', '로그아웃', '알림'];
+  Modules.raremap.EXCLUDE_TEXTS = ['전투', '마을', '설정', '취소', '사용하기', '닫기', '로그아웃', '알림'];
 
   Modules.raremap.randomClickDelay = function () {
-    return 1000 + Math.random() * 800; // 1~1.8초, 사람처럼 보이도록
+    return 1200 + Math.random() * 900;
   };
 
   Modules.raremap.getMapIcon = function () {
@@ -1170,11 +1257,912 @@
     while (mod.running && mod.cycleCount < mod.config.maxCycles) {
       await mod.runCycle();
       if (!mod.running) break;
-      await Core.sleep(1500);
+      await Core.sleep(1600);
     }
     Core.log('raremap', '매크로 종료 (최대 반복 횟수 도달 또는 중지됨)');
     mod.running = false;
     Core.activeModuleId = Core.activeModuleId === 'raremap' ? null : Core.activeModuleId;
+    Core.updateModuleButtons();
+  };
+
+  // -------------------------- 모듈 4: 던전 (v1.2 신규) --------------------------
+  // 5개 던전을 아래 우선순위로 순회: 입장권이 있는 던전만 실제로 입장한다.
+  //   [구] 수행자의 탑: 상층부 > 수행자의 탑: 상층부 > [구] 신비의 동굴 > 신비의 동굴 > 지하 하수도(일일)
+  Modules.dungeon = {
+    id: 'dungeon',
+    running: false,
+    stopRequested: false,
+    cycleCount: 0, // 오늘 클리어한 던전 개수
+    config: {
+      enableDailySewer: true, // 일일 던전 중 "지하 하수도"만 자동화 대상 (깊은 숲속/각성의 탑은 비활성화)
+      rerollMinTokens: 50, // 이 값 미만이면 리롤 안 하고 넘어가기
+      // 던전별 즉시완료(즉시 최상층 도전) 시도 기준 - 0으로 두면 해당 던전은 즉시완료 시도 안 함.
+      // 정확한 적중치/회피치는 게임 화면에 표시되지 않아, 아래 공식으로 근사 계산함(공격속도 ≈ 속도로 근사, 무기 무게 미반영 - 추후 보정 필요):
+      //   회피치(EV) ≈ 지능*3.5 + 행운*2 + 속도*2
+      //   적중치(AC) ≈ 정신*2.8 + 행운*1.6 + 속도*1.6
+      instantClear: {
+        oldMasterTower: { targetAC: 4000, targetEV: 4500 },
+        masterTower: { targetAC: 4000, targetEV: 4500 },
+        oldMysticCave: { targetAC: 5500, targetEV: 6000 },
+        mysticCave: { targetAC: 5500, targetEV: 6000 },
+        sewer: { targetAC: 0, targetEV: 0 }, // 확인된 기준치 없음 - 기본은 시도 안 함(0=비활성)
+      },
+    },
+    // 실행 중 상태
+    currentDungeonId: null,
+    difficulty: '매우어려움', // 'shim' 상태에서 항상 최우선. 패배 시 '어려움'으로 하향(다시 못 올림).
+    deathLimit: null,
+    instantClearTried: false,
+    boughtGodStrikeOrEquiv: false, // 신의 일격/일격필살/회심의 일격 (신비의동굴/수행자의탑: 동급 1회 한정)
+    boughtSingleStat: {}, // { 속도:true, 행운:true, 정신:true, 지능:true, 힘:true, 생명:true, 체력:true, 마나:true }
+    // 일일 던전(지하 하수도) 전용: 신의일격/일격필살/회심의일격을 개별 우선순위로 취급
+    boughtGodStrike: false,
+    boughtCertainHit: false, // 일격필살
+    boughtCritStrike: false, // 회심의 일격
+    boughtRegen: false,
+  };
+
+  // 던전 정의 (우선순위 순서 그대로)
+  Modules.dungeon.DUNGEONS = [
+    {
+      id: 'oldMasterTower',
+      label: '[구] 수행자의 탑: 상층부',
+      requiredItemName: '수행자의 열쇠',
+      daily: false,
+      statMode: 'standard', // 속도/행운/정신/지능 각 1회, 금/칠색 등급만
+      abilityMode: 'equalPriority', // 신의일격/일격필살/회심의일격 동급 취급
+    },
+    {
+      id: 'masterTower',
+      label: '수행자의 탑: 상층부',
+      requiredItemName: '수행자의 기록',
+      daily: false,
+      statMode: 'standard',
+      abilityMode: 'equalPriority',
+    },
+    {
+      id: 'oldMysticCave',
+      label: '[구] 신비의 동굴',
+      requiredItemName: '빛을 내는 랜턴',
+      daily: false,
+      statMode: 'standard',
+      abilityMode: 'equalPriority',
+    },
+    {
+      id: 'mysticCave',
+      label: '신비의 동굴',
+      requiredItemName: '동굴 탐험 기록',
+      daily: false,
+      statMode: 'standard',
+      abilityMode: 'equalPriority',
+    },
+    {
+      id: 'sewer',
+      label: '지하 하수도',
+      requiredItemName: null,
+      daily: true,
+      statMode: 'extended', // 재생4/5, 힘/생명/체력/마나까지 포함
+      abilityMode: 'ordered', // 신의일격 > 일격필살 > 회심의일격 순서 (동급 아님)
+    },
+  ];
+
+  const STAT_TARGET_ORDER = ['속도', '행운', '정신', '지능'];
+  const STAT_EXTENDED_ORDER = ['속도', '행운', '정신', '지능', '힘', '생명', '체력', '마나'];
+  const GRADE_COLOR = {
+    gold: 'rgb(255, 215, 0)', // 금 등급
+    rainbow: 'rgb(255, 20, 147)', // 칠색 등급 (실제로는 진한 핑크색으로 렌더링됨)
+  };
+
+  Modules.dungeon.bodyTextClean = function () {
+    return Core.bodyText();
+  };
+
+  // ---- 던전 목록 화면 파싱 ----
+  Modules.dungeon.getDungeonCardEl = function (label) {
+    const heading = [...document.querySelectorAll('*')].find(
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim() === label &&
+        !el.closest('#lrm-panel') &&
+        !el.closest('#lrm-banner')
+    );
+    if (!heading) return null;
+    // 카드 컨테이너: "입장" 버튼을 포함하는 가장 가까운 조상
+    let node = heading;
+    for (let i = 0; i < 8; i++) {
+      node = node.parentElement;
+      if (!node) return null;
+      if ([...node.querySelectorAll('button')].some((b) => b.textContent.trim() === '입장')) {
+        return node;
+      }
+    }
+    return null;
+  };
+
+  Modules.dungeon.getTicketCount = function (dungeonDef) {
+    if (dungeonDef.daily) return Infinity; // 일일 던전은 별도 소모 아이템 없음(입장 횟수 공유로 별도 체크)
+    const card = this.getDungeonCardEl(dungeonDef.label);
+    if (!card) return 0;
+    const m = card.textContent.match(new RegExp(`${dungeonDef.requiredItemName}\\s*\\(([\\d,]+)개\\s*보유\\)`));
+    return m ? parseInt(m[1].replace(/,/g, ''), 10) : 0;
+  };
+
+  Modules.dungeon.isDungeonCompletedToday = function (dungeonDef) {
+    const card = this.getDungeonCardEl(dungeonDef.label);
+    if (!card) return false;
+    return card.textContent.includes('오늘 완료');
+  };
+
+  Modules.dungeon.goToDungeonSelect = async function () {
+    await Core.clickNavMenuExact('전투', '던전');
+    await Core.waitFor(() => Core.bodyText().includes('일일 던전'));
+  };
+
+  // v1.2.2 신규: 던전 목록 화면에서 한 번에 5개 던전 전부의 입장권/완료 여부를 확인해
+  // "입장 가능한 던전 큐"를 만든다. 예전에는 던전마다 매번 메뉴를 다시 열어 하나씩
+  // 확인하느라 시간이 걸렸는데, 이제 목록 화면 한 번 로드로 전부 판단한다.
+  Modules.dungeon.scanEligibleDungeons = function () {
+    const queue = [];
+    for (const dungeonDef of this.DUNGEONS) {
+      if (dungeonDef.daily && !this.config.enableDailySewer) {
+        Core.log('dungeon', `"${dungeonDef.label}" 비활성화 설정 - 건너뜀`);
+        continue;
+      }
+      if (this.isDungeonCompletedToday(dungeonDef)) {
+        Core.log('dungeon', `"${dungeonDef.label}" 오늘 이미 완료됨 - 건너뜀`);
+        continue;
+      }
+      const tickets = this.getTicketCount(dungeonDef);
+      if (!dungeonDef.daily && tickets <= 0) {
+        Core.log('dungeon', `"${dungeonDef.label}" 입장권 없음(${dungeonDef.requiredItemName} 0개) - 건너뜀`);
+        continue;
+      }
+      Core.log(
+        'dungeon',
+        dungeonDef.daily
+          ? `"${dungeonDef.label}" 입장 가능 (일일 던전) - 큐에 추가`
+          : `"${dungeonDef.label}" 입장 가능 (${dungeonDef.requiredItemName} ${tickets}개 보유) - 큐에 추가`
+      );
+      queue.push(dungeonDef);
+    }
+    return queue;
+  };
+
+  // ---- 던전 입장 (캐릭터 정보 확인 모달 → 던전 입장 확인 모달) ----
+  Modules.dungeon.enterDungeon = async function (dungeonDef) {
+    const card = this.getDungeonCardEl(dungeonDef.label);
+    if (!card) {
+      Core.log('dungeon', `"${dungeonDef.label}" 카드를 찾지 못함`);
+      return false;
+    }
+    const enterBtn = [...card.querySelectorAll('button')].find((b) => b.textContent.trim() === '입장');
+    if (!enterBtn || enterBtn.disabled) {
+      Core.log('dungeon', `"${dungeonDef.label}" 입장 버튼이 없거나 비활성 상태`);
+      return false;
+    }
+
+    enterBtn.click();
+    await Core.humanDelay(1000, 1800);
+
+    // 1) 캐릭터 정보 확인 모달
+    const charModalConfirm = await Core.retryStep(
+      '캐릭터 정보 모달의 확인 버튼 찾기',
+      () => {
+        if (!Core.bodyText().includes('캐릭터 정보')) return null;
+        return Core.findButtonInDialog('캐릭터 정보', '확인');
+      },
+      { attempts: 4, waits: [1000, 2000, 3000, 4000] }
+    );
+    if (charModalConfirm) {
+      charModalConfirm.click();
+      await Core.humanDelay(1000, 1900);
+    }
+
+    // 캐릭터 정보 모달이 실제로 닫혔는지 확인 (안 닫혔으면 아직 남은 다른 확인 절차가 있을 수 있음)
+    await Core.retryStep(
+      '캐릭터 정보 모달 닫힘 확인',
+      () => (!Core.bodyText().includes('캐릭터 정보') ? true : null),
+      { attempts: 3, waits: [1000, 2000, 3000] }
+    );
+
+    // 2) 던전 입장 확인 모달 (사망 허용 횟수 파싱)
+    const entryModalFound = await Core.retryStep(
+      '던전 입장 확인 모달 찾기',
+      () => (Core.bodyText().includes('던전 입장 확인') ? true : null),
+      { attempts: 4, waits: [1000, 2000, 3000, 4000] }
+    );
+    if (!entryModalFound) {
+      Core.log('dungeon', '"던전 입장 확인" 모달을 확인하지 못했습니다 (이미 입장됐을 수 있음).');
+    } else {
+      const deathMatch = Core.bodyText().match(/(\d+)\s*번\s*사망\s*시\s*던전에서\s*강제\s*퇴장/);
+      this.deathLimit = deathMatch ? parseInt(deathMatch[1], 10) : null;
+      Core.log('dungeon', `"${dungeonDef.label}" 부활 허용: ${this.deathLimit ?? '알 수 없음'}회`);
+
+      const enterConfirmBtn = await Core.retryStep('던전 입장 확인 모달의 입장 버튼 찾기', () =>
+        Core.findButtonInDialog('던전 입장 확인', '입장')
+      );
+      if (!enterConfirmBtn) {
+        Core.log('dungeon', '입장 확인 버튼을 찾지 못했습니다.');
+        return false;
+      }
+      enterConfirmBtn.click();
+      await Core.humanDelay(1100, 2000);
+    }
+
+    const enteredBattle = await Core.retryStep('던전 전투 화면 진입 확인', () =>
+      /진행도/.test(Core.bodyText()) ? true : null
+    );
+    if (!enteredBattle) {
+      Core.log('dungeon', '던전 전투 화면 진입을 확인하지 못했습니다.');
+      return false;
+    }
+
+    // 새 던전 진입 시 상태 초기화
+    this.difficulty = '매우어려움';
+    this.instantClearTried = false;
+    this.boughtGodStrikeOrEquiv = false;
+    this.boughtSingleStat = {};
+    this.boughtGodStrike = false;
+    this.boughtCertainHit = false;
+    this.boughtCritStrike = false;
+    this.boughtRegen = false;
+    return true;
+  };
+
+  // ---- 진행도/전투 화면 ----
+  Modules.dungeon.readProgress = function () {
+    const m = Core.bodyText().match(/진행도\s*\n?\s*(\d+)\s*\/\s*15/);
+    return m ? parseInt(m[1], 10) : null;
+  };
+
+  Modules.dungeon.selectDifficultyTab = async function () {
+    const tabs = [...document.querySelectorAll('[role="tab"]')];
+    const target = tabs.find((t) => t.textContent.trim() === this.difficulty);
+    if (!target) return false;
+    if (target.getAttribute('aria-selected') !== 'true') {
+      target.click();
+      await Core.humanDelay(900, 1600);
+    }
+    return true;
+  };
+
+  // 캐릭터 스탯 읽기 (자세히 패널이 아니라 상단 요약 or 게임 메인 정보 패널의 힘/생명/정신/지능/행운/속도)
+  Modules.dungeon.readStats = function () {
+    const text = Core.bodyText();
+    const grab = (label) => {
+      const m = text.match(new RegExp(`${label}\\s*[:：]?\\s*([\\d,]+)`));
+      return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+    };
+    return {
+      힘: grab('힘'),
+      생명: grab('생명'),
+      정신: grab('정신'),
+      지능: grab('지능'),
+      행운: grab('행운'),
+      속도: grab('속도'),
+    };
+  };
+
+  // 무기 무게 데이터가 없어 공격속도 ≈ 속도로 근사 계산 (아래 getCurrentACEV의 폴백용)
+  Modules.dungeon.estimateACEV = function () {
+    const s = this.readStats();
+    if (!s || s.속도 == null) return null;
+    const atkSpeed = s.속도;
+    const EV = (s.지능 || 0) * 3.5 + (s.행운 || 0) * 2 + atkSpeed * 2;
+    const AC = (s.정신 || 0) * 2.8 + (s.행운 || 0) * 1.6 + atkSpeed * 1.6;
+    return { AC, EV };
+  };
+
+  // v1.2.7: "자세히"를 펼치면 실제 적중치/회피치 수치가 화면에 그대로 표시된다는 것을
+  // 확인함. 근사 공식 대신 이 실제 값을 우선 사용하도록 수정(근사식은 폴백으로만 유지).
+  // v1.2.10 버그 수정: "자세히" 버튼은 힘/생명/정신/지능/행운/속도 원본 스탯과
+  // 직업/메인 어빌리티를 보여주는 별개의 토글이었고, 적중치/회피치는 캐릭터 이름 옆의
+  // 화살표(▲/▼) 토글을 눌러야 나오는 것이었음(사용자가 스크린샷으로 확인해줌).
+  // 캐릭터 카드(무기/방어구/장신구 + HP/MP가 함께 있는 컨테이너) 안에서 "자세히"가
+  // 아닌 버튼(이름 옆 화살표 토글)을 찾아 클릭하도록 수정.
+  Modules.dungeon.findCombatStatsToggleButton = function () {
+    const cardCandidates = [...document.querySelectorAll('*')].filter((el) => {
+      if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
+      const t = el.textContent;
+      return t.includes('무기') && t.includes('HP') && t.includes('MP');
+    });
+    if (cardCandidates.length === 0) return null;
+    const card = cardCandidates.reduce((a, b) => (a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b));
+    const buttons = [...card.querySelectorAll('button')];
+    return buttons.find((b) => b.textContent.trim() !== '자세히') || null;
+  };
+
+  Modules.dungeon.ensureDetailsExpanded = async function () {
+    if (/적중치[:：]?\s*[\d,]+/.test(Core.bodyText()) && /회피치[:：]?\s*[\d,]+/.test(Core.bodyText())) {
+      return true;
+    }
+    const expanded = await Core.retryStep(
+      '전투 스탯(적중치/회피치) 토글 펼치기',
+      async () => {
+        const btn = this.findCombatStatsToggleButton();
+        if (!btn) return null;
+        btn.click();
+        await Core.humanDelay(800, 1500);
+        return /적중치[:：]?\s*[\d,]+/.test(Core.bodyText()) && /회피치[:：]?\s*[\d,]+/.test(Core.bodyText()) ? true : null;
+      },
+      { attempts: 3, waits: [800, 1500, 2500] }
+    );
+    if (!expanded) {
+      Core.log('dungeon', '전투 스탯 토글을 펼쳤지만 적중치/회피치 텍스트를 확인하지 못했습니다 - 근사 공식으로 대체합니다.');
+    }
+    return expanded;
+  };
+
+  Modules.dungeon.readRealACEV = function () {
+    const text = Core.bodyText();
+    const acMatch = text.match(/적중치[:：]?\s*([\d,]+)/);
+    const evMatch = text.match(/회피치[:：]?\s*([\d,]+)/);
+    if (!acMatch || !evMatch) return null;
+    return { AC: parseInt(acMatch[1].replace(/,/g, ''), 10), EV: parseInt(evMatch[1].replace(/,/g, ''), 10) };
+  };
+
+  Modules.dungeon.getCurrentACEV = async function () {
+    await this.ensureDetailsExpanded();
+    const real = this.readRealACEV();
+    if (real) return { AC: real.AC, EV: real.EV, isReal: true };
+    const est = this.estimateACEV();
+    return est ? { AC: est.AC, EV: est.EV, isReal: false } : null;
+  };
+
+  Modules.dungeon.tryInstantClear = async function (dungeonDef) {
+    if (this.instantClearTried) return false;
+    const target = this.config.instantClear[dungeonDef.id];
+    if (!target || (!target.targetAC && !target.targetEV)) return false;
+
+    const est = await this.getCurrentACEV();
+    if (!est) return false;
+    const tag = est.isReal ? '실제' : '추정';
+    if (est.AC < target.targetAC || est.EV < target.targetEV) {
+      Core.log(
+        'dungeon',
+        `즉시완료 기준 미달 (${tag} 적중 ${Math.round(est.AC)}/${target.targetAC}, ${tag} 회피 ${Math.round(est.EV)}/${target.targetEV}) → 다음 전투에서 다시 확인`
+      );
+      // v1.2.6 버그 수정: 여기서 instantClearTried를 true로 세우면 스탯이 나중에 기준을
+      // 넘어도 다시는 확인하지 않게 됨(그래서 "회피/적중을 초과했는데도 즉완을 누르지
+      // 않는다"는 문제가 발생). "실패"는 실제로 도전을 시도했다가 진 경우를 말하는
+      // 것이므로, 기준 미달로 아직 시도조차 안 한 경우엔 플래그를 세우지 않고 다음
+      // 전투에서 다시 확인하도록 둔다.
+      return false;
+    }
+
+    const btn = Core.findButtonByText('즉시 최상층 도전');
+    if (!btn || btn.disabled) {
+      Core.log('dungeon', '"즉시 최상층 도전" 버튼을 사용할 수 없는 상태입니다 (캐릭터 등급 제한 등). 이후 재확인하지 않습니다.');
+      this.instantClearTried = true; // 버튼 자체를 못 쓰는 경우는 스탯이 올라도 의미 없으므로 여기서만 비활성화
+      return false;
+    }
+    Core.log('dungeon', `즉시완료 기준 충족 (${tag} 적중 ${Math.round(est.AC)}/${target.targetAC}, ${tag} 회피 ${Math.round(est.EV)}/${target.targetEV}) → 즉시 최상층 도전 시도`);
+    btn.click();
+    await Core.humanDelay(1100, 2000);
+    // v1.2.11 버그 수정: "즉시 최상층 도전" 클릭 후 별도의 확인 팝업("도전"/"취소")이
+    // 뜨는데 이걸 처리하는 코드가 없어서, 확인을 안 누른 채로 전투 결과만 기다리다
+    // 계속 실패하던 문제 수정. 팝업이 뜨면 "도전" 버튼을 찾아 눌러서 확정한다.
+    const confirmBtn = await Core.retryStep(
+      '즉시 최상층 도전 확인 팝업의 "도전" 버튼 찾기',
+      () => (Core.bodyText().includes('즉시 최상층 도전') ? Core.findButtonInDialog('즉시 최상층 도전', '도전') : null),
+      { attempts: 3, waits: [800, 1500, 2500] }
+    );
+    if (confirmBtn) {
+      confirmBtn.click();
+      await Core.humanDelay(1100, 2000);
+    } else {
+      Core.log('dungeon', '즉시 최상층 도전 확인 팝업을 찾지 못했습니다 (이미 진행됐을 수 있음).');
+    }
+    this.instantClearTried = true; // 실제로 도전을 시도했으므로 결과(승/패)와 무관하게 이후 재시도하지 않음
+    return true;
+  };
+
+  Modules.dungeon.startBattle = async function () {
+    await this.selectDifficultyTab();
+    const btn = await Core.retryStep('전투 시작 버튼 찾기', () => Core.findButtonByText('전투 시작'));
+    if (!btn) return false;
+    btn.click();
+    await Core.humanDelay(1100, 2000);
+    return true;
+  };
+
+  Modules.dungeon.waitForBattleResult = async function () {
+    return Core.retryStep(
+      '전투 결과 확인',
+      () => {
+        const t = Core.bodyText();
+        if (/승리!/.test(t)) return 'win';
+        if (/패배\.{2,}/.test(t)) return 'lose';
+        return null;
+      },
+      { attempts: 5, waits: [1500, 3000, 5000, 8000, 12000] }
+    );
+  };
+
+  Modules.dungeon.clickBackFromResult = async function () {
+    const btn = await Core.retryStep('돌아가기 버튼 찾기', () => Core.findButtonByText('돌아가기'));
+    if (!btn) return false;
+    btn.click();
+    await Core.humanDelay(1100, 2000);
+    return true;
+  };
+
+  // ---- 상점 처리 ----
+  Modules.dungeon.isShopScreen = function () {
+    return /아이템\s*상점/.test(Core.bodyText());
+  };
+
+  Modules.dungeon.isDungeonCompleteScreen = function () {
+    return /던전\s*완료\s*보상/.test(Core.bodyText());
+  };
+
+  Modules.dungeon.getShopTokenCount = function () {
+    const m = Core.bodyText().match(/아이템\s*상점\s*\n?\s*(\d+)/);
+    return m ? parseInt(m[1], 10) : 0;
+  };
+
+  // 상점 카드 3개를 { el, label, cost, gradeColor } 형태로 파싱
+  // v1.2.4: 예전 방식(텍스트 리프를 먼저 찾고 테두리 있는 조상을 역추적)이 실제
+  // 게임에서 카드 인식에 계속 실패해(토큰만 계속 쌓이고 구매/리롤이 전혀 안 됨) 아예
+  // 안 통했던 것으로 확인됨. 등급 테두리 색(금/칠색/은/동)이 정해져 있다는 걸 이용해
+  // "테두리 색이 일치하는 요소를 먼저 찾고, 그 요소의 텍스트를 라벨로 쓰는" 방식으로
+  // 완전히 뒤집어서 재작성 - 수동 테스트 때 실제로 안정적으로 동작을 확인한 방식.
+  Modules.dungeon.GRADE_COLORS_ALL = [
+    'rgb(255, 215, 0)', // 금
+    'rgb(255, 20, 147)', // 칠색
+    'rgb(192, 192, 192)', // 은
+    'rgb(205, 127, 50)', // 동
+  ];
+
+  Modules.dungeon.getShopCards = function () {
+    if (!this.isShopScreen()) return [];
+    const bordered = [...document.querySelectorAll('*')].filter((el) => {
+      if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
+      const style = getComputedStyle(el);
+      if (style.borderStyle === 'none' || parseFloat(style.borderWidth) <= 0) return false;
+      return this.GRADE_COLORS_ALL.includes(style.borderColor);
+    });
+    const seen = new Set();
+    const cards = [];
+    for (const el of bordered) {
+      // v1.2.5 버그 수정: el.textContent는 자식 요소 사이에 줄바꿈을 넣어주지 않아서,
+      // 라벨("행운 +98")과 바로 옆의 가격 숫자("30")가 구분자 없이 그대로 붙어
+      // "행운 +9830" 같은 엉뚱한 라벨로 파싱되는 문제가 있었음. 렌더링된 줄바꿈을
+      // 반영하는 innerText를 사용해 첫 줄(라벨)만 정확히 가져오도록 수정.
+      const label = (el.innerText || el.textContent).trim().split('\n')[0].trim();
+      if (!label || label.length > 30 || seen.has(label)) continue;
+      seen.add(label);
+      cards.push({ selectEl: el, label, borderColor: getComputedStyle(el).borderColor });
+      if (cards.length >= 3) break;
+    }
+    return cards;
+  };
+
+  // v1.2.9: 라벨 앞에 아이콘/공백 등 예기치 않은 문자가 섞여 들어와 ^ 고정 매칭이
+  // 실패하는 사례가 있어(예: "모든 스탯 +42"를 못 알아보고 그냥 넘어감), 문자열 시작
+  // 고정(^) 없이 어디에 있어도 매칭되도록 전부 완화함.
+  Modules.dungeon.isRegenLabel = function (label) {
+    return /재생\s*LV\s*[45]/.test(label);
+  };
+
+  Modules.dungeon.isGodStrikeFamily = function (label) {
+    return /신의\s*일격|일격\s*필살|회심의\s*일격/.test(label);
+  };
+
+  Modules.dungeon.isAllStatsLabel = function (label) {
+    return /모든\s*스탯\s*\+/.test(label);
+  };
+
+  Modules.dungeon.parseStatLabel = function (label) {
+    const m = label.match(/(속도|행운|정신|지능|힘|생명|체력|마나)\s*\+(\d+)/);
+    if (!m) return null;
+    return { stat: m[1], value: parseInt(m[2], 10) };
+  };
+
+  Modules.dungeon.parseAllStatsValue = function (label) {
+    const m = label.match(/^모든\s*스탯\s*\+(\d+)/);
+    return m ? parseInt(m[1], 10) : 0;
+  };
+
+  Modules.dungeon.qualifiesGrade = function (borderColor) {
+    return borderColor === GRADE_COLOR.gold || borderColor === GRADE_COLOR.rainbow;
+  };
+
+  // 우선순위대로 이번 상점에서 살 카드를 고른다. 없으면 null 반환.
+  Modules.dungeon.pickShopCard = function (dungeonDef, cards, isLastShopBeforeBoss) {
+    // 1) 어빌리티 (신의 일격 / 일격필살 / 회심의 일격)
+    if (dungeonDef.abilityMode === 'equalPriority') {
+      if (!this.boughtGodStrikeOrEquiv) {
+        const abilityCard = cards.find((c) => this.isGodStrikeFamily(c.label));
+        if (abilityCard) return { card: abilityCard, onBought: () => (this.boughtGodStrikeOrEquiv = true) };
+      }
+    } else {
+      // 일일 던전: 신의일격 > 일격필살 > 회심의일격 순서
+      if (!this.boughtGodStrike) {
+        const c = cards.find((c) => /신의\s*일격/.test(c.label));
+        if (c) return { card: c, onBought: () => (this.boughtGodStrike = true) };
+      }
+    }
+
+    // 2) 모든 스탯 (수치 높은 것 우선)
+    const allStatCards = cards.filter((c) => this.isAllStatsLabel(c.label));
+    if (allStatCards.length > 0) {
+      allStatCards.sort((a, b) => this.parseAllStatsValue(b.label) - this.parseAllStatsValue(a.label));
+      return { card: allStatCards[0], onBought: () => {} };
+    }
+
+    // 3) (일일 던전만) 일격필살 > 회심의 일격
+    if (dungeonDef.abilityMode === 'ordered') {
+      if (!this.boughtCertainHit) {
+        const c = cards.find((c) => /일격\s*필살/.test(c.label));
+        if (c) return { card: c, onBought: () => (this.boughtCertainHit = true) };
+      }
+      if (!this.boughtCritStrike) {
+        const c = cards.find((c) => /회심의\s*일격/.test(c.label));
+        if (c) return { card: c, onBought: () => (this.boughtCritStrike = true) };
+      }
+      // 4) 재생4/5
+      if (!this.boughtRegen) {
+        const c = cards.find((c) => this.isRegenLabel(c.label));
+        if (c) return { card: c, onBought: () => (this.boughtRegen = true) };
+      }
+    }
+
+    // 5) 단일 스탯 (금/칠색 등급만, 스탯당 1회) - 던전 종류에 따라 대상 스탯 범위 다름
+    const statOrder = dungeonDef.statMode === 'extended' ? STAT_EXTENDED_ORDER : STAT_TARGET_ORDER;
+    const statCandidates = cards
+      .map((c) => ({ c, parsed: this.parseStatLabel(c.label) }))
+      .filter(
+        (x) =>
+          x.parsed &&
+          statOrder.includes(x.parsed.stat) &&
+          !this.boughtSingleStat[x.parsed.stat] &&
+          this.qualifiesGrade(x.c.borderColor)
+      );
+    if (statCandidates.length > 0) {
+      statCandidates.sort((a, b) => b.parsed.value - a.parsed.value);
+      const best = statCandidates[0];
+      return { card: best.c, onBought: () => (this.boughtSingleStat[best.parsed.stat] = true) };
+    }
+
+    // 6) 마지막 스테이지(15번째) 직전 상점: 위 우선순위에 맞는 게 없으면 아무거나 수치 높은 것 구매
+    if (isLastShopBeforeBoss && cards.length > 0) {
+      const withValue = cards.map((c) => {
+        const stat = this.parseStatLabel(c.label);
+        const all = this.parseAllStatsValue(c.label);
+        return { c, value: stat ? stat.value : all };
+      });
+      withValue.sort((a, b) => b.value - a.value);
+      return { card: withValue[0].c, onBought: () => {} };
+    }
+
+    return null;
+  };
+
+  Modules.dungeon.handleShop = async function (dungeonDef, progress) {
+    const isLastShopBeforeBoss = progress === 14; // 14번째 몬스터를 잡은 직후 상점 = 15번째(보스) 직전
+    let rerollGuard = 0;
+    while (this.running) {
+      const tokens = this.getShopTokenCount();
+      const cards = this.getShopCards();
+      if (cards.length === 0) {
+        Core.log('dungeon', '상점 카드를 파싱하지 못했습니다. 넘어가기를 시도합니다.');
+        break;
+      }
+
+      const pick = this.pickShopCard(dungeonDef, cards, isLastShopBeforeBoss);
+      if (pick) {
+        let bought = false;
+        for (let buyAttempt = 0; buyAttempt < 2 && !bought; buyAttempt++) {
+          pick.card.selectEl.click();
+          await Core.humanDelay(900, 1600);
+          const buyBtn = Core.findButtonByText('구매');
+          if (!buyBtn) break;
+          buyBtn.click();
+          await Core.humanDelay(1100, 2000);
+          bought = await Core.waitFor(
+            () => (!this.isShopScreen() || Core.bodyText().includes('구매했습니다') ? true : null),
+            4000
+          );
+          bought = bought && Core.bodyText().includes('구매했습니다');
+          if (!bought && buyAttempt === 0) {
+            Core.log('dungeon', `"${pick.card.label}" 구매 확인 실패 - 한 번 더 시도`);
+            await Core.humanDelay(500, 1000);
+          }
+        }
+        if (bought) {
+          pick.onBought();
+          Core.log('dungeon', `상점 구매: ${pick.card.label}`);
+          // 구매하면 자동으로 다음 화면으로 넘어감
+          return;
+        }
+        // 구매 실패(토큰 부족 등으로 선택이 안 먹었을 가능성) - 넘어가기로 폴백
+        Core.log('dungeon', `"${pick.card.label}" 구매를 확인하지 못함(재시도 포함) - 넘어가기로 진행`);
+        break;
+      }
+
+      // 우선순위에 맞는 게 없음: 토큰 충분하면 리롤, 아니면 넘어가기
+      if (!isLastShopBeforeBoss && tokens >= this.config.rerollMinTokens && rerollGuard < 15) {
+        const rerollBtn = Core.findButtonByText('리롤');
+        if (rerollBtn && !rerollBtn.disabled) {
+          rerollBtn.click();
+          await Core.humanDelay(1100, 2000);
+          rerollGuard += 1;
+          continue;
+        }
+      }
+      break;
+    }
+
+    const skipBtn = Core.findButtonByText('넘어가기');
+    if (skipBtn) {
+      skipBtn.click();
+      await Core.humanDelay(1100, 2000);
+    }
+  };
+
+  // ---- 한 던전 전체 클리어 루프 ----
+  // opts.resume === true 이면 이미 던전 안에 들어와 있는 상태(스크립트 재시작 등)로 보고
+  // enterDungeon()을 건너뛰고 현재 화면부터 바로 이어서 처리한다.
+  Modules.dungeon.runOneDungeon = async function (dungeonDef, opts = {}) {
+    if (!opts.resume) {
+      Core.log('dungeon', `"${dungeonDef.label}" 입장 시도`);
+      const entered = await this.enterDungeon(dungeonDef);
+      if (!entered || !this.running) return false;
+    } else {
+      Core.log('dungeon', `"${dungeonDef.label}" 이미 진행 중이던 상태에서 이어서 진행합니다.`);
+      // 이어하기 시에는 이전 실행에서 무엇을 샀었는지 알 수 없으므로 안전하게 리셋.
+      // (최악의 경우 이미 가진 단일 스탯을 한 번 더 사는 정도의 사소한 손해만 발생)
+      // v1.2.8 버그 수정: 여기서 instantClearTried를 true로 세우면 이어하기 세션에서는
+      // 즉시완료를 영영 확인하지 않게 됨(스탯이 기준을 넘겨도 매 전투 재확인하는 최신
+      // 로직과 모순됨). 이어하기여도 아직 실제로 도전한 적은 없으므로 false로 유지해서
+      // 정상적으로 매 전투 재확인하도록 함.
+      this.instantClearTried = false;
+      this.boughtGodStrikeOrEquiv = false;
+      this.boughtSingleStat = {};
+      this.boughtGodStrike = false;
+      this.boughtCertainHit = false;
+      this.boughtCritStrike = false;
+      this.boughtRegen = false;
+      const tabs = [...document.querySelectorAll('[role="tab"]')];
+      const selectedTab = tabs.find((t) => t.getAttribute('aria-selected') === 'true');
+      if (selectedTab && ['쉬움', '어려움', '매우어려움'].includes(selectedTab.textContent.trim())) {
+        this.difficulty = selectedTab.textContent.trim();
+      }
+    }
+
+    while (this.running) {
+      const progress = this.readProgress();
+      if (progress === null) {
+        Core.log('dungeon', '진행도를 읽지 못했습니다. 상점/완료 화면인지 확인합니다.');
+      }
+
+      if (this.isDungeonCompleteScreen()) {
+        const claimBtn = await Core.retryStep('"보상 받고 던전 나가기" 버튼 찾기', () =>
+          Core.findButtonByText('보상 받고 던전 나가기')
+        );
+        if (!claimBtn) {
+          Core.notifyStopped('dungeon', '"보상 받고 던전 나가기" 버튼을 찾지 못했습니다.');
+          return false;
+        }
+        claimBtn.click();
+        await Core.humanDelay(1100, 2000);
+        // v1.2.3: 실제로 보상을 받고 화면을 벗어났는지 확인한 뒤에만 "클리어"로 카운트.
+        // (버튼만 찾으면 바로 클리어로 기록하던 예전 로직은 클릭이 실패해도 클리어로
+        // 잘못 기록될 수 있었음 - 보상 수령 = 클리어라는 원칙에 맞게 수정)
+        const left = await Core.retryStep(
+          '보상 수령 후 화면 전환 확인',
+          () => (!this.isDungeonCompleteScreen() ? true : null),
+          { attempts: 3, waits: [1000, 2000, 3000] }
+        );
+        if (!left) {
+          Core.notifyStopped('dungeon', '보상을 받았지만 화면 전환을 확인하지 못했습니다. 상태를 확인해주세요.');
+          return false;
+        }
+        Core.log('dungeon', `"${dungeonDef.label}" 클리어 완료! (보상 수령 확인됨)`);
+        this.cycleCount += 1;
+        this.saveClearCount(this.cycleCount);
+        Core.updateModuleButtons();
+        return true;
+      }
+
+      if (this.isShopScreen()) {
+        await this.handleShop(dungeonDef, progress);
+        if (!this.running) return false;
+        continue;
+      }
+
+      // 전투 화면 (진행도 X/15, 난이도 선택 + 전투 시작)
+      if (/이번\s*전투에서\s*상대할/.test(Core.bodyText())) {
+        let result = null;
+        for (let battleAttempt = 0; battleAttempt < 3 && !result && this.running; battleAttempt++) {
+          let usedInstant = false;
+          if (!this.instantClearTried) {
+            usedInstant = await this.tryInstantClear(dungeonDef);
+          }
+          if (!usedInstant) {
+            await this.selectDifficultyTab();
+            const started = await this.startBattle();
+            if (!started) {
+              Core.log('dungeon', `"전투 시작" 버튼을 찾지 못했습니다 (시도 ${battleAttempt + 1}/3).`);
+              await Core.sleep(2000);
+              continue;
+            }
+          }
+          result = await this.waitForBattleResult();
+          if (!result) {
+            Core.log('dungeon', `전투 결과 확인 실패 (시도 ${battleAttempt + 1}/3) - 재시도`);
+            await Core.sleep(2000);
+          }
+        }
+
+        if (result === 'win') {
+          await this.clickBackFromResult();
+          continue;
+        }
+        if (result === 'lose') {
+          Core.log('dungeon', `전투 패배 (난이도: ${this.difficulty})`);
+          if (this.difficulty === '매우어려움') {
+            this.difficulty = '어려움';
+            Core.log('dungeon', '매우어려움에서 패배 → 이후 어려움으로 난이도를 낮춰서 계속 진행 (다시 올리지 않음)');
+          }
+          const kickedOut = await Core.waitFor(() => !/진행도/.test(Core.bodyText()), 3000);
+          await this.clickBackFromResult();
+          if (kickedOut) {
+            Core.log('dungeon', '부활 허용 횟수를 초과하여 던전에서 강제 퇴장된 것으로 보입니다.');
+            return false;
+          }
+          continue;
+        }
+        Core.notifyStopped('dungeon', '전투 결과를 여러 번 재시도해도 확인하지 못했습니다. 화면 상태를 확인해주세요.');
+        return false;
+      }
+
+      // 어느 화면인지 판별 못한 경우: 잠시 대기 후 재확인
+      await Core.sleep(1500);
+      if (!/진행도|아이템\s*상점|던전\s*완료\s*보상/.test(Core.bodyText())) {
+        Core.log('dungeon', '알 수 없는 화면 상태 - 정지합니다.');
+        return false;
+      }
+    }
+    return false;
+  };
+
+  // v1.2.3 신규: 스크립트를 다시 시작했을 때 이미 던전 안(전투/상점/완료 화면)에
+  // 들어와 있는 상태라면 그 던전 이름을 인식해서 이어서 진행할 수 있게 한다.
+  Modules.dungeon.detectResumeDungeon = function () {
+    if (!/진행도/.test(Core.bodyText())) return null;
+    for (const d of this.DUNGEONS) {
+      const heading = [...document.querySelectorAll('*')].find(
+        (el) =>
+          el.children.length === 0 &&
+          el.textContent.trim() === d.label &&
+          !el.closest('#lrm-panel') &&
+          !el.closest('#lrm-banner')
+      );
+      if (heading) return d;
+    }
+    return null;
+  };
+
+  const DUNGEON_CONFIG_KEY = 'lrm-dungeon-config'; // GUI 설정값(즉시완료 목표치, 리롤 기준 등) 저장용
+
+  // v1.2.13: 적중치/회피치 즉시완료 목표치, 리롤 최소 토큰, 일일 던전 체크 등 GUI
+  // 설정값이 새로고침할 때마다 초기화되던 것을 localStorage에 저장해서 유지되도록 함.
+  Modules.dungeon.saveConfig = function () {
+    try {
+      localStorage.setItem(
+        DUNGEON_CONFIG_KEY,
+        JSON.stringify({
+          enableDailySewer: this.config.enableDailySewer,
+          rerollMinTokens: this.config.rerollMinTokens,
+          instantClear: this.config.instantClear,
+        })
+      );
+    } catch (e) {
+      /* localStorage 사용 불가 환경이면 조용히 무시 */
+    }
+  };
+
+  Modules.dungeon.loadConfigIntoSelf = function () {
+    try {
+      const raw = localStorage.getItem(DUNGEON_CONFIG_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (typeof saved.enableDailySewer === 'boolean') this.config.enableDailySewer = saved.enableDailySewer;
+      if (typeof saved.rerollMinTokens === 'number') this.config.rerollMinTokens = saved.rerollMinTokens;
+      if (saved.instantClear) {
+        Object.keys(this.config.instantClear).forEach((id) => {
+          if (saved.instantClear[id]) {
+            if (typeof saved.instantClear[id].targetAC === 'number') this.config.instantClear[id].targetAC = saved.instantClear[id].targetAC;
+            if (typeof saved.instantClear[id].targetEV === 'number') this.config.instantClear[id].targetEV = saved.instantClear[id].targetEV;
+          }
+        });
+      }
+    } catch (e) {
+      /* 저장된 값이 손상됐으면 기본값 그대로 사용 */
+    }
+  };
+
+  const DUNGEON_CLEAR_COUNT_KEY = 'lrm-dungeon-cleared-today'; // 오늘 클리어한 던전 개수 저장용 (새로고침해도 유지)
+
+  Modules.dungeon.getTodayDateStr = function () {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+
+  // v1.2.12 신규: "오늘 클리어한 던전" 개수가 페이지 새로고침/스크립트 재시작 때마다
+  // 0으로 초기화되던 것을 localStorage에 저장해서 유지되도록 함. 날짜가 바뀌면(다음 날)
+  // 자동으로 0부터 다시 센다.
+  Modules.dungeon.loadClearCount = function () {
+    try {
+      const raw = localStorage.getItem(DUNGEON_CLEAR_COUNT_KEY);
+      if (!raw) return 0;
+      const data = JSON.parse(raw);
+      if (data.date !== this.getTodayDateStr()) return 0;
+      return data.count || 0;
+    } catch (e) {
+      return 0;
+    }
+  };
+
+  Modules.dungeon.saveClearCount = function (count) {
+    try {
+      localStorage.setItem(DUNGEON_CLEAR_COUNT_KEY, JSON.stringify({ date: this.getTodayDateStr(), count }));
+    } catch (e) {
+      /* localStorage 사용 불가 환경이면 조용히 무시 */
+    }
+  };
+
+  Modules.dungeon.mainLoop = async function () {
+    const mod = this;
+    mod.cycleCount = mod.loadClearCount();
+    Core.log('dungeon', `던전 자동클리어 시작 (오늘 이미 클리어한 던전: ${mod.cycleCount}개)`);
+
+    // 이미 던전 진행 중이던 화면이면(스크립트 재시작 등) 목록 화면으로 가지 않고 바로 이어서 처리
+    const resumeDungeon = mod.detectResumeDungeon();
+    if (resumeDungeon) {
+      Core.log('dungeon', `이미 진행 중이던 "${resumeDungeon.label}"을(를) 인식했습니다 - 이어서 진행합니다.`);
+      await mod.runOneDungeon(resumeDungeon, { resume: true });
+      if (!mod.running) {
+        Core.log('dungeon', `던전 자동클리어 종료. 오늘 클리어한 던전: ${mod.cycleCount}개`);
+        mod.running = false;
+        Core.activeModuleId = Core.activeModuleId === 'dungeon' ? null : Core.activeModuleId;
+        Core.updateModuleButtons();
+        return;
+      }
+    }
+
+    await mod.goToDungeonSelect();
+    if (!mod.running) return;
+
+    const queue = mod.scanEligibleDungeons();
+    if (queue.length === 0) {
+      Core.log('dungeon', '입장 가능한 던전이 없습니다 (전부 완료됐거나 입장권이 없음). 정지합니다.');
+      mod.running = false;
+      Core.activeModuleId = Core.activeModuleId === 'dungeon' ? null : Core.activeModuleId;
+      Core.updateModuleButtons();
+      return;
+    }
+    Core.log('dungeon', `입장 큐 확정: ${queue.map((d) => d.label).join(' → ')}`);
+
+    for (const dungeonDef of queue) {
+      if (!mod.running) break;
+
+      // 이전 던전을 막 클리어했다면 "보상 받고 던전 나가기" 후 자동으로 던전 목록 화면에
+      // 돌아와 있으므로, 목록 화면이 아닐 때만 메뉴를 통해 다시 이동한다(불필요한 재진입 방지).
+      if (!/일일\s*던전/.test(Core.bodyText())) {
+        await mod.goToDungeonSelect();
+      }
+      if (!mod.running) break;
+
+      await mod.runOneDungeon(dungeonDef);
+      if (!mod.running) break;
+    }
+
+    Core.log('dungeon', `던전 자동클리어 종료. 오늘 클리어한 던전: ${mod.cycleCount}개`);
+    mod.running = false;
+    Core.activeModuleId = Core.activeModuleId === 'dungeon' ? null : Core.activeModuleId;
     Core.updateModuleButtons();
   };
 
@@ -1205,27 +2193,28 @@
     const mod = Modules[moduleId];
     if (!mod || !mod.running) return;
     mod.stopRequested = true;
-    mod.running = false; // 재전직 모듈의 while(mod.running) 루프는 이 값으로 즉시 멈춤
+    mod.running = false;
     if (Core.activeModuleId === moduleId) Core.activeModuleId = null;
     Core.log(moduleId, '사용자 요청으로 정지합니다...');
     Core.updateModuleButtons();
   };
 
   // ==========================================================================
-  // 패널 UI (탭 구조, 하나의 패널을 세 모듈이 공유)
+  // 패널 UI (탭 구조, 하나의 패널을 네 모듈이 공유)
   // ==========================================================================
-  const UIRefs = { rejob: {}, autohunt: {}, raremap: {} };
+  const UIRefs = { rejob: {}, autohunt: {}, raremap: {}, dungeon: {} };
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
-    ['rejob', 'autohunt', 'raremap'].forEach((id) => {
+    ['rejob', 'autohunt', 'raremap', 'dungeon'].forEach((id) => {
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
       const otherRunning = Core.activeModuleId && Core.activeModuleId !== id;
       refs.startBtn.disabled = mod.running || otherRunning;
       refs.stopBtn.disabled = !mod.running;
-      refs.statusEl.textContent = mod.running ? `실행중 (사이클 ${mod.cycleCount})` : otherRunning ? '다른 모듈 실행중' : '대기중';
+      const cycleLabel = id === 'dungeon' ? `오늘 클리어 ${mod.cycleCount}개` : `사이클 ${mod.cycleCount}`;
+      refs.statusEl.textContent = mod.running ? `실행중 (${cycleLabel})` : otherRunning ? '다른 모듈 실행중' : '대기중';
       if (refs.inputs) refs.inputs.forEach((inp) => (inp.disabled = mod.running));
     });
   };
@@ -1357,6 +2346,19 @@
     energyInput.addEventListener('change', (e) => (mod.config.minEnergy = parseInt(e.target.value, 10) || 0));
     container.appendChild(energyInput);
 
+    const protRow = document.createElement('div');
+    protRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
+    const protCheck = document.createElement('input');
+    protCheck.type = 'checkbox';
+    protCheck.checked = mod.config.ignoreProtectionOff;
+    protCheck.addEventListener('change', (e) => (mod.config.ignoreProtectionOff = e.target.checked));
+    const protLabel = document.createElement('span');
+    protLabel.textContent = '보호용 기름 없이도 사냥 (체크 시 기름 없어도 정지 안 함)';
+    protLabel.style.cssText = 'font-size:11px; color:#ccc;';
+    protRow.appendChild(protCheck);
+    protRow.appendChild(protLabel);
+    container.appendChild(protRow);
+
     const btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
     const startBtn = document.createElement('button');
@@ -1383,7 +2385,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [groundSelect, floorSelect, goldInput, energyInput];
+    refs.inputs = [groundSelect, floorSelect, goldInput, energyInput, protCheck];
   }
 
   function buildRaremapTab(container) {
@@ -1428,11 +2430,126 @@
     refs.inputs = [maxCyclesInput];
   }
 
+  function buildDungeonTab(container) {
+    const mod = Modules.dungeon;
+    const refs = UIRefs.dungeon;
+    mod.loadConfigIntoSelf(); // 저장된 GUI 설정값 복원 (즉시완료 목표치, 리롤 기준, 일일던전 체크)
+
+    const dailyRow = document.createElement('div');
+    dailyRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
+    const dailyCheck = document.createElement('input');
+    dailyCheck.type = 'checkbox';
+    dailyCheck.checked = mod.config.enableDailySewer;
+    dailyCheck.addEventListener('change', (e) => {
+      mod.config.enableDailySewer = e.target.checked;
+      mod.saveConfig();
+    });
+    const dailyLabel = document.createElement('span');
+    dailyLabel.textContent = '일일 던전: 지하 하수도 포함 (깊은 숲속/각성의 탑은 수동)';
+    dailyLabel.style.cssText = 'font-size:11px; color:#ccc;';
+    dailyRow.appendChild(dailyCheck);
+    dailyRow.appendChild(dailyLabel);
+    container.appendChild(dailyRow);
+
+    container.appendChild(labelEl('던전 순서 (자동): [구]수행자의 탑 → 수행자의 탑 → [구]신비의 동굴 → 신비의 동굴 → 지하 하수도'));
+
+    container.appendChild(labelEl('리롤 최소 보유 토큰'));
+    const rerollInput = document.createElement('input');
+    rerollInput.type = 'number';
+    rerollInput.value = mod.config.rerollMinTokens;
+    rerollInput.style.cssText = inputStyle();
+    rerollInput.addEventListener('change', (e) => {
+      mod.config.rerollMinTokens = parseInt(e.target.value, 10) || 50;
+      mod.saveConfig();
+    });
+    container.appendChild(rerollInput);
+
+    container.appendChild(labelEl('던전별 즉시완료 목표치 (0 = 즉시완료 시도 안 함)'));
+
+    const headerRow = document.createElement('div');
+    headerRow.style.cssText = 'display:flex; gap:4px; align-items:center; margin-bottom:2px;';
+    const headerNameSpan = document.createElement('span');
+    headerNameSpan.style.cssText = 'flex:1.4;';
+    const headerAC = document.createElement('span');
+    headerAC.textContent = '적중치';
+    headerAC.style.cssText = 'flex:1; font-size:10px; color:#f5a623; text-align:center;';
+    const headerEV = document.createElement('span');
+    headerEV.textContent = '회피치';
+    headerEV.style.cssText = 'flex:1; font-size:10px; color:#4fc3f7; text-align:center;';
+    headerRow.appendChild(headerNameSpan);
+    headerRow.appendChild(headerAC);
+    headerRow.appendChild(headerEV);
+    container.appendChild(headerRow);
+
+    const instantInputs = [];
+    mod.DUNGEONS.forEach((d) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex; gap:4px; align-items:center; margin-bottom:2px;';
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = d.label;
+      nameSpan.style.cssText = 'font-size:10px; color:#aaa; flex:1.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;';
+      const acInput = document.createElement('input');
+      acInput.type = 'number';
+      acInput.title = '목표 적중치';
+      acInput.placeholder = '적중';
+      acInput.value = mod.config.instantClear[d.id].targetAC;
+      acInput.style.cssText = inputStyle() + 'flex:1;';
+      acInput.addEventListener('change', (e) => {
+        mod.config.instantClear[d.id].targetAC = parseInt(e.target.value, 10) || 0;
+        mod.saveConfig();
+      });
+      const evInput = document.createElement('input');
+      evInput.type = 'number';
+      evInput.title = '목표 회피치';
+      evInput.placeholder = '회피';
+      evInput.value = mod.config.instantClear[d.id].targetEV;
+      evInput.style.cssText = inputStyle() + 'flex:1;';
+      evInput.addEventListener('change', (e) => {
+        mod.config.instantClear[d.id].targetEV = parseInt(e.target.value, 10) || 0;
+        mod.saveConfig();
+      });
+      row.appendChild(nameSpan);
+      row.appendChild(acInput);
+      row.appendChild(evInput);
+      container.appendChild(row);
+      instantInputs.push(acInput, evInput);
+    });
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
+    const startBtn = document.createElement('button');
+    startBtn.textContent = '시작';
+    startBtn.style.cssText = btnStyle('#2e7d32');
+    const stopBtn = document.createElement('button');
+    stopBtn.textContent = '정지';
+    stopBtn.style.cssText = btnStyle('#c62828');
+    stopBtn.disabled = true;
+    const statusEl = document.createElement('span');
+    statusEl.textContent = '대기중';
+    statusEl.style.cssText = 'margin-left:4px; font-size:11px;';
+    startBtn.addEventListener('click', () => Core.startModule('dungeon'));
+    stopBtn.addEventListener('click', () => Core.requestStopModule('dungeon'));
+    btnRow.appendChild(startBtn);
+    btnRow.appendChild(stopBtn);
+    container.appendChild(btnRow);
+    container.appendChild(statusEl);
+
+    const hint = document.createElement('div');
+    hint.textContent = '※ 캐릭터 카드의 "자세히"를 펼치면 나오는 실제 적중치/회피치를 우선 사용하고, 확인이 안 되면 근사 공식으로 대체 판단합니다.';
+    hint.style.cssText = 'color:#888; font-size:10px; margin-top:4px;';
+    container.appendChild(hint);
+
+    refs.startBtn = startBtn;
+    refs.stopBtn = stopBtn;
+    refs.statusEl = statusEl;
+    refs.inputs = [dailyCheck, rerollInput, ...instantInputs];
+  }
+
   function buildPanel() {
     const panel = document.createElement('div');
     panel.id = 'lrm-panel';
     panel.style.cssText = `
-      position: fixed; top: 60px; right: 10px; width: 300px;
+      position: fixed; top: 60px; right: 10px; width: 320px;
       background: #1a1a1a; color: #eee; border: 1px solid #555; border-radius: 8px;
       font-size: 12px; z-index: 999999; font-family: sans-serif;
       box-shadow: 0 4px 12px rgba(0,0,0,0.5);
@@ -1461,7 +2578,7 @@
 
     const tabContents = {};
     const contentWrap = document.createElement('div');
-    contentWrap.style.cssText = 'padding:10px;';
+    contentWrap.style.cssText = 'padding:10px; max-height:60vh; overflow-y:auto;';
     Object.keys(MODULE_LABELS).forEach((id) => {
       const c = document.createElement('div');
       c.style.display = 'none';
@@ -1471,6 +2588,7 @@
     buildRejobTab(tabContents.rejob);
     buildAutohuntTab(tabContents.autohunt);
     buildRaremapTab(tabContents.raremap);
+    buildDungeonTab(tabContents.dungeon);
     panel.appendChild(contentWrap);
 
     function switchTab(id) {
@@ -1497,7 +2615,7 @@
 
     document.body.appendChild(panel);
 
-    // 배너 (모든 모듈 공용, 패널 위에 화면 상단 고정)
+    // 배너
     const banner = document.createElement('div');
     banner.id = 'lrm-banner';
     banner.style.cssText = `
@@ -1511,7 +2629,7 @@
     banner.querySelector('#lrm-banner-close').addEventListener('click', () => Core.hideBanner());
     Core.bannerEl = banner;
 
-    // 저장된 위치 복원 (기존 재전직 매크로 v1.5에서 쓰던 것과 같은 방식 — 통합 패널 하나에 적용)
+    // 저장된 위치 복원
     const savedPos = Core.loadPanelPosition();
     if (savedPos && typeof savedPos.left === 'number' && typeof savedPos.top === 'number') {
       panel.style.left = `${savedPos.left}px`;
@@ -1549,7 +2667,7 @@
   function init() {
     if (document.getElementById('lrm-panel')) return;
     buildPanel();
-    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵)');
+    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전)');
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
