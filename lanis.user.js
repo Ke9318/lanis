@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.2.27
+// @version      1.2.33
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -348,7 +348,7 @@
       restEvery: [50, 65],
       restSeconds: [60, 180],
       clickDelay: [500, 1300],
-      useHiddenRoomMap: false, // v1.2.27: 체크 시 일반 사냥터(50연전) 대신 "숨겨진 방의 지도"로 깨달음의 탑을 만들어 1회 전투로 즉시 레벨 100을 만듦
+      useHiddenRoomMap: false, // v1.2.27: 체크 시 일반 사냥터(50연전) 대신 "숨겨진 방의 지도"로 깨달음의 방을 만들어 1회 전투로 즉시 레벨 100을 만듦
     },
     expectedJobName: null,
     nextTierIndexOverride: null,
@@ -656,21 +656,43 @@
     };
   };
 
-  // v1.2.27 신규: "숨겨진 방의 지도"를 사용해 광산에서 "깨달음의 탑"을 생성하고
+  // v1.2.27 신규: "숨겨진 방의 지도"를 사용해 광산에서 "깨달음의 방"을 생성하고
   // 1회 전투로 즉시 레벨 100을 만드는 경로. 일반 사냥터(50연전, doHunt)와 달리
   // 50회 전투 버튼을 누르는 방식이 아니므로 행동력 체크(refillEnergyIfNeeded)나
-  // 농축 경험의 물약 체크(refillExpPotion)를 전혀 거치지 않는다 - 행동력이 1만
-  // 있어도 그대로 진행 가능하고, 무조건 레벨 100으로 만들어주므로 물약도 불필요.
+  // 행동력 체크(refillEnergyIfNeeded)와 농축 경험의 물약 체크(refillExpPotion)를
+  // 전혀 거치지 않는다 - 행동력이 1만 있어도 그대로 진행 가능하고, 경험치 배율과
+  // 무관하게 무조건 레벨 100으로 만들어주기 때문(v1.2.33: v1.2.32에서 물약 체크를
+  // 추가했다가, 그 제보가 사실은 일반 사냥 모드에 대한 것이었음이 확인되어 원복).
+  // 이 경로가 멈춰야 하는 유일한 조건은 "숨겨진 방의 지도" 자체의 소진뿐이다.
+  // v1.2.28 버그 수정: 처음엔 <label> + input[type="radio"] 조합으로 항목을 찾았는데,
+  // 실제 게임 DOM에는 <label> 태그 자체가 없어(레어맵 모듈이 label 대신 .MuiRadio-root를
+  // 직접 찾아 클릭하는 것과 동일한 구조) 매번 항목을 못 찾고 "재고 없음"으로 잘못
+  // 판정해 즉시 정지해버리던 문제가 있었음(실제로는 243개 보유 중이었는데도 발생).
+  // 레어맵 모듈(getTopRadio)과 동일하게 .MuiRadio-root를 기준으로, "숨겨진 방의 지도"
+  // 텍스트를 포함하면서 그 안에 .MuiRadio-root가 있는 가장 좁은 컨테이너(행)를 찾는
+  // 방식으로 교체.
   Modules.rejob.getHiddenRoomMapOption = function (dialog) {
-    const containers = [...dialog.querySelectorAll('label')].filter((l) => l.querySelector('input[type="radio"]'));
-    return containers.find((c) => c.textContent.includes('숨겨진 방의 지도')) || null;
+    const candidates = [...dialog.querySelectorAll('*')].filter((el) => {
+      if (!el.textContent.includes('숨겨진 방의 지도')) return false;
+      return !!el.querySelector('.MuiRadio-root');
+    });
+    if (candidates.length === 0) return null;
+    return candidates.reduce((a, b) => (a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b));
+  };
+
+  // 보유 수량이 0이거나(예: "x0") 라디오 자체가 비활성화된 경우 재고 소진으로 판단
+  Modules.rejob.isHiddenRoomMapExhausted = function (optionEl) {
+    if (/[xX]\s*0\b/.test(optionEl.textContent)) return true;
+    const radioInput = optionEl.querySelector('.MuiRadio-root input');
+    if (radioInput && radioInput.disabled) return true;
+    return false;
   };
 
   Modules.rejob.findEnlightenmentTowerButton = function () {
     const container = Modules.raremap.getMineContainer();
     if (!container) return null;
     return (
-      [...container.querySelectorAll('button.MuiButton-fullWidth')].find((b) => b.textContent.includes('깨달음의 탑')) || null
+      [...container.querySelectorAll('button.MuiButton-fullWidth')].find((b) => b.textContent.includes('깨달음의 방')) || null
     );
   };
 
@@ -685,43 +707,84 @@
     }
     await Core.sleep(700);
 
-    const mapIcon = document.querySelector('div[aria-label="지도 아이템을 사용해 레어맵으로 이동하기"]');
-    if (!mapIcon) {
-      Core.notifyStopped('rejob', '지도 아이콘을 찾지 못했습니다.');
-      return null;
-    }
-    mapIcon.click();
-    await mod.clickDelayWait();
+    // v1.2.31 개선: 지도 선택→사용하기→깨달음의 방 확인 시퀀스 전체가 가끔(클릭이 씹히거나
+    // 서버 응답이 늦는 등) 한 번에 실패할 수 있는데, 예전엔 "깨달음의 방" 버튼을 못 찾으면
+    // 그 자리에서 바로 포기하고 매크로 전체를 정지시켰음. "한 번 실패하면 재시도를 안 한다"는
+    // 제보에 따라, 이 전체 시퀀스를 처음부터(지도 아이콘 재클릭부터) 최대 3번까지 다시
+    // 시도하도록 바깥쪽 재시도 루프를 추가함. 재고 소진(exhausted)만은 재시도해도 의미가
+    // 없는 진짜 정지 조건이므로 즉시 완료 처리하고 루프를 빠져나온다.
+    const MAX_GENERATE_ATTEMPTS = 3;
+    let towerBtn = null;
+    for (let attempt = 1; attempt <= MAX_GENERATE_ATTEMPTS && mod.running; attempt++) {
+      const mapIcon = await Core.retryStep(
+        '지도 아이콘 찾기',
+        () => document.querySelector('div[aria-label="지도 아이템을 사용해 레어맵으로 이동하기"]'),
+        { attempts: 3, waits: [1000, 2000, 3000] }
+      );
+      if (!mapIcon) {
+        Core.notifyStopped('rejob', '지도 아이콘을 찾지 못했습니다.');
+        return null;
+      }
+      mapIcon.click();
+      await mod.clickDelayWait();
 
-    const dialog = await Core.retryStep('"지도 아이템 사용하기" 모달 찾기', () => {
-      const titleEl = [...document.querySelectorAll('h1, h2, h3')].find((el) => el.textContent.trim() === '지도 아이템 사용하기');
-      return titleEl ? titleEl.closest('[role="dialog"]') : null;
-    });
-    if (!dialog) {
-      Core.notifyStopped('rejob', '지도 아이템 모달을 찾지 못했습니다.');
-      return null;
-    }
+      const dialog = await Core.retryStep('"지도 아이템 사용하기" 모달 찾기', () => {
+        const titleEl = [...document.querySelectorAll('h1, h2, h3')].find((el) => el.textContent.trim() === '지도 아이템 사용하기');
+        return titleEl ? titleEl.closest('[role="dialog"]') : null;
+      });
+      if (!dialog) {
+        Core.log('rejob', `지도 아이템 모달을 찾지 못했습니다 (시도 ${attempt}/${MAX_GENERATE_ATTEMPTS}).`);
+        await Core.sleep(1500);
+        continue;
+      }
 
-    const option = mod.getHiddenRoomMapOption(dialog);
-    const radio = option ? option.querySelector('input[type="radio"]') : null;
-    if (!option || !radio || radio.disabled || /\(?\s*0\s*개\s*\)?/.test(option.textContent)) {
-      Core.notifyCompleted('rejob', '숨겨진 방의 지도를 모두 사용했습니다 (재고 없음). 정지합니다.');
-      return null;
-    }
-    option.click();
-    await mod.clickDelayWait();
+      const option = await Core.retryStep('"숨겨진 방의 지도" 항목 찾기', () => mod.getHiddenRoomMapOption(dialog), {
+        attempts: 3,
+        waits: [800, 1500, 2500],
+      });
+      if (!option) {
+        Core.notifyStopped('rejob', '"숨겨진 방의 지도" 항목을 모달에서 찾지 못했습니다 (화면 구조가 다를 수 있음).');
+        return null;
+      }
+      if (mod.isHiddenRoomMapExhausted(option)) {
+        Core.notifyCompleted('rejob', '숨겨진 방의 지도를 모두 사용했습니다 (재고 없음). 정지합니다.');
+        return null;
+      }
+      const radioEl = option.querySelector('.MuiRadio-root');
+      radioEl.click();
+      await mod.clickDelayWait();
 
-    const useBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용하기');
-    if (!useBtn) {
-      Core.notifyStopped('rejob', '"사용하기" 버튼을 찾지 못했습니다.');
-      return null;
-    }
-    useBtn.click();
-    await mod.clickDelayWait();
+      const useBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용하기');
+      if (!useBtn) {
+        Core.notifyStopped('rejob', '"사용하기" 버튼을 찾지 못했습니다.');
+        return null;
+      }
+      useBtn.click();
+      await mod.clickDelayWait();
 
-    const towerBtn = await Core.retryStep('"깨달음의 탑" 버튼 찾기', () => mod.findEnlightenmentTowerButton());
+      towerBtn = await Core.retryStep('"깨달음의 방" 버튼 찾기', () => mod.findEnlightenmentTowerButton());
+      if (towerBtn) break;
+
+      Core.log(
+        'rejob',
+        `"깨달음의 방"이 생성된 것을 확인하지 못했습니다 (시도 ${attempt}/${MAX_GENERATE_ATTEMPTS}) - 처음부터 다시 시도합니다.`
+      );
+      // 남아있는 모달이 있으면 닫고(취소) 다음 시도에서 지도 아이콘부터 다시 진행
+      const leftoverDialog = [...document.querySelectorAll('h1, h2, h3')].find(
+        (el) => el.textContent.trim() === '지도 아이템 사용하기'
+      );
+      if (leftoverDialog) {
+        const dlg = leftoverDialog.closest('[role="dialog"]');
+        const cancelBtn = dlg && [...dlg.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
+        if (cancelBtn) {
+          cancelBtn.click();
+          await mod.clickDelayWait();
+        }
+      }
+      await Core.sleep(1500);
+    }
     if (!towerBtn) {
-      Core.notifyStopped('rejob', '"깨달음의 탑"이 생성된 것을 확인하지 못했습니다.');
+      Core.notifyStopped('rejob', `"깨달음의 방"이 생성된 것을 확인하지 못했습니다 (${MAX_GENERATE_ATTEMPTS}번 재시도 후에도 실패).`);
       return null;
     }
     towerBtn.click();
@@ -729,24 +792,48 @@
 
     // 50회 전투 버튼이 아니라 1회 전투로 즉시 레벨 100을 만들어주는 경로이므로
     // 행동력 체크/농축 경험의 물약 체크를 하지 않고 곧바로 결과 화면만 확인한다.
-    const resultShown = await Core.retryStep(
-      '깨달음의 탑 전투 결과 화면 확인',
+    let resultShown = await Core.retryStep(
+      '깨달음의 방 전투 결과 화면 확인',
       () => (/레벨\s*1\s*→\s*\d+\s*달성|전투\s*후\s*중단|\d+\s*회\s*전투\s*완료/.test(Core.bodyText()) ? true : null),
       { attempts: 4, waits: [2000, 4000, 6000, 9000] }
     );
     if (!resultShown) {
-      Core.notifyStopped('rejob', '깨달음의 탑 전투 결과 화면을 확인하지 못했습니다.');
+      Core.notifyStopped('rejob', '깨달음의 방 전투 결과 화면을 확인하지 못했습니다.');
+      return null;
+    }
+
+    // v1.2.30 신규: 일반 사냥터(doHunt)와 동일하게, 깨달음의 방 전투에서도 장비
+    // 내구도 부족이 뜰 수 있으므로 수리 후 버튼을 다시 눌러 최대 3번까지 재시도한다.
+    // (기존에는 이 처리가 빠져 있어 장비가 깨지면 결과 화면을 못 찾고 오정지했음)
+    let repairAttempts = 0;
+    while (Core.bodyText().includes('장비 내구도 부족') && repairAttempts < 3) {
+      await Core.repairAllEquipment('rejob');
+      repairAttempts += 1;
+      const towerBtnAgain = await Core.waitFor(() => mod.findEnlightenmentTowerButton());
+      if (!towerBtnAgain) break;
+      towerBtnAgain.click();
+      await mod.clickDelayWait();
+      resultShown = await Core.waitFor(
+        () => /레벨\s*1\s*→\s*\d+\s*달성|전투\s*후\s*중단|\d+\s*회\s*전투\s*완료/.test(Core.bodyText()),
+        15000
+      );
+      if (!resultShown) break;
+    }
+    if (!resultShown) {
+      Core.notifyStopped('rejob', '장비 수리 후에도 깨달음의 방 전투 결과 화면을 확인하지 못했습니다.');
       return null;
     }
 
     const text = Core.bodyText();
     const levelMatch = text.match(/레벨\s*\/\s*경험치[^\d]*(\d+)/);
     const goldMatch = text.match(/골드\s*\n?\s*([\d,]+)/);
+    const potionMatch = text.match(/농축 경험의 물약 효과 \(5배\):\s*([\d,]+)회 남음/);
 
     return {
       level: levelMatch ? parseInt(levelMatch[1], 10) : null,
       gold: goldMatch ? parseInt(goldMatch[1].replace(/,/g, ''), 10) : null,
-      tierUsed: { short: '숨겨진 방(깨달음의 탑)' },
+      potionRemaining: potionMatch ? parseInt(potionMatch[1].replace(/,/g, ''), 10) : null,
+      tierUsed: { short: '숨겨진 방(깨달음의 방)' },
       viaHiddenRoomMap: true,
     };
   };
@@ -891,14 +978,19 @@
     }
 
     // v1.2.27: "숨겨진 방의 지도" 옵션이 켜져 있으면 일반 사냥터(50연전) 대신
-    // 광산에서 지도로 "깨달음의 탑"을 만들어 1회 전투로 레벨 100을 만든다.
+    // 광산에서 지도로 "깨달음의 방"을 만들어 1회 전투로 레벨 100을 만든다.
     const result = mod.config.useHiddenRoomMap ? await mod.doHiddenRoomHunt() : await mod.doHunt();
     if (!result || !mod.running) return;
 
     if (result.viaHiddenRoomMap) {
       Core.log('rejob', `결과(숨겨진 방의 지도) - 레벨:${result.level} 골드:${result.gold?.toLocaleString()}`);
-      // 깨달음의 탑은 무조건 레벨 100으로 만들어주므로 레벨 미달 재시도 로직이나
-      // 농축 경험의 물약/활력의 포션 보충 로직을 거치지 않고 바로 마무리 단계로 진행한다.
+      // v1.2.33: v1.2.32에서 이 경로에 농축 물약 체크를 추가했었으나, 사용자 확인 결과
+      // 그 제보는 일반 사냥(useHiddenRoomMap=false, doHunt) 상황에 대한 것이었음 -
+      // 숨겨진 방의 지도(깨달음의 방)는 경험치 배율과 무관하게 무조건 레벨 100을
+      // 만들어주므로 농축 물약이 없어도 문제 없이 계속 진행되는 게 맞음. 이 경로가
+      // 멈춰야 하는 조건은 오직 "숨겨진 방의 지도" 자체가 소진됐을 때뿐(doHiddenRoomHunt의
+      // isHiddenRoomMapExhausted에서 이미 처리됨) → 물약/행동력 체크 없이 바로 마무리
+      // 단계로 진행하도록 원복.
       mod.skipRejobThisCycle = false;
       await mod.finishCycleCommon(result);
       return;
@@ -2400,7 +2492,7 @@
     container.appendChild(maxInput);
 
     // v1.2.27 신규: "숨겨진 방의 지도" 사용 옵션. 체크 시 일반 사냥터(50연전) 대신
-    // 광산에서 지도로 "깨달음의 탑"을 만들어 1회 전투로 레벨 100을 만든다.
+    // 광산에서 지도로 "깨달음의 방"을 만들어 1회 전투로 레벨 100을 만든다.
     const hiddenRoomRow = document.createElement('div');
     hiddenRoomRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
     const hiddenRoomCheck = document.createElement('input');
@@ -2411,7 +2503,7 @@
       Core.saveModuleConfig('rejob', REJOB_PERSIST_KEYS);
     });
     const hiddenRoomLabel = document.createElement('span');
-    hiddenRoomLabel.textContent = '숨겨진 방의 지도로 사냥 대체 (광산 지도 → 깨달음의 탑, 1전투로 즉시 레벨100)';
+    hiddenRoomLabel.textContent = '숨겨진 방의 지도로 사냥 대체 (광산 지도 → 깨달음의 방, 1전투로 즉시 레벨100)';
     hiddenRoomLabel.style.cssText = 'font-size:11px; color:#ccc;';
     hiddenRoomRow.appendChild(hiddenRoomCheck);
     hiddenRoomRow.appendChild(hiddenRoomLabel);
