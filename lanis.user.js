@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.2.33
+// @version      1.2.36
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -28,7 +28,49 @@
 
   const PANEL_POS_KEY = 'lrm-unified-panel-pos'; // 패널 위치 저장용 localStorage 키 (하나의 패널이므로 키도 하나)
 
-  Core.sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // v1.2.36 신규: 크롬 등 브라우저는 탭이 백그라운드(다른 탭 보고 있거나 창이 최소화)
+  // 상태로 일정 시간 지나면 해당 탭의 setTimeout/setInterval을 강하게 스로틀링한다
+  // (심하면 1분에 한 번 수준까지 느려짐). 매크로의 모든 대기(Core.sleep)가 결국
+  // setTimeout 기반이었기 때문에, 탭을 안 보고 한참 뒤에 돌아오면 "몇 시간 전에 하던
+  // 것을 아직도 하고 있는" 것처럼 보이는 문제가 있었음. Web Worker 안의 타이머는 이
+  // 탭 가시성 기반 스로틀링을 받지 않으므로, 별도 워커에게 대기를 위임하는 방식으로
+  // 우회한다. 워커 생성이 실패하는 환경(엄격한 CSP 등)에서는 기존 setTimeout 방식으로
+  // 조용히 폴백한다.
+  Core._bgSleep = (function () {
+    try {
+      const workerCode =
+        'self.onmessage = function (e) {' +
+        '  var id = e.data.id, ms = e.data.ms;' +
+        '  setTimeout(function () { postMessage(id); }, ms);' +
+        '};';
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      const worker = new Worker(url);
+      const pending = new Map();
+      let counter = 0;
+      worker.onmessage = function (e) {
+        const resolve = pending.get(e.data);
+        if (resolve) {
+          pending.delete(e.data);
+          resolve();
+        }
+      };
+      worker.onerror = function () {
+        /* 워커 실행 중 오류가 나도 폴백 sleep을 계속 쓸 수 있도록 조용히 무시 */
+      };
+      return function (ms) {
+        return new Promise((resolve) => {
+          const id = ++counter;
+          pending.set(id, resolve);
+          worker.postMessage({ id, ms });
+        });
+      };
+    } catch (e) {
+      return null; // 워커를 만들 수 없는 환경 - 아래에서 기존 방식으로 폴백
+    }
+  })();
+
+  Core.sleep = Core._bgSleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   Core.rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
   // v1.2: 여러 창을 동시에 돌릴 때 클릭이 씹히는 문제 완화 - 기본 지연 증가
   Core.humanDelay = (minMs, maxMs) => Core.sleep(minMs + Math.random() * (maxMs - minMs));
@@ -1499,6 +1541,16 @@
         mysticCave: { targetAC: 5500, targetEV: 6000 },
         sewer: { targetAC: 0, targetEV: 0 },
       },
+      // v1.2.34 신규: 체크한 던전은 적중치/회피치 기준이나 즉시완료 추가 조건(신의 일격/
+      // 모든 스탯 등)을 전혀 확인하지 않고, 전투 화면에 들어가자마자 곧바로
+      // "즉시 최상층 도전"을 시도한다.
+      forceInstantClear: {
+        oldMasterTower: false,
+        masterTower: false,
+        oldMysticCave: false,
+        mysticCave: false,
+        sewer: false,
+      },
     },
     currentDungeonId: null,
     difficulty: '매우어려움',
@@ -1636,6 +1688,40 @@
     return queue;
   };
 
+  // v1.2.35 신규: "던전 입장 확인" 텍스트를 포함하면서 버튼을 가진 가장 좁은 컨테이너를
+  // 찾는다(Core.findButtonInDialog와 달리 특정 버튼 텍스트에 의존하지 않고 컨테이너
+  // 자체를 반환 - 이후 그 안에서 여러 버튼 중 하나를 골라야 하기 때문).
+  Modules.dungeon.getEntryConfirmDialog = function () {
+    const candidates = [...document.querySelectorAll('*')].filter((el) => {
+      if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
+      if (!el.textContent.includes('던전 입장 확인')) return false;
+      return el.querySelectorAll('button').length > 0;
+    });
+    if (candidates.length === 0) return null;
+    return candidates.reduce((a, b) => (a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b));
+  };
+
+  // "취소"를 제외한 입장 방법 버튼들 중 하나를 고른다. 버튼이 하나뿐이면(예전처럼
+  // "입장" 버튼 하나만 있는 경우) 그냥 그걸 쓰고, "열쇠 N개 (에너지 무료)" /
+  // "열쇠 M개 + 에너지 K" 처럼 여러 선택지가 있으면 보유한 입장권으로 충당 가능한
+  // 한 "에너지 무료" 옵션을 우선 선택해 행동력을 아낀다.
+  Modules.dungeon.pickEntryMethodButton = function (dialogEl, ticketsAvailable) {
+    const buttons = [...dialogEl.querySelectorAll('button')].filter((b) => b.textContent.trim() !== '취소');
+    if (buttons.length === 0) return null;
+    if (buttons.length === 1) return buttons[0];
+
+    const freeBtn = buttons.find((b) => /에너지\s*무료/.test(b.textContent));
+    if (freeBtn) {
+      const m = freeBtn.textContent.match(/열쇠\s*(\d+)\s*개/);
+      const needed = m ? parseInt(m[1], 10) : 0;
+      if (ticketsAvailable === null || ticketsAvailable === undefined || ticketsAvailable >= needed) {
+        return freeBtn;
+      }
+      Core.log('dungeon', `"에너지 무료" 입장에 필요한 열쇠(${needed}개)가 부족해(보유 ${ticketsAvailable}개) 다른 입장 방법을 사용합니다.`);
+    }
+    return buttons.find((b) => b !== freeBtn) || buttons[0];
+  };
+
   Modules.dungeon.enterDungeon = async function (dungeonDef) {
     const card = this.getDungeonCardEl(dungeonDef.label);
     if (!card) {
@@ -1686,8 +1772,21 @@
       this.deathLimit = deathMatch ? parseInt(deathMatch[1], 10) : null;
       Core.log('dungeon', `"${dungeonDef.label}" 부활 허용: ${this.deathLimit ?? '알 수 없음'}회`);
 
-      const enterConfirmBtn = await Core.retryStep('던전 입장 확인 모달의 입장 버튼 찾기', () =>
-        Core.findButtonInDialog('던전 입장 확인', '입장')
+      // v1.2.35 버그 수정: 예전엔 이 모달에 "취소"/"입장" 버튼 두 개만 있었는데,
+      // 게임 업데이트로 "열쇠 N개 (에너지 무료)" / "열쇠 M개 + 에너지 K개" 같은
+      // 복수의 입장 방법 선택지가 뜨는 경우가 생김. 정확히 텍스트가 "입장"인 버튼만
+      // 찾던 기존 코드는 이런 화면에서 그 버튼을 영영 못 찾아 재시도만 반복하다
+      // 멈춰버렸음 → 모달 컨테이너를 찾아 "취소"를 제외한 버튼들 중 적절한 것을
+      // 고르도록 교체. 입장 방법이 여러 개면 보유한 입장권으로 충당 가능한 한
+      // "에너지 무료" 옵션을 우선 선택(행동력 절약), 안 되면 나머지 옵션을 사용.
+      const entryDialog = await Core.retryStep('던전 입장 확인 모달 컨테이너 찾기', () => this.getEntryConfirmDialog());
+      if (!entryDialog) {
+        Core.log('dungeon', '입장 확인 모달 컨테이너를 찾지 못했습니다.');
+        return false;
+      }
+      const tickets = this.getTicketCount(dungeonDef);
+      const enterConfirmBtn = await Core.retryStep('던전 입장 확인 모달의 입장 방법 버튼 찾기', () =>
+        this.pickEntryMethodButton(entryDialog, dungeonDef.daily ? null : tickets)
       );
       if (!enterConfirmBtn) {
         Core.log('dungeon', '입장 확인 버튼을 찾지 못했습니다.');
@@ -1826,24 +1925,36 @@
 
   Modules.dungeon.tryInstantClear = async function (dungeonDef) {
     if (this.instantClearTried) return false;
-    const target = this.config.instantClear[dungeonDef.id];
-    if (!target || (!target.targetAC && !target.targetEV)) return false;
 
-    const reqCheck = this.meetsInstantClearRequirement(dungeonDef);
-    if (!reqCheck.ok) {
-      Core.log('dungeon', `즉시완료 추가 조건 미충족 (${reqCheck.missing.join(', ')}) → 다음 전투에서 다시 확인`);
-      return false;
-    }
+    // v1.2.34 신규: 체크박스로 "즉시완료 강제"가 켜진 던전은 적중치/회피치 기준이나
+    // 신의 일격/모든 스탯 같은 즉시완료 추가 조건을 전혀 확인하지 않고, 전투 화면에
+    // 들어가자마자 곧바로 즉시 최상층 도전을 시도한다.
+    const forced = !!this.config.forceInstantClear[dungeonDef.id];
+    let logSuffix = '';
 
-    const est = await this.getCurrentACEV();
-    if (!est) return false;
-    const tag = est.isReal ? '실제' : '추정';
-    if (est.AC < target.targetAC || est.EV < target.targetEV) {
-      Core.log(
-        'dungeon',
-        `즉시완료 기준 미달 (${tag} 적중 ${Math.round(est.AC)}/${target.targetAC}, ${tag} 회피 ${Math.round(est.EV)}/${target.targetEV}) → 다음 전투에서 다시 확인`
-      );
-      return false;
+    if (!forced) {
+      const target = this.config.instantClear[dungeonDef.id];
+      if (!target || (!target.targetAC && !target.targetEV)) return false;
+
+      const reqCheck = this.meetsInstantClearRequirement(dungeonDef);
+      if (!reqCheck.ok) {
+        Core.log('dungeon', `즉시완료 추가 조건 미충족 (${reqCheck.missing.join(', ')}) → 다음 전투에서 다시 확인`);
+        return false;
+      }
+
+      const est = await this.getCurrentACEV();
+      if (!est) return false;
+      const tag = est.isReal ? '실제' : '추정';
+      if (est.AC < target.targetAC || est.EV < target.targetEV) {
+        Core.log(
+          'dungeon',
+          `즉시완료 기준 미달 (${tag} 적중 ${Math.round(est.AC)}/${target.targetAC}, ${tag} 회피 ${Math.round(est.EV)}/${target.targetEV}) → 다음 전투에서 다시 확인`
+        );
+        return false;
+      }
+      logSuffix = ` (${tag} 적중 ${Math.round(est.AC)}/${target.targetAC}, ${tag} 회피 ${Math.round(est.EV)}/${target.targetEV})`;
+    } else {
+      Core.log('dungeon', `"${dungeonDef.label}" 체크된 즉시완료 강제 옵션 - 조건 확인 없이 바로 즉시 최상층 도전 시도`);
     }
 
     const btn = Core.findButtonByText('즉시 최상층 도전');
@@ -1852,7 +1963,9 @@
       this.instantClearTried = true;
       return false;
     }
-    Core.log('dungeon', `즉시완료 기준 충족 (${tag} 적중 ${Math.round(est.AC)}/${target.targetAC}, ${tag} 회피 ${Math.round(est.EV)}/${target.targetEV}) → 즉시 최상층 도전 시도`);
+    if (!forced) {
+      Core.log('dungeon', `즉시완료 기준 충족${logSuffix} → 즉시 최상층 도전 시도`);
+    }
     btn.click();
     await Core.humanDelay(1100, 2000);
     const confirmBtn = await Core.retryStep(
@@ -2276,6 +2389,7 @@
           enableDailySewer: this.config.enableDailySewer,
           rerollMinTokens: this.config.rerollMinTokens,
           instantClear: this.config.instantClear,
+          forceInstantClear: this.config.forceInstantClear,
         })
       );
     } catch (e) {
@@ -2296,6 +2410,11 @@
             if (typeof saved.instantClear[id].targetAC === 'number') this.config.instantClear[id].targetAC = saved.instantClear[id].targetAC;
             if (typeof saved.instantClear[id].targetEV === 'number') this.config.instantClear[id].targetEV = saved.instantClear[id].targetEV;
           }
+        });
+      }
+      if (saved.forceInstantClear) {
+        Object.keys(this.config.forceInstantClear).forEach((id) => {
+          if (typeof saved.forceInstantClear[id] === 'boolean') this.config.forceInstantClear[id] = saved.forceInstantClear[id];
         });
       }
     } catch (e) {
@@ -2731,10 +2850,12 @@
     });
     container.appendChild(rerollInput);
 
-    container.appendChild(labelEl('던전별 즉시완료 목표치 (0 = 즉시완료 시도 안 함)'));
+    container.appendChild(labelEl('던전별 즉시완료 목표치 (0 = 즉시완료 시도 안 함) / 체크 시 조건 없이 즉시완료'));
 
     const headerRow = document.createElement('div');
     headerRow.style.cssText = 'display:flex; gap:4px; align-items:center; margin-bottom:2px;';
+    const headerCheck = document.createElement('span');
+    headerCheck.style.cssText = 'width:16px;';
     const headerNameSpan = document.createElement('span');
     headerNameSpan.style.cssText = 'flex:1.4;';
     const headerAC = document.createElement('span');
@@ -2743,6 +2864,7 @@
     const headerEV = document.createElement('span');
     headerEV.textContent = '회피치';
     headerEV.style.cssText = 'flex:1; font-size:10px; color:#4fc3f7; text-align:center;';
+    headerRow.appendChild(headerCheck);
     headerRow.appendChild(headerNameSpan);
     headerRow.appendChild(headerAC);
     headerRow.appendChild(headerEV);
@@ -2752,6 +2874,21 @@
     mod.DUNGEONS.forEach((d) => {
       const row = document.createElement('div');
       row.style.cssText = 'display:flex; gap:4px; align-items:center; margin-bottom:2px;';
+
+      // v1.2.34 신규: 체크하면 이 던전은 적중치/회피치 기준이나 즉시완료 추가 조건을
+      // 전혀 확인하지 않고, 전투 화면에 들어가자마자 곧바로 즉시 최상층 도전을 시도한다.
+      const forceCheck = document.createElement('input');
+      forceCheck.type = 'checkbox';
+      forceCheck.title = '체크 시 조건 확인 없이 시작하자마자 즉시 최상층 도전';
+      forceCheck.checked = !!mod.config.forceInstantClear[d.id];
+      forceCheck.style.cssText = 'width:14px; height:14px; flex:none;';
+      forceCheck.addEventListener('change', (e) => {
+        mod.config.forceInstantClear[d.id] = e.target.checked;
+        acInput.disabled = e.target.checked;
+        evInput.disabled = e.target.checked;
+        mod.saveConfig();
+      });
+
       const nameSpan = document.createElement('span');
       nameSpan.textContent = d.label;
       nameSpan.style.cssText = 'font-size:10px; color:#aaa; flex:1.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;';
@@ -2760,6 +2897,7 @@
       acInput.title = '목표 적중치';
       acInput.placeholder = '적중';
       acInput.value = mod.config.instantClear[d.id].targetAC;
+      acInput.disabled = forceCheck.checked;
       acInput.style.cssText = inputStyle() + 'flex:1;';
       acInput.addEventListener('change', (e) => {
         mod.config.instantClear[d.id].targetAC = parseInt(e.target.value, 10) || 0;
@@ -2770,16 +2908,18 @@
       evInput.title = '목표 회피치';
       evInput.placeholder = '회피';
       evInput.value = mod.config.instantClear[d.id].targetEV;
+      evInput.disabled = forceCheck.checked;
       evInput.style.cssText = inputStyle() + 'flex:1;';
       evInput.addEventListener('change', (e) => {
         mod.config.instantClear[d.id].targetEV = parseInt(e.target.value, 10) || 0;
         mod.saveConfig();
       });
+      row.appendChild(forceCheck);
       row.appendChild(nameSpan);
       row.appendChild(acInput);
       row.appendChild(evInput);
       container.appendChild(row);
-      instantInputs.push(acInput, evInput);
+      instantInputs.push(forceCheck, acInput, evInput);
     });
 
     const btnRow = document.createElement('div');
