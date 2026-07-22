@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.2.36
+// @version      1.2.39
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -1224,6 +1224,20 @@
     return parseInt(m[1].replace(/,/g, ''), 10);
   };
 
+  // v1.2.39 신규: MP 포션 잔여량을 전투 결과 텍스트에서 직접 읽는다("MP 포션: N 사용
+  // (M 남음)" 형식 - 재전직 모듈의 doHunt에서 이미 쓰던 것과 동일한 패턴). 기존에는
+  // HP/MP 게이지 라벨("HP"/"MP" 리프 요소)을 화면에서 찾아 다음 형제 요소의 수치를
+  // 읽는 방식(readPlayerHPMP)만 있었는데, 이 라벨을 못 찾으면(화면 구조가 살짝
+  // 다르거나 일시적 렌더링 문제 등) 함수가 그냥 null을 반환해서 MP 소진 여부를 아예
+  // 검사하지 못하고 넘어가는 경우가 있었음 - "MP 포션이 없는데도 계속 사냥한다"는
+  // 제보의 주 원인으로 추정. 결과 텍스트에서 잔여량을 직접 읽는 이 체크를 추가해서,
+  // 게이지 기반 감지가 실패해도 소진 여부를 놓치지 않도록 이중으로 확인한다.
+  Modules.autohunt.readMpPotionRemaining = function () {
+    const m = Core.bodyText().match(/MP\s*포션:\s*[\d,]+\s*사용\s*\(([\d,]+)\s*남음\)/);
+    if (!m) return null;
+    return parseInt(m[1].replace(/,/g, ''), 10);
+  };
+
   Modules.autohunt.detectResultState = function () {
     const text = Core.bodyText();
     if (/장비\s*내구도\s*부족/.test(text)) return 'durability';
@@ -1353,6 +1367,12 @@
       const postExpPotion = mod.readExpPotionRemaining();
       if (postExpPotion !== null && postExpPotion <= 0) {
         Core.notifyStopped('autohunt', '농축 경험의 물약 효과가 모두 소진되었습니다 — 정지합니다. 인벤토리에서 물약을 채워주세요.');
+        break;
+      }
+
+      const mpPotionRemaining = mod.readMpPotionRemaining();
+      if (mpPotionRemaining !== null && mpPotionRemaining <= 0) {
+        Core.notifyStopped('autohunt', 'MP 포션이 모두 소진되었습니다 — 정지합니다. 인벤토리에서 포션을 채워주세요.');
         break;
       }
 
@@ -1703,23 +1723,28 @@
 
   // "취소"를 제외한 입장 방법 버튼들 중 하나를 고른다. 버튼이 하나뿐이면(예전처럼
   // "입장" 버튼 하나만 있는 경우) 그냥 그걸 쓰고, "열쇠 N개 (에너지 무료)" /
-  // "열쇠 M개 + 에너지 K" 처럼 여러 선택지가 있으면 보유한 입장권으로 충당 가능한
-  // 한 "에너지 무료" 옵션을 우선 선택해 행동력을 아낀다.
+  // "열쇠 M개 + 에너지 K" 처럼 여러 선택지가 있으면 v1.2.37 요청에 따라 에너지를
+  // 같이 쓰는 옵션(열쇠 + 에너지)을 우선 선택한다. 그 옵션에 필요한 열쇠가 부족하면
+  // "에너지 무료" 옵션으로 대체한다.
   Modules.dungeon.pickEntryMethodButton = function (dialogEl, ticketsAvailable) {
     const buttons = [...dialogEl.querySelectorAll('button')].filter((b) => b.textContent.trim() !== '취소');
     if (buttons.length === 0) return null;
     if (buttons.length === 1) return buttons[0];
 
-    const freeBtn = buttons.find((b) => /에너지\s*무료/.test(b.textContent));
-    if (freeBtn) {
-      const m = freeBtn.textContent.match(/열쇠\s*(\d+)\s*개/);
+    const enoughKeys = (btn) => {
+      const m = btn.textContent.match(/열쇠\s*(\d+)\s*개/);
       const needed = m ? parseInt(m[1], 10) : 0;
-      if (ticketsAvailable === null || ticketsAvailable === undefined || ticketsAvailable >= needed) {
-        return freeBtn;
-      }
-      Core.log('dungeon', `"에너지 무료" 입장에 필요한 열쇠(${needed}개)가 부족해(보유 ${ticketsAvailable}개) 다른 입장 방법을 사용합니다.`);
+      return ticketsAvailable === null || ticketsAvailable === undefined || ticketsAvailable >= needed;
+    };
+
+    const energyBtn = buttons.find((b) => /에너지/.test(b.textContent) && !/에너지\s*무료/.test(b.textContent));
+    if (energyBtn && enoughKeys(energyBtn)) return energyBtn;
+    if (energyBtn) {
+      const m = energyBtn.textContent.match(/열쇠\s*(\d+)\s*개/);
+      const needed = m ? parseInt(m[1], 10) : 0;
+      Core.log('dungeon', `열쇠+에너지 입장에 필요한 열쇠(${needed}개)가 부족해(보유 ${ticketsAvailable}개) 다른 입장 방법을 사용합니다.`);
     }
-    return buttons.find((b) => b !== freeBtn) || buttons[0];
+    return buttons.find((b) => b !== energyBtn) || buttons[0];
   };
 
   Modules.dungeon.enterDungeon = async function (dungeonDef) {
@@ -1777,8 +1802,8 @@
       // 복수의 입장 방법 선택지가 뜨는 경우가 생김. 정확히 텍스트가 "입장"인 버튼만
       // 찾던 기존 코드는 이런 화면에서 그 버튼을 영영 못 찾아 재시도만 반복하다
       // 멈춰버렸음 → 모달 컨테이너를 찾아 "취소"를 제외한 버튼들 중 적절한 것을
-      // 고르도록 교체. 입장 방법이 여러 개면 보유한 입장권으로 충당 가능한 한
-      // "에너지 무료" 옵션을 우선 선택(행동력 절약), 안 되면 나머지 옵션을 사용.
+      // 고르도록 교체. 입장 방법이 여러 개면 v1.2.37 요청에 따라 "열쇠 + 에너지"를
+      // 함께 쓰는 옵션을 우선 선택(해당 옵션의 열쇠가 부족하면 나머지 옵션 사용).
       const entryDialog = await Core.retryStep('던전 입장 확인 모달 컨테이너 찾기', () => this.getEntryConfirmDialog());
       if (!entryDialog) {
         Core.log('dungeon', '입장 확인 모달 컨테이너를 찾지 못했습니다.');
@@ -1959,8 +1984,12 @@
 
     const btn = Core.findButtonByText('즉시 최상층 도전');
     if (!btn || btn.disabled) {
-      Core.log('dungeon', '"즉시 최상층 도전" 버튼을 사용할 수 없는 상태입니다 (캐릭터 등급 제한 등). 이후 재확인하지 않습니다.');
-      this.instantClearTried = true;
+      // v1.2.38 버그 수정: 이 버튼이 아직 화면에 없거나 일시적으로 비활성 상태인
+      // 경우까지 "다시는 시도 안 함"으로 영구 확정해버리던 문제 수정. 실제로 도전
+      // 버튼을 누른 적이 없으므로(=진짜 실패가 아니므로) instantClearTried를 세우지
+      // 않고 다음 전투에서 다시 확인하도록 함 - 조건을 다 채웠는데도 이 버튼이 한 번
+      // 안 보였다는 이유만으로 그 던전에서 즉시완료가 영영 안 되던 원인 중 하나였음.
+      Core.log('dungeon', '"즉시 최상층 도전" 버튼을 아직 사용할 수 없는 상태입니다 - 다음 전투에서 다시 확인합니다.');
       return false;
     }
     if (!forced) {
