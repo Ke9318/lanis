@@ -2547,6 +2547,7 @@
       wanderingSoulFloorThreshold: 40,
       targetAC: 0,
       targetDefense: 3000,
+      retryIfWeeklyDamageUnder1M: false, // 주간 누적 데미지 100만 이하면 재도전
     },
     hpBeforeBattle: null,
     requiredPhaseDone: false,
@@ -3482,6 +3483,24 @@
     await Core.waitFor(() => (/deep-dungeon/.test(location.href) || Core.bodyText().includes('던전 진입') ? true : null));
   };
 
+  // "기록" 탭으로 이동해서 "주간 누적 데미지" 값을 읽는다. 실패하면 null 반환.
+  Modules.deepdungeon.readWeeklyCumulativeDamage = async function () {
+    const recordTab = await Core.retryStep('"기록" 탭 찾기', () => {
+      const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+      return tabs.find((t) => t.textContent.trim() === '기록') || null;
+    });
+    if (!recordTab) return null;
+    recordTab.click();
+    await Core.humanDelay(600, 1200);
+
+    const matched = await Core.retryStep('"주간 누적 데미지" 텍스트 확인', () => {
+      const m = Core.bodyText().match(/주간\s*누적\s*데미지\s*([\d,]+)/);
+      return m || null;
+    });
+    if (!matched) return null;
+    return parseInt(matched[1].replace(/,/g, ''), 10);
+  };
+
   // 실제 확인된 플로우: 로비에서 "던전 진입" 클릭 → 디버프/버프 특성 선택 화면
   // (사용자가 미리 설정해둔 특성이 그대로 유지된 상태)이 뜸 → 여기서 특성을 건드리지
   // 않고 그대로 "입장"만 누른다. "특성 없이 입장"을 누르면 미리 설정해둔 디버프/버프가
@@ -3623,6 +3642,28 @@
     await mod.goToDeepDungeon();
     if (!mod.running) return;
 
+    // "누적 데미지 100만 이하시 재도전" 옵션이 켜져 있으면, 매크로를 시작하는
+    // 시점에도 먼저 주간 누적 데미지를 확인한다. 이미 100만을 넘겼다면 (예:
+    // 수동 플레이로 이미 채워둔 경우) 새 런에 진입하지 않고 바로 정지한다.
+    if (mod.config.retryIfWeeklyDamageUnder1M) {
+      const startDamage = await mod.readWeeklyCumulativeDamage();
+      if (startDamage !== null && startDamage > 1000000) {
+        Core.notifyCompleted(
+          'deepdungeon',
+          `이미 주간 누적 데미지 ${startDamage.toLocaleString()} (100만 초과)라 시작하지 않고 정지합니다.`
+        );
+        return;
+      }
+      const enterTabAtStart = await Core.retryStep('"입장" 탭 찾기', () => {
+        const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+        return tabs.find((t) => t.textContent.trim() === '입장') || null;
+      });
+      if (enterTabAtStart) {
+        enterTabAtStart.click();
+        await Core.humanDelay(600, 1200);
+      }
+    }
+
     const entered = await mod.enterFreshRunIfNeeded();
     if (!entered) {
       Core.log('deepdungeon', '심층던전 화면 진입을 확인하지 못했습니다 (이미 진행 중인 런이 없을 수 있음).');
@@ -3655,8 +3696,41 @@
       Core.updateModuleButtons();
 
       if (mod.cycleCount >= 1) {
-        // 던전의 주인은 한 런당 1회만 도전 가능하므로 도전 완료 즉시 정지한다.
-        Core.notifyCompleted('deepdungeon', '던전의 주인 도전을 완료했습니다 (1회성이라 정지합니다).');
+        // 던전의 주인은 한 런당 1회만 도전 가능하다. "주간 누적 데미지 100만 이하시
+        // 재도전" 옵션이 켜져 있으면, 기록 탭에서 실제 주간 누적 데미지를 확인해서
+        // 아직 100만 이하면 새 런을 시작해 계속 도전한다.
+        if (mod.config.retryIfWeeklyDamageUnder1M) {
+          const weeklyDamage = await mod.readWeeklyCumulativeDamage();
+          if (weeklyDamage !== null && weeklyDamage <= 1000000) {
+            Core.log(
+              'deepdungeon',
+              `주간 누적 데미지 ${weeklyDamage.toLocaleString()} (100만 이하) → 재도전을 위해 새 런을 시작합니다.`
+            );
+            const enterTab = await Core.retryStep('"입장" 탭 찾기', () => {
+              const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+              return tabs.find((t) => t.textContent.trim() === '입장') || null;
+            });
+            if (enterTab) {
+              enterTab.click();
+              await Core.humanDelay(600, 1200);
+            }
+            const enteredAgain = await mod.enterFreshRunIfNeeded();
+            if (enteredAgain) {
+              mod.cycleCount = 0;
+              consecutiveNoProgress = 0;
+              await Core.humanDelay(300, 700);
+              continue;
+            }
+            Core.notifyStopped('deepdungeon', '재도전을 위해 새 런을 시작하지 못했습니다.');
+            break;
+          }
+          if (weeklyDamage === null) {
+            Core.log('deepdungeon', '주간 누적 데미지를 확인하지 못해 안전하게 정지합니다.');
+          } else {
+            Core.log('deepdungeon', `주간 누적 데미지 ${weeklyDamage.toLocaleString()} (100만 초과) → 정지합니다.`);
+          }
+        }
+        Core.notifyCompleted('deepdungeon', '던전의 주인 도전을 완료했습니다.');
         break;
       }
 
@@ -4134,6 +4208,7 @@
           wanderingSoulFloorThreshold: this.config.wanderingSoulFloorThreshold,
           targetAC: this.config.targetAC,
           targetDefense: this.config.targetDefense,
+          retryIfWeeklyDamageUnder1M: this.config.retryIfWeeklyDamageUnder1M,
         })
       );
     } catch (e) {
@@ -4147,7 +4222,7 @@
       if (!raw) return;
       const saved = JSON.parse(raw);
       Object.keys(saved).forEach((k) => {
-        if (typeof saved[k] === 'number') this.config[k] = saved[k];
+        if (typeof saved[k] === 'number' || typeof saved[k] === 'boolean') this.config[k] = saved[k];
       });
     } catch (e) {
       /* 저장된 값이 손상됐으면 기본값 그대로 사용 */
@@ -4219,6 +4294,22 @@
     });
     container.appendChild(defInput);
 
+    const retryRow = document.createElement('div');
+    retryRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:6px 0 4px;';
+    const retryCheck = document.createElement('input');
+    retryCheck.type = 'checkbox';
+    retryCheck.checked = mod.config.retryIfWeeklyDamageUnder1M;
+    retryCheck.addEventListener('change', (e) => {
+      mod.config.retryIfWeeklyDamageUnder1M = e.target.checked;
+      mod.saveConfig();
+    });
+    const retryLabel = document.createElement('span');
+    retryLabel.textContent = '누적 데미지 100만 이하시 재도전 ("기록" 탭의 주간 누적 데미지 기준)';
+    retryLabel.style.cssText = 'font-size:11px; color:#ccc;';
+    retryRow.appendChild(retryCheck);
+    retryRow.appendChild(retryLabel);
+    container.appendChild(retryRow);
+
     const btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
     const startBtn = document.createElement('button');
@@ -4247,7 +4338,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [tokenInput, emergInput, bossPreInput, acInput, defInput];
+    refs.inputs = [tokenInput, emergInput, bossPreInput, acInput, defInput, retryCheck];
   }
 
   function buildPanel() {
