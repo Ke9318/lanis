@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.2.39
+// @version      1.2.40
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -542,9 +542,7 @@
         return el.textContent.includes('사용할 개수');
       });
       if (candidates.length === 0) return null;
-      return candidates.reduce((smallest, el) =>
-        el.querySelectorAll('*').length < smallest.querySelectorAll('*').length ? el : smallest
-      );
+      return candidates.reduce((a, b) => (a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b));
     });
 
     if (qtyDialogEl) {
@@ -1578,7 +1576,7 @@
     instantClearTried: false,
     boughtGodStrikeOrEquiv: false,
     boughtGodStrikeExact: false,
-    allStatsBoughtCount: 0,
+    allStatsBoughtValue: 0,
     boughtSingleStat: {},
     boughtGodStrike: false,
     boughtCertainHit: false,
@@ -1618,7 +1616,11 @@
       daily: false,
       statMode: 'standard',
       abilityMode: 'equalPriority',
-      instantClearRequirement: { requireGodStrike: true, minAllStats: 2, requireStats: [] },
+      // v1.2.41 수정: "모든 스탯" 조건을 구매 횟수(minAllStats: 2회)가 아니라
+      // 구매한 "모든 스탯 +N" 카드들의 수치 합계(포인트)로 판단하도록 변경.
+      // 하급 카드(+10 등)를 여러 번 사서 "횟수"만 채우고 실제 스탯 총합은
+      // 상급 1장(+50 등)보다 낮은데도 즉시완료를 시도해 실패하는 문제가 있었음.
+      instantClearRequirement: { requireGodStrike: true, minAllStats: 150, requireStats: [] },
     },
     {
       id: 'sewer',
@@ -1627,7 +1629,8 @@
       daily: true,
       statMode: 'extended',
       abilityMode: 'ordered',
-      instantClearRequirement: { requireGodStrike: true, minAllStats: 3, requireStats: ['힘', '속도'] },
+      // v1.2.41 수정: 위와 동일한 이유로 minAllStats를 "횟수"에서 "합계 포인트"로 변경.
+      instantClearRequirement: { requireGodStrike: true, minAllStats: 200, requireStats: ['힘', '속도'] },
     },
   ];
 
@@ -1804,21 +1807,37 @@
       // 멈춰버렸음 → 모달 컨테이너를 찾아 "취소"를 제외한 버튼들 중 적절한 것을
       // 고르도록 교체. 입장 방법이 여러 개면 v1.2.37 요청에 따라 "열쇠 + 에너지"를
       // 함께 쓰는 옵션을 우선 선택(해당 옵션의 열쇠가 부족하면 나머지 옵션 사용).
-      const entryDialog = await Core.retryStep('던전 입장 확인 모달 컨테이너 찾기', () => this.getEntryConfirmDialog());
-      if (!entryDialog) {
-        Core.log('dungeon', '입장 확인 모달 컨테이너를 찾지 못했습니다.');
-        return false;
-      }
+      // v1.2.40 버그 수정: 클릭까지는 됐다고 판단했는데 실제로는 모달이 그대로 남아
+      // 있는 제보가 있었음(클릭이 씹혔거나 그 사이 모달이 다시 그려져 버튼 참조가
+      // stale해졌을 가능성) - 클릭 후 모달이 실제로 닫혔는지 확인하고, 안 닫히면
+      // 모달을 다시 찾아 버튼을 재선택해서 최대 3번까지 재시도하도록 강화.
       const tickets = this.getTicketCount(dungeonDef);
-      const enterConfirmBtn = await Core.retryStep('던전 입장 확인 모달의 입장 방법 버튼 찾기', () =>
-        this.pickEntryMethodButton(entryDialog, dungeonDef.daily ? null : tickets)
-      );
-      if (!enterConfirmBtn) {
-        Core.log('dungeon', '입장 확인 버튼을 찾지 못했습니다.');
+      let entryDismissed = false;
+      for (let attempt = 1; attempt <= 3 && !entryDismissed; attempt++) {
+        const entryDialog = await Core.retryStep('던전 입장 확인 모달 컨테이너 찾기', () => this.getEntryConfirmDialog());
+        if (!entryDialog) {
+          Core.log('dungeon', `입장 확인 모달 컨테이너를 찾지 못했습니다 (시도 ${attempt}/3).`);
+          await Core.sleep(1200);
+          continue;
+        }
+        const enterConfirmBtn = this.pickEntryMethodButton(entryDialog, dungeonDef.daily ? null : tickets);
+        if (!enterConfirmBtn) {
+          Core.log('dungeon', `입장 방법 버튼을 찾지 못했습니다 (시도 ${attempt}/3).`);
+          await Core.sleep(1200);
+          continue;
+        }
+        Core.log('dungeon', `입장 방법 선택: "${enterConfirmBtn.textContent.trim()}" (시도 ${attempt}/3)`);
+        enterConfirmBtn.click();
+        await Core.humanDelay(1100, 2000);
+        entryDismissed = await Core.waitFor(() => (!Core.bodyText().includes('던전 입장 확인') ? true : null), 3000, 300);
+        if (!entryDismissed) {
+          Core.log('dungeon', `입장 확인 모달이 클릭 후에도 닫히지 않았습니다 (시도 ${attempt}/3) - 다시 시도합니다.`);
+        }
+      }
+      if (!entryDismissed) {
+        Core.log('dungeon', '던전 입장 확인 모달을 닫지 못했습니다 (여러 번 시도 후에도 실패).');
         return false;
       }
-      enterConfirmBtn.click();
-      await Core.humanDelay(1100, 2000);
     }
 
     const enteredBattle = await Core.retryStep('던전 전투 화면 진입 확인', () =>
@@ -1833,7 +1852,7 @@
     this.instantClearTried = false;
     this.boughtGodStrikeOrEquiv = false;
     this.boughtGodStrikeExact = false;
-    this.allStatsBoughtCount = 0;
+    this.allStatsBoughtValue = 0;
     this.boughtSingleStat = {};
     this.boughtGodStrike = false;
     this.boughtCertainHit = false;
@@ -1937,8 +1956,8 @@
     if (!req) return { ok: true };
     const missing = [];
     if (req.requireGodStrike && !this.boughtGodStrikeExact) missing.push('신의 일격 미구매');
-    if (req.minAllStats && this.allStatsBoughtCount < req.minAllStats) {
-      missing.push(`모든 스탯 ${this.allStatsBoughtCount}/${req.minAllStats}회`);
+    if (req.minAllStats && this.allStatsBoughtValue < req.minAllStats) {
+      missing.push(`모든 스탯 합계 ${this.allStatsBoughtValue}/${req.minAllStats}`);
     }
     if (req.requireStats) {
       req.requireStats.forEach((stat) => {
@@ -2153,7 +2172,12 @@
     const allStatCards = cards.filter((c) => this.isAllStatsLabel(c.label));
     if (allStatCards.length > 0) {
       allStatCards.sort((a, b) => this.parseAllStatsValue(b.label) - this.parseAllStatsValue(a.label));
-      return { card: allStatCards[0], onBought: () => (this.allStatsBoughtCount += 1) };
+      // v1.2.41 수정: "횟수(+= 1)"가 아니라 카드에 적힌 수치(예: "모든 스탯 +30" → 30)를
+      // 그대로 누적 합산한다. 이렇게 하면 하급 카드를 여러 번 사서 "횟수"만 채우는
+      // 것과 상급 카드 1장을 사는 것을 동일하게 취급하지 않고, 실제 스탯 총합 기준으로
+      // 즉시완료 조건 충족 여부를 정확히 판단할 수 있다.
+      const pickedValue = this.parseAllStatsValue(allStatCards[0].label);
+      return { card: allStatCards[0], onBought: () => (this.allStatsBoughtValue += pickedValue) };
     }
 
     if (dungeonDef.abilityMode === 'ordered') {
@@ -2278,7 +2302,7 @@
       this.instantClearTried = false;
       this.boughtGodStrikeOrEquiv = false;
       this.boughtGodStrikeExact = false;
-      this.allStatsBoughtCount = 0;
+      this.allStatsBoughtValue = 0;
       this.boughtSingleStat = {};
       this.boughtGodStrike = false;
       this.boughtCertainHit = false;
