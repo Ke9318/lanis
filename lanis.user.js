@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.4.1
+// @version      1.4.2
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -879,49 +879,104 @@
       return false;
     }
 
-    const useBtn = [...rowContainer.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
-    if (!useBtn) {
-      Core.notifyStopped('rejob', '농축 경험의 물약 "사용" 버튼을 찾지 못했습니다.');
-      return false;
-    }
-    useBtn.click();
-    await mod.clickDelayWait();
+    let confirmClicked = false;
+    const MAX_USE_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_USE_ATTEMPTS && !confirmClicked; attempt++) {
+      // 오래된 요소 참조를 재사용하지 않도록 매 시도마다 행(row)과 "사용" 버튼을 새로 찾음
+      const row = [...document.querySelectorAll('*')].filter((el) => {
+        if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
+        if (!el.textContent.trim().startsWith('농축 경험의 물약')) return false;
+        return [...el.querySelectorAll('button')].some((b) => b.textContent.trim() === '사용');
+      }).reduce((a, b) => (!a ? b : a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b), null);
+      const freshUseBtn = row && [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
+      if (!freshUseBtn) {
+        Core.notifyStopped('rejob', '농축 경험의 물약 "사용" 버튼을 찾지 못했습니다 (재시도 중).');
+        return false;
+      }
+      freshUseBtn.click();
+      await mod.clickDelayWait();
 
-    const qtyDialogEl = await Core.retryStep(
-      '농축 경험의 물약 수량 확인 팝업 찾기',
-      () => {
-        const candidates = [...document.querySelectorAll('*')].filter((el) => {
-          if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
-          return el.textContent.includes('사용할 개수');
-        });
-        if (candidates.length === 0) return null;
-        return candidates.reduce((a, b) => (a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b));
-      },
-      { attempts: 2, waits: [800, 1500] }
-    );
-    if (qtyDialogEl) {
-      const qtyInput = qtyDialogEl.querySelector('input[type="number"]');
-      if (qtyInput) {
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        nativeSetter.call(qtyInput, 1);
-        qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
-        await mod.clickDelayWait();
-      }
-      const qtyConfirmBtn = [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
-      if (qtyConfirmBtn) {
-        qtyConfirmBtn.click();
-        await mod.clickDelayWait();
-      }
-    } else {
-      const confirmBtn = await Core.retryStep(
-        '농축 경험의 물약 사용 확인 팝업의 "사용" 버튼 찾기',
-        () => (Core.bodyText().includes('사용하시겠습니까') ? Core.findButtonInDialog('사용하시겠습니까', '사용') : null),
+      const qtyDialogEl = await Core.retryStep(
+        '농축 경험의 물약 수량 확인 팝업 찾기',
+        () => {
+          const marker = [...document.querySelectorAll('*')].find((el) => {
+            if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
+            return el.textContent.trim() === '사용할 개수';
+          });
+          if (!marker) return null;
+          // 버그 수정: 활력의 포션 팝업과 동일한 원인(라벨 <p> 자체가 선택되어 그 안에 input/button이 없었음).
+          // 실제 입력칸/버튼이 있는 role="dialog" 조상을 직접 찾도록 변경.
+          return marker.closest('[role="dialog"]') || marker.closest('.MuiDialogContent-root') || marker.parentElement;
+        },
         { attempts: 2, waits: [800, 1500] }
       );
-      if (confirmBtn) {
-        confirmBtn.click();
-        await mod.clickDelayWait();
+
+      // 사용자 제보: 라니스 자체의 타이밍성 버그로, "사용"을 눌렀을 때 의도한 "농축 경험의 물약"이 아니라
+      // 엉뚱한 다른 아이템(예: 그냥 "경험의 물약")의 확인 팝업이 뜨는 경우가 있음(매크로만의 문제가 아니라
+      // 게임 자체에서 다른 캐릭터로도 재현됨). 팝업이 실제로 "농축 경험의 물약"을 언급하는지 확인하고,
+      // 아니면 취소한 뒤 처음부터(행/버튼 재탐색) 다시 시도.
+      const dialogTextNow = qtyDialogEl ? qtyDialogEl.textContent : Core.bodyText();
+      if (!dialogTextNow.includes('농축 경험의 물약')) {
+        Core.log(
+          'rejob',
+          `농축 경험의 물약을 눌렀는데 다른 아이템 확인 팝업이 떴습니다(라니스 자체 타이밍 이슈로 추정) → 취소 후 재시도 (${attempt}/${MAX_USE_ATTEMPTS})`
+        );
+        const cancelBtn =
+          (qtyDialogEl && [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소')) ||
+          Core.findButtonByText('취소');
+        if (cancelBtn) {
+          cancelBtn.click();
+          await mod.clickDelayWait();
+        }
+        await Core.sleep(1000);
+        continue;
       }
+
+      if (qtyDialogEl) {
+        const qtyInput = qtyDialogEl.querySelector('input[type="number"]');
+        if (qtyInput) {
+          const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          nativeSetter.call(qtyInput, 1);
+          qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
+          await mod.clickDelayWait();
+        }
+        const qtyConfirmBtn = await Core.retryStep('수량 확인 팝업의 "사용" 버튼 찾기', () =>
+          [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용') || null
+        );
+        if (qtyConfirmBtn) {
+          qtyConfirmBtn.click();
+          await mod.clickDelayWait();
+          confirmClicked = true;
+        }
+      } else {
+        const confirmBtn = await Core.retryStep(
+          '농축 경험의 물약 사용 확인 팝업의 확인 버튼 찾기',
+          () => {
+            if (!Core.bodyText().includes('농축 경험의 물약') || !Core.bodyText().includes('사용하시겠습니까')) return null;
+            // 실측 결과: 이 팝업은 수량을 묻지 않고 바로 "아이템 사용" 확인 팝업으로 뜨며,
+            // 버튼 라벨이 "사용"이 아니라 "확인"임(취소/확인 2개 버튼). 두 라벨 모두 대응.
+            return (
+              Core.findButtonInDialog('사용하시겠습니까', '확인') || Core.findButtonInDialog('사용하시겠습니까', '사용')
+            );
+          },
+          { attempts: 2, waits: [800, 1500] }
+        );
+        if (confirmBtn) {
+          confirmBtn.click();
+          await mod.clickDelayWait();
+          confirmClicked = true;
+        }
+      }
+    }
+    if (!confirmClicked) {
+      // 버그 수정: 이전에는 버튼을 못 찾아도 무조건 "사용 완료"로 로그를 남겨서, 실제로는 포션이
+      // 전혀 소모되지 않았는데도 성공한 것처럼 보이는 문제가 있었음(잔여 횟수가 계속 0/null로 남아
+      // 5배 경험치 버프 없이 사냥이 진행되던 근본 원인).
+      Core.notifyStopped(
+        'rejob',
+        '농축 경험의 물약을 사용하지 못했습니다 (확인 버튼을 못 찾았거나, 계속 엉뚱한 아이템 팝업이 떠서 여러 번 재시도 후에도 실패).'
+      );
+      return false;
     }
     Core.log('rejob', '농축 경험의 물약 1개 사용 완료');
     return true;
