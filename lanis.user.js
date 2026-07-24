@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.4.0
+// @version      1.4.1
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -527,33 +527,42 @@
     await mod.clickDelayWait();
 
     const qtyDialogEl = await Core.retryStep('수량 확인 팝업 컨테이너 찾기', () => {
-      const candidates = [...document.querySelectorAll('*')].filter((el) => {
+      const marker = [...document.querySelectorAll('*')].find((el) => {
         if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
-        return el.textContent.includes('사용할 개수');
+        return el.textContent.trim() === '사용할 개수';
       });
-      if (candidates.length === 0) return null;
-      return candidates.reduce((a, b) => (a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b));
+      if (!marker) return null;
+      // 버그 수정: "사용할 개수" 라벨(<p>) 자체는 자식이 없어(childCount=0) "가장 작은 컨테이너 찾기" 방식으로는
+      // 항상 이 라벨 자신이 선택되어버려 그 안에 input/button이 하나도 없었음(실제 입력칸/버튼은 role="dialog" 조상에 있음).
+      // → 텍스트 매칭이 아니라 실제 다이얼로그 조상(role="dialog")을 직접 찾도록 변경.
+      return marker.closest('[role="dialog"]') || marker.closest('.MuiDialogContent-root') || marker.parentElement;
     });
 
     if (qtyDialogEl) {
       const qtyInput = qtyDialogEl.querySelector('input[type="number"]');
+      let useQty = null;
       if (qtyInput) {
         const holdMatch = qtyDialogEl.textContent.match(/보유 수량:\s*([\d,]+)개/);
         const held = holdMatch ? parseInt(holdMatch[1].replace(/,/g, ''), 10) : 1;
-        const useQty = Math.min(3, held);
+        useQty = Math.min(3, held);
         const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         nativeSetter.call(qtyInput, useQty);
         qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
         await mod.clickDelayWait();
-        const confirmBtn = [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
-        if (confirmBtn) {
-          confirmBtn.click();
-          await mod.clickDelayWait();
-          mod.energyRefillStreak += 1;
-          Core.log('rejob', `활력의 포션 ${useQty}개 사용 완료`);
-        }
       } else {
-        Core.log('rejob', '수량 확인 팝업은 찾았으나 입력칸을 찾지 못함 (수량 입력 없이 진행되는 케이스로 추정)');
+        Core.log('rejob', '수량 입력칸을 찾지 못함 (수량을 물어보지 않는 케이스로 추정) → 기본값으로 확인 버튼만 클릭');
+      }
+      // 입력칸 유무와 무관하게 "사용" 확인 버튼은 항상 클릭해야 실제로 포션이 소모됨
+      const confirmBtn = await Core.retryStep('수량 확인 팝업의 "사용" 버튼 찾기', () =>
+        [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용') || null
+      );
+      if (confirmBtn) {
+        confirmBtn.click();
+        await mod.clickDelayWait();
+        mod.energyRefillStreak += 1;
+        Core.log('rejob', useQty !== null ? `활력의 포션 ${useQty}개 사용 완료` : '활력의 포션 사용 완료');
+      } else {
+        Core.notifyStopped('rejob', '수량 확인 팝업에서 "사용" 버튼을 찾지 못했습니다 (여러 번 재시도 후에도 실패).');
       }
     }
   };
@@ -1006,6 +1015,10 @@
       if (result.gold !== null && result.gold > 1000000) {
         await Core.bankDepositAll('rejob');
       }
+      // 버그 수정: 사망(레벨 100 미달) 판정의 실제 원인이 사냥터가 너무 강해서가 아니라
+      // 행동력(에너지) 고갈로 전투가 중간에 끊긴 경우일 수 있음. 성공 분기에서만 행동력을 보충하면
+      // 이 경우 행동력이 계속 낮은 채로 방치되어 다음 사냥도 계속 실패하는 문제가 있었음.
+      await mod.refillEnergyIfNeeded();
       return;
     }
     mod.skipRejobThisCycle = false;
