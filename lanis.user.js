@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.4.2
+// @version      1.4.3-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -40,21 +40,44 @@
       const worker = new Worker(url);
       const pending = new Map();
       let counter = 0;
+      let workerFailed = false;
+      const fallback = (resolve, ms) => setTimeout(resolve, Math.max(0, ms));
       worker.onmessage = function (e) {
-        const resolve = pending.get(e.data);
-        if (resolve) {
+        const item = pending.get(e.data);
+        if (item) {
           pending.delete(e.data);
-          resolve();
+          item.resolve();
         }
       };
-      worker.onerror = function () {
-        /* 워커 실행 중 오류가 나도 폴백 sleep을 계속 쓸 수 있도록 조용히 무시 */
+      worker.onerror = function (event) {
+        workerFailed = true;
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        for (const item of pending.values()) {
+          const elapsed = Date.now() - item.startedAt;
+          fallback(item.resolve, item.ms - elapsed);
+        }
+        pending.clear();
+        try {
+          worker.terminate();
+          URL.revokeObjectURL(url);
+        } catch (e) {
+          /* 정리 실패는 무시 */
+        }
       };
       return function (ms) {
         return new Promise((resolve) => {
+          if (workerFailed) {
+            fallback(resolve, ms);
+            return;
+          }
           const id = ++counter;
-          pending.set(id, resolve);
-          worker.postMessage({ id, ms });
+          pending.set(id, { resolve, ms, startedAt: Date.now() });
+          try {
+            worker.postMessage({ id, ms });
+          } catch (e) {
+            pending.delete(id);
+            fallback(resolve, ms);
+          }
         });
       };
     } catch (e) {
@@ -65,6 +88,17 @@
   Core.sleep = Core._bgSleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   Core.rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
   Core.humanDelay = (minMs, maxMs) => Core.sleep(minMs + Math.random() * (maxMs - minMs));
+
+  Core.isRunCancelled = function (moduleId, runId) {
+    if (!moduleId) return false;
+    const mod = Modules[moduleId];
+    return !mod || !mod.running || mod.stopRequested || (runId !== undefined && mod.runId !== runId);
+  };
+
+  Core.defaultShouldCancel = function () {
+    const ctx = Core.runContext;
+    return !!ctx && Core.isRunCancelled(ctx.moduleId, ctx.runId);
+  };
 
   Core.bodyText = function () {
     const prevPanelDisplay = Core.panelEl ? Core.panelEl.style.display : null;
@@ -102,25 +136,47 @@
     return [...smallest.querySelectorAll('button')].find((b) => b.textContent.trim() === buttonText) || null;
   };
 
-  Core.waitFor = async function (fn, timeoutMs = 15000, intervalMs = 300) {
+  Core.waitFor = async function (fn, timeoutMs = 15000, intervalMs = 300, shouldCancel = Core.defaultShouldCancel) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      const result = fn();
+      if (shouldCancel && shouldCancel()) return null;
+      let result = null;
+      try {
+        result = await fn();
+      } catch (e) {
+        result = null;
+      }
       if (result) return result;
       await Core.sleep(intervalMs);
     }
     return null;
   };
 
-  Core.retryStep = async function (label, checkFn, { attempts = 4, waits = [1000, 3000, 6000, 10000] } = {}) {
+  Core.retryStep = async function (
+    label,
+    checkFn,
+    { attempts = 4, waits = [1000, 3000, 6000, 10000], shouldCancel = Core.defaultShouldCancel } = {}
+  ) {
     for (let i = 0; i < attempts; i++) {
-      const result = await checkFn();
+      if (shouldCancel && shouldCancel()) return null;
+      let result = null;
+      try {
+        result = await checkFn();
+      } catch (e) {
+        result = null;
+      }
       if (result) return result;
 
       if (Core.bodyText().includes('서버에 재연결')) {
         Core.log('core', `(${label}) 서버 재연결 감지 → 3초 추가 대기 후 재확인`);
         await Core.sleep(3000);
-        const retryResult = await checkFn();
+        if (shouldCancel && shouldCancel()) return null;
+        let retryResult = null;
+        try {
+          retryResult = await checkFn();
+        } catch (e) {
+          retryResult = null;
+        }
         if (retryResult) return retryResult;
       }
 
@@ -133,36 +189,72 @@
     return null;
   };
 
-  Core.clickAndWaitFor = async function (el, checkFn, { minDelay = 500, maxDelay = 1300, timeoutMs = 15000 } = {}) {
+  Core.resolveClickable = function (target) {
+    return typeof target === 'function' ? target() : target;
+  };
+
+  Core.safeClick = async function (
+    target,
+    { beforeMin = 500, beforeMax = 1300, afterMin = 0, afterMax = 0, shouldCancel = Core.defaultShouldCancel } = {}
+  ) {
+    if (shouldCancel && shouldCancel()) return false;
+    await Core.humanDelay(beforeMin, beforeMax);
+    if (shouldCancel && shouldCancel()) return false;
+    const el = Core.resolveClickable(target);
+    if (
+      !el ||
+      !el.isConnected ||
+      el.disabled ||
+      el.getAttribute('aria-disabled') === 'true' ||
+      el.getClientRects().length === 0
+    ) return false;
     el.click();
-    await Core.humanDelay(minDelay, maxDelay);
-    return Core.waitFor(checkFn, timeoutMs, 300);
+    if (afterMax > 0) await Core.humanDelay(afterMin, afterMax);
+    return true;
+  };
+
+  Core.clickAndWaitFor = async function (
+    target,
+    checkFn,
+    { minDelay = 500, maxDelay = 1300, timeoutMs = 15000, shouldCancel = Core.defaultShouldCancel } = {}
+  ) {
+    const clicked = await Core.safeClick(target, {
+      beforeMin: minDelay,
+      beforeMax: maxDelay,
+      shouldCancel,
+    });
+    if (!clicked) return null;
+    return Core.waitFor(checkFn, timeoutMs, 300, shouldCancel);
   };
 
   Core.clickNavMenuExact = async function (navLabel, itemText) {
     const navBtn = await Core.waitFor(() => Core.findButtonByText(navLabel), 15000);
     if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
-    navBtn.click();
-    await Core.humanDelay(500, 1000);
+    if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), { beforeMin: 500, beforeMax: 1000 }))) {
+      throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
+    }
     const item = await Core.waitFor(() =>
       [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim() === itemText)
     );
     if (!item) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
-    item.click();
-    await Core.humanDelay(500, 1000);
+    if (!(await Core.safeClick(() =>
+      [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim() === itemText)
+    ))) throw new Error(`메뉴 항목 "${itemText}"가 클릭 직전에 사라짐`);
   };
 
   Core.clickNavMenuSuffix = async function (navLabel, suffixText) {
     const navBtn = await Core.waitFor(() => Core.findButtonByText(navLabel), 15000);
     if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
-    navBtn.click();
-    await Core.humanDelay(500, 1000);
+    if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), { beforeMin: 500, beforeMax: 1000 }))) {
+      throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
+    }
     const item = await Core.waitFor(() =>
       [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim().endsWith(suffixText))
     );
     if (!item) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
-    item.click();
-    await Core.humanDelay(500, 1000);
+    if (!(await Core.safeClick(() =>
+      [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim().endsWith(suffixText))
+    ))) throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
   };
 
   Core.bankDepositAll = async function (moduleId) {
@@ -300,12 +392,13 @@
   };
 
   Core.stopModule = function (moduleId) {
-    Core.activeModuleId = null;
     const mod = Modules[moduleId];
     if (mod) {
+      mod.runId = (mod.runId || 0) + 1;
       mod.running = false;
       mod.stopRequested = true;
     }
+    if (Core.activeModuleId === moduleId) Core.activeModuleId = null;
     Core.log(moduleId, '모듈 정지됨');
     Core.updateModuleButtons();
   };
@@ -372,7 +465,10 @@
     id: 'rejob',
     running: false,
     stopRequested: false,
+    runId: 0,
+    loopPromise: null,
     cycleCount: 0,
+    nextRestAt: null,
     config: {
       targetScore: 5000,
       tierIndex: 3,
@@ -458,8 +554,13 @@
       Core.notifyStopped('rejob', '행동력 "+" 버튼을 찾지 못했습니다 (여러 번 재시도 후에도 실패).');
       return;
     }
-    plusBtn.click();
-    await mod.clickDelayWait();
+    if (!(await Core.safeClick(() => mod.findEnergyPlusButton(), {
+      beforeMin: mod.config.clickDelay[0],
+      beforeMax: mod.config.clickDelay[1],
+    }))) {
+      Core.notifyStopped('rejob', '행동력 "+" 버튼이 클릭 직전에 사라졌습니다.');
+      return false;
+    }
 
     const dialogFound = await Core.retryStep('활력의 포션 팝업 열림 확인', () =>
       Core.bodyText().includes('활력의 포션 사용') ? true : null
@@ -523,8 +624,13 @@
       );
       return;
     }
-    targetBtn.click();
-    await mod.clickDelayWait();
+    if (!(await Core.safeClick(() => findTargetUseButton(), {
+      beforeMin: mod.config.clickDelay[0],
+      beforeMax: mod.config.clickDelay[1],
+    }))) {
+      Core.notifyStopped('rejob', '활력의 포션 "사용" 버튼이 클릭 직전에 사라졌습니다.');
+      return false;
+    }
 
     const qtyDialogEl = await Core.retryStep('수량 확인 팝업 컨테이너 찾기', () => {
       const marker = [...document.querySelectorAll('*')].find((el) => {
@@ -557,14 +663,30 @@
         [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용') || null
       );
       if (confirmBtn) {
-        confirmBtn.click();
-        await mod.clickDelayWait();
+        const clicked = await Core.safeClick(
+          () => [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용') || null,
+          { beforeMin: mod.config.clickDelay[0], beforeMax: mod.config.clickDelay[1] }
+        );
+        if (!clicked) {
+          Core.notifyStopped('rejob', '수량 확인 팝업의 "사용" 버튼이 클릭 직전에 사라졌습니다.');
+          return false;
+        }
         mod.energyRefillStreak += 1;
         Core.log('rejob', useQty !== null ? `활력의 포션 ${useQty}개 사용 완료` : '활력의 포션 사용 완료');
       } else {
         Core.notifyStopped('rejob', '수량 확인 팝업에서 "사용" 버튼을 찾지 못했습니다 (여러 번 재시도 후에도 실패).');
+        return false;
       }
     }
+    const increasedEnergy = await Core.waitFor(() => {
+      const current = mod.parseEnergy();
+      return current !== null && current > energy ? current : null;
+    }, 10000, 400);
+    if (increasedEnergy === null) {
+      Core.notifyStopped('rejob', '활력의 포션 사용 후 행동력 증가를 확인하지 못했습니다.');
+      return false;
+    }
+    return true;
   };
 
   Modules.rejob.doRejob = async function () {
@@ -677,6 +799,11 @@
       await mod.clickDelayWait();
       resultShown = await Core.waitFor(() => /레벨\s*1\s*→\s*\d+\s*달성|전투\s*후\s*중단|\d+\s*회\s*전투\s*완료/.test(Core.bodyText()), 15000);
       if (!resultShown) break;
+    }
+
+    if (!resultShown || Core.bodyText().includes('장비 내구도 부족')) {
+      Core.notifyStopped('rejob', '장비 수리 후에도 정상적인 사냥 결과를 확인하지 못했습니다.');
+      return null;
     }
 
     const text = Core.bodyText();
@@ -1024,11 +1151,14 @@
       return;
     }
 
-    const restThreshold = Core.rand(mod.config.restEvery[0], mod.config.restEvery[1]);
-    if (mod.cycleCount % restThreshold === 0) {
+    if (!Number.isFinite(mod.nextRestAt)) {
+      mod.nextRestAt = mod.cycleCount + Core.rand(mod.config.restEvery[0], mod.config.restEvery[1]);
+    }
+    if (mod.cycleCount >= mod.nextRestAt) {
       const restSec = Core.rand(mod.config.restSeconds[0], mod.config.restSeconds[1]);
-      Core.log('rejob', `${restThreshold}사이클 도달 → ${restSec}초 휴식`);
+      Core.log('rejob', `${mod.cycleCount}사이클 도달 → ${restSec}초 휴식`);
       await Core.sleep(restSec * 1000);
+      mod.nextRestAt = mod.cycleCount + Core.rand(mod.config.restEvery[0], mod.config.restEvery[1]);
     }
   };
 
@@ -1058,7 +1188,11 @@
       }`
     );
 
-    if (result.level !== 100) {
+    if (result.level === null || !Number.isFinite(result.level)) {
+      throw new Error('사냥 결과에서 레벨을 읽지 못했습니다. 화면 갱신 후 다시 시도합니다.');
+    }
+
+    if (result.level < 100) {
       Core.log('rejob', `레벨 ${result.level} (100 미달) → ${result.tierUsed.short}에서 사망 추정, 한 단계 아래 사냥터로 재시도`);
       const idx = mod.TIERS.findIndex((t) => t.short === result.tierUsed.short);
       mod.nextTierIndexOverride = Math.max(0, idx - 1);
@@ -1165,11 +1299,12 @@
   };
 
   Modules.autohunt.ensureOnGround = async function (groundSuffix, floor) {
-    if (this.findHuntX50Button()) {
+    if (this.findHuntX50Button(groundSuffix)) {
       if (floor) {
-        await this.selectFloor(floor);
+        const floorSelected = await this.selectFloor(floor);
+        if (!floorSelected) return false;
       }
-      return true;
+      return !!this.findHuntX50Button(groundSuffix);
     }
     try {
       await Core.clickNavMenuSuffix('전투', groundSuffix);
@@ -1179,9 +1314,10 @@
     }
     await Core.sleep(600);
     if (floor) {
-      await this.selectFloor(floor);
+      const floorSelected = await this.selectFloor(floor);
+      if (!floorSelected) return false;
     }
-    return true;
+    return !!(await Core.waitFor(() => this.findHuntX50Button(groundSuffix), 8000));
   };
 
   Modules.autohunt.selectFloor = async function (floor) {
@@ -1198,19 +1334,34 @@
     return true;
   };
 
-  Modules.autohunt.findHuntX50Button = function () {
-    return Core.allButtons().find((b) => /×\s*50\s*$/.test(b.textContent.trim())) || null;
+  Modules.autohunt.findHuntX50Button = function (groundSuffix = this.config.groundSuffix) {
+    return (
+      Core.allButtons().find((b) => {
+        const text = b.textContent.trim();
+        if (!/[×xX]\s*50\s*$/.test(text)) return false;
+        if (!groundSuffix || text.includes(groundSuffix)) return true;
+        let parent = b.parentElement;
+        for (let depth = 0; parent && depth < 4; depth++, parent = parent.parentElement) {
+          if ((parent.textContent || '').includes(groundSuffix)) return true;
+        }
+        return false;
+      }) || null
+    );
   };
 
   Modules.autohunt.clickHuntX50 = async function () {
-    const btn = await Core.waitFor(() => this.findHuntX50Button(), 6000);
+    const btn = await Core.waitFor(() => this.findHuntX50Button(this.config.groundSuffix), 6000);
     if (!btn) {
       Core.log('autohunt', '오류: "x 50" 사냥 버튼을 찾지 못했습니다.');
       return 'not_found';
     }
     if (btn.disabled) return 'disabled';
-    btn.click();
-    return 'clicked';
+    return (await Core.safeClick(() => this.findHuntX50Button(this.config.groundSuffix), {
+      beforeMin: 500,
+      beforeMax: 1300,
+    }))
+      ? 'clicked'
+      : 'not_found';
   };
 
   Modules.autohunt.readEnergy = function () {
@@ -1326,6 +1477,7 @@
         break;
       }
 
+      const previousResultText = Core.bodyText();
       const okClick = await mod.clickHuntX50();
       if (okClick === 'disabled') {
         Core.notifyStopped('autohunt', '행동력이 부족하여 사냥 버튼이 비활성화되어 있습니다 — 정지합니다.');
@@ -1342,7 +1494,11 @@
       }
 
       await Core.sleep(1000);
-      const result = await mod.waitForResult(25000);
+      const result = await Core.waitFor(() => {
+        const currentText = Core.bodyText();
+        if (currentText === previousResultText) return null;
+        return mod.detectResultState();
+      }, 25000, 500);
       if (!result) {
         if (mod.isHpZeroBlocked()) {
           Core.notifyStopped('autohunt', '포션이 부족해 체력이 0인 상태로 전투가 불가능합니다 — 정지합니다.');
@@ -1429,7 +1585,15 @@
   };
 
   Modules.raremap.getTopRadio = function (dialog) {
-    return dialog.querySelector('.MuiRadio-root');
+    const radios = [...dialog.querySelectorAll('.MuiRadio-root')];
+    return (
+      radios.find((radio) => {
+        const input = radio.querySelector('input');
+        const row = radio.closest('label, li, [role="radio"]') || radio.parentElement;
+        const text = row ? row.textContent : '';
+        return !(input && input.disabled) && radio.getAttribute('aria-disabled') !== 'true' && !/[xX×]\s*0\b/.test(text);
+      }) || null
+    );
   };
 
   Modules.raremap.getUseButton = function (dialog) {
@@ -1477,8 +1641,7 @@
       Core.log('raremap', '지도 아이콘을 찾지 못했습니다.');
       return false;
     }
-    mapIcon.click();
-    await Core.sleep(this.randomClickDelay());
+    if (!(await Core.safeClick(() => this.getMapIcon(), { beforeMin: 600, beforeMax: 1300 }))) return false;
 
     const dialog = this.getMapDialog();
     if (!dialog) {
@@ -1491,30 +1654,47 @@
       Core.log('raremap', '모달에서 지도 항목을 찾지 못했습니다.');
       return false;
     }
-    topRadio.click();
-    await Core.sleep(this.randomClickDelay());
+    if (!(await Core.safeClick(() => {
+      const freshDialog = this.getMapDialog();
+      return freshDialog ? this.getTopRadio(freshDialog) : null;
+    }, { beforeMin: 600, beforeMax: 1300 }))) return false;
 
     const useBtn = this.getUseButton(dialog);
     if (!useBtn) {
       Core.log('raremap', '사용하기 버튼을 찾지 못했습니다.');
       return false;
     }
-    useBtn.click();
-    await Core.sleep(this.randomClickDelay());
-    return true;
+    if (!(await Core.safeClick(() => {
+      const freshDialog = this.getMapDialog();
+      return freshDialog ? this.getUseButton(freshDialog) : null;
+    }, { beforeMin: 600, beforeMax: 1300 }))) return false;
+    return !!(await Core.waitFor(() => (!this.getMapDialog() || this.getRareMapButton() ? true : null), 10000, 300));
   };
 
   Modules.raremap.clearRareMapsIfAny = async function () {
     let count = 0;
-    while (this.running) {
+    let unchangedCount = 0;
+    while (this.running && count < 100) {
       const rareBtn = this.getRareMapButton();
       if (!rareBtn) break;
-      Core.log('raremap', `레어맵 발견: "${rareBtn.textContent.trim()}" → 클릭`);
-      rareBtn.click();
+      const beforeText = rareBtn.textContent.trim();
+      Core.log('raremap', `레어맵 발견: "${beforeText}" → 클릭`);
+      const clicked = await Core.safeClick(() => this.getRareMapButton(), { beforeMin: 600, beforeMax: 1300 });
+      if (!clicked) break;
+      const changed = await Core.waitFor(() => {
+        const next = this.getRareMapButton();
+        return !next || next.textContent.trim() !== beforeText ? true : null;
+      }, 10000, 400);
+      if (!changed) {
+        unchangedCount++;
+        Core.log('raremap', `동일 레어맵 버튼이 그대로 남아 있습니다 (${unchangedCount}/3).`);
+        if (unchangedCount >= 3) {
+          throw new Error('동일 레어맵 버튼이 반복해서 남아 있어 안전을 위해 중단합니다.');
+        }
+        continue;
+      }
+      unchangedCount = 0;
       count++;
-      await Core.sleep(this.randomClickDelay());
-      Core.log('raremap', '다음 레어맵이 있는지 1초 후 재확인합니다...');
-      await Core.sleep(1000);
     }
     return count;
   };
@@ -3819,19 +3999,54 @@
       );
       return;
     }
+    if (mod.loopPromise) {
+      Core.showBanner(moduleId, '이전 실행이 아직 정리 중입니다. 잠시 후 다시 시작해주세요.');
+      return;
+    }
     if (mod.running) return;
     Core.hideBanner();
     Core.activeModuleId = moduleId;
+    mod.runId = (mod.runId || 0) + 1;
+    const runId = mod.runId;
     mod.running = true;
     mod.stopRequested = false;
+    if (moduleId === 'rejob') {
+      mod.nextRestAt = mod.cycleCount + Core.rand(mod.config.restEvery[0], mod.config.restEvery[1]);
+    }
     Core.log(moduleId, `${MODULE_LABELS[moduleId]} 매크로 시작`);
     Core.updateModuleButtons();
-    mod.mainLoop();
+    let loopPromise;
+    loopPromise = Promise.resolve()
+      .then(async () => {
+        Core.runContext = { moduleId, runId };
+        await mod.mainLoop(runId);
+      })
+      .catch((e) => {
+        if (!Core.isRunCancelled(moduleId, runId)) {
+          Core.log(moduleId, `처리되지 않은 오류: ${e && e.message ? e.message : String(e)}`);
+          Core.showBanner(moduleId, `처리되지 않은 오류로 정지했습니다: ${e && e.message ? e.message : String(e)}`, false);
+          Core.playStopSound();
+        }
+      })
+      .finally(() => {
+        if (mod.loopPromise === loopPromise) mod.loopPromise = null;
+        if (Core.runContext && Core.runContext.moduleId === moduleId && Core.runContext.runId === runId) {
+          Core.runContext = null;
+        }
+        if (mod.runId === runId) {
+          mod.running = false;
+          mod.stopRequested = true;
+          if (Core.activeModuleId === moduleId) Core.activeModuleId = null;
+        }
+        Core.updateModuleButtons();
+      });
+    mod.loopPromise = loopPromise;
   };
 
   Core.requestStopModule = function (moduleId) {
     const mod = Modules[moduleId];
     if (!mod || !mod.running) return;
+    mod.runId = (mod.runId || 0) + 1;
     mod.stopRequested = true;
     mod.running = false;
     if (Core.activeModuleId === moduleId) Core.activeModuleId = null;
