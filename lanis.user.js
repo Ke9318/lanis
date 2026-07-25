@@ -2791,21 +2791,98 @@
       bossPreFloors: [8, 18, 28, 38, 48],
       bossPreFloorHpPercent: 50,
       hpDropTriggerPercent: 10,
-      speedStatThreshold: 800,
       wanderingSoulFloorThreshold: 40,
       targetAC: 0,
       targetDefense: 3000,
       retryIfWeeklyDamageUnder1M: false, // 주간 누적 데미지 100만 이하면 재도전
+      jobMode: '물리딜', // 물리딜(관통/집중/정확한 한 발 기반, 실제 동작) / 신술(개발 중)
     },
     hpBeforeBattle: null,
     requiredPhaseDone: false,
+    usedSmithyOnce: false, // 마술 전용: 45층 이후 대장간을 한 번 방문했는지
+    shopVisitReason: null, // 'deliberate'(토큰 기준 충족) | 'fallback'(다른 선택지 없어서)
   };
 
   const DD_GRADE_ORDER = { 동: 0, 은: 1, 금: 2, 칠색: 3 };
 
+  // 직업별 규칙을 데이터로 분리해둔다 (물리딜/신술 로직이 서로 다른 어빌/스탯
+  // 우선순위를 쓰므로, 하드코딩된 리스트 대신 이 프로필을 통해 참조한다).
+  // requiredTargets: 어빌리티 이름 -> 제단에서 밀어붙일 목표 등급(그 등급 이상이면
+  //   더 이상 제단 우선순위에 넣지 않음). requiredLifePair: 물리딜 전용(둘 중 하나만
+  //   있으면 됨), 신술은 해당 없음(null).
+  const DD_JOB_PROFILES = {
+    물리딜: {
+      requiredTargets: {
+        '급속 성장': '칠색',
+        관통: '칠색',
+        집중: '칠색',
+        '정확한 한 발': '칠색',
+      },
+      requiredLifePair: { names: ['라이프 드레인', '재생'], target: '칠색' },
+      recommendedAbilities: [
+        '매직컬 댄싱',
+        '분노의 일격',
+        '연속 타격',
+        '전환',
+        '샤프스',
+        '피의 맹약',
+        '정복자의 발걸음',
+        '심연의 기운',
+      ],
+      recommendedCap: 2,
+      mainStat: '힘',
+      speedThreshold: 800,
+      // 정신(적중 목표)/생명(방어 목표) 조건을 만족한 뒤 최후순위로 고를 스탯.
+      fallbackStat: '행운',
+    },
+    신술: {
+      requiredTargets: {
+        '급속 성장': '칠색',
+        마법검: '칠색',
+        관통: '금',
+        집중: '금',
+        '정확한 한 발': '금',
+      },
+      requiredLifePair: null,
+      recommendedAbilities: ['독참', '상태이상공명', '도박사의 룰렛', '재생', '디버프 증폭', '고통의 공명'],
+      recommendedCap: 2,
+      mainStat: '지능',
+      speedThreshold: 700,
+      // 신술은 행운을 찍지 않고, 대신 힘을 최후순위로 고른다.
+      fallbackStat: '힘',
+    },
+    마술: {
+      requiredTargets: {
+        '급속 성장': '칠색',
+        관통: '칠색',
+        집중: '칠색',
+        '정확한 한 발': '칠색',
+        과부하: '칠색',
+        매직파워: '칠색',
+        마나비전: '칠색',
+      },
+      requiredLifePair: null,
+      recommendedAbilities: ['재생', '영혼 복제', '정복자의 발걸음'],
+      recommendedCap: 2,
+      mainStat: '지능',
+      speedThreshold: 700,
+      // 신술과 동일하게 행운을 찍지 않고 힘을 최후순위로 고른다.
+      fallbackStat: '힘',
+      // 마술 전용: 상점에서 여유 토큰으로 "장비 조각 x100"을 사고, 45층 이후
+      // 대장간에서 장비를 강화한다.
+      buyEquipmentShards: true,
+    },
+  };
+
+  Modules.deepdungeon.getJobProfile = function () {
+    return DD_JOB_PROFILES[this.config.jobMode] || DD_JOB_PROFILES.물리딜;
+  };
+
   // 라이프 드레인 또는 재생을 이미 금 등급 이상으로 보유하고 있는지 확인.
   Modules.deepdungeon.hasLifePairAtGoldPlus = function (abilities) {
-    return this.config.requiredLifePair.some((name) => {
+    const pair = this.getJobProfile().requiredLifePair;
+    if (!pair) return false; // 이 직업은 라이프드레인/재생 페어 조건이 없음(예: 신술)
+    return pair.names.some((name) => {
       const a = abilities.find((x) => x.name === name);
       return a && DD_GRADE_ORDER[a.grade] >= DD_GRADE_ORDER['금'];
     });
@@ -2814,16 +2891,18 @@
   // 추천 어빌리티(금·칠색만 채용)로 인정할지 판단. 피의 맹약은 예외로, 라이프
   // 드레인/재생을 이미 금 등급 이상으로 보유하고 있을 때만 채용한다.
   Modules.deepdungeon.isRecommendedEligible = function (name, grade, abilities) {
-    if (!this.config.recommendedAbilities.includes(name)) return false;
+    const profile = this.getJobProfile();
+    if (!profile.recommendedAbilities.includes(name)) return false;
     if (!(grade === '금' || grade === '칠색')) return false;
     if (name === '피의 맹약' && !this.hasLifePairAtGoldPlus(abilities)) return false;
-    // 추천 어빌은 2개까지만 채용한다 - 그 이상 확보했으면 더 이상 새로 채용하지
-    // 않고 스탯 보상에 집중한다. 던전 입장 시 메인/직업 어빌이 자동으로 "동" 등급
-    // 변환되면서 우연히 추천 리스트 이름과 겹칠 수 있으므로, 금·칠색만 카운트한다.
+    // 추천 어빌은 직업별 캡(기본 2개)까지만 채용한다 - 그 이상 확보했으면 더 이상
+    // 새로 채용하지 않고 스탯 보상에 집중한다. 던전 입장 시 메인/직업 어빌이
+    // 자동으로 "동" 등급 변환되면서 우연히 추천 리스트 이름과 겹칠 수 있으므로,
+    // 금·칠색만 카운트한다.
     const recommendedOwnedCount = abilities.filter(
-      (a) => this.config.recommendedAbilities.includes(a.name) && (a.grade === '금' || a.grade === '칠색')
+      (a) => profile.recommendedAbilities.includes(a.name) && (a.grade === '금' || a.grade === '칠색')
     ).length;
-    if (recommendedOwnedCount >= 2) return false;
+    if (recommendedOwnedCount >= profile.recommendedCap) return false;
     return true;
   };
   // 속성 상성: 불<물<번개<별<바람<불 (순환), 빛<어둠<빛 (순환).
@@ -2968,9 +3047,11 @@
     await this.ensureAbilityPanelExpanded();
     const abilities = this.readAbilities();
     const names = abilities.map((a) => a.name);
+    const profile = this.getJobProfile();
 
-    const tier1Owned = this.config.requiredTier1.every((n) => names.includes(n));
-    const lifeOwned = this.config.requiredLifePair.some((n) => names.includes(n));
+    const tier1Names = Object.keys(profile.requiredTargets).filter((n) => n !== '급속 성장');
+    const tier1Owned = tier1Names.every((n) => names.includes(n));
+    const lifeOwned = profile.requiredLifePair ? profile.requiredLifePair.names.some((n) => names.includes(n)) : true;
     if (!tier1Owned || !lifeOwned) return false;
 
     // 던전 입장 시 메인/직업 어빌이 자동으로 "동" 등급 던전 어빌로 변환되는데, 이때
@@ -2978,9 +3059,9 @@
     // 안 했는데도 "추천 어빌 확보"로 잘못 세어지는 문제가 있었다. 등급 상관없이
     // 이름만 보고 세지 말고, 실제로 채용 기준을 만족하는(금·칠색) 것만 센다.
     const recommendedOwnedCount = abilities.filter(
-      (a) => this.config.recommendedAbilities.includes(a.name) && (a.grade === '금' || a.grade === '칠색')
+      (a) => profile.recommendedAbilities.includes(a.name) && (a.grade === '금' || a.grade === '칠색')
     ).length;
-    return recommendedOwnedCount >= 2;
+    return recommendedOwnedCount >= profile.recommendedCap;
   };
 
   Modules.deepdungeon.isRequiredPhaseActive = async function () {
@@ -2988,17 +3069,20 @@
     const abilities = this.readAbilities();
     const byName = {};
     abilities.forEach((a) => (byName[a.name] = a.grade));
+    const profile = this.getJobProfile();
 
-    const growth = byName['급속 성장'];
-    if (growth && growth !== '칠색') return true;
-
-    for (const name of this.config.requiredTier1) {
+    // 어빌리티별로 목표 등급이 다를 수 있다(예: 신술은 급속성장/마법검만 칠색,
+    // 관통/집중/정확한 한 발은 금까지). 보유 중인데 아직 목표 등급 미만이면
+    // 제단 우선순위가 필요하다고 본다.
+    for (const [name, target] of Object.entries(profile.requiredTargets)) {
       const g = byName[name];
-      if (g && g !== '칠색') return true;
+      if (g && DD_GRADE_ORDER[g] < DD_GRADE_ORDER[target]) return true;
     }
-    for (const name of this.config.requiredLifePair) {
-      const g = byName[name];
-      if (g && g !== '칠색') return true;
+    if (profile.requiredLifePair) {
+      for (const name of profile.requiredLifePair.names) {
+        const g = byName[name];
+        if (g && DD_GRADE_ORDER[g] < DD_GRADE_ORDER[profile.requiredLifePair.target]) return true;
+      }
     }
     return false;
   };
@@ -3007,17 +3091,36 @@
   // 드레인·재생) 승급에만 사용한다. 추천 어빌리티는 절대 제단으로 올리지 않고
   // 전투/상점/특수이벤트에서 주워지는 등급 그대로 둔다 - 자리가 남아도 추천 어빌로
   // 채우지 않는다.
-  Modules.deepdungeon.pickAltarTargets = function (candidateNames, count) {
+  // candidates: parseAltarCandidates()가 반환하는 {name, from, to} 목록.
+  // 어빌리티별 목표 등급(직업 프로필)에 아직 못 미친 것만 승급 대상으로 고른다 -
+  // 이미 목표 등급에 도달한 항목은 화면에 후보로 떠도 더 이상 올리지 않는다
+  // (예: 신술의 관통/집중/정확한 한 발은 금이 목표라 금 도달 후엔 스킵).
+  Modules.deepdungeon.pickAltarTargets = function (candidates, count) {
+    const profile = this.getJobProfile();
+    const byName = {};
+    candidates.forEach((c) => (byName[c.name] = c));
+
+    const needsUpgrade = (name, target) => {
+      const c = byName[name];
+      return c && DD_GRADE_ORDER[c.from] < DD_GRADE_ORDER[target];
+    };
+
     const picked = [];
     const tryPick = (name) => {
       if (picked.length >= count) return;
-      if (candidateNames.includes(name) && !picked.includes(name)) picked.push(name);
+      if (byName[name] && !picked.includes(name)) picked.push(name);
     };
 
-    if (candidateNames.includes('급속 성장')) tryPick('급속 성장');
-    for (const name of this.config.requiredTier1) tryPick(name);
-    tryPick('라이프 드레인');
-    tryPick('재생');
+    if (needsUpgrade('급속 성장', profile.requiredTargets['급속 성장'] || '칠색')) tryPick('급속 성장');
+    for (const [name, target] of Object.entries(profile.requiredTargets)) {
+      if (name === '급속 성장') continue;
+      if (needsUpgrade(name, target)) tryPick(name);
+    }
+    if (profile.requiredLifePair) {
+      for (const name of profile.requiredLifePair.names) {
+        if (needsUpgrade(name, profile.requiredLifePair.target)) tryPick(name);
+      }
+    }
     return picked;
   };
 
@@ -3028,33 +3131,37 @@
   };
 
   Modules.deepdungeon.pickStatPriority = function (offeredStats, ctx) {
+    const profile = this.getJobProfile();
     const order = [];
-    // 방어력이 목표치에 아직 못 미쳤으면 생명을 힘보다도 우선한다 (실제 방어력
-    // 값을 목표 방어력 설정과 직접 비교).
+    // 방어력이 목표치에 아직 못 미쳤으면 생명을 주력 스탯보다도 우선한다 (실제
+    // 방어력 값을 목표 방어력 설정과 직접 비교).
     const defenseBehind =
       this.config.targetDefense > 0 &&
       ctx.currentDefense !== null &&
       ctx.currentDefense !== undefined &&
       ctx.currentDefense < this.config.targetDefense;
     if (defenseBehind) order.push('생명');
-    order.push('힘');
+    order.push(profile.mainStat);
     if (ctx.hpDropPercent >= this.config.hpDropTriggerPercent) order.push('생명');
     order.push('생명');
 
     // 적중치가 목표치에 아직 못 미쳤을 때만 정신을 우선 투자한다. 목표를 넘겼으면
     // (targetAC=0이라 아예 목표가 없는 경우도 포함) 정신은 더 이상 우선순위에
-    // 넣지 않고 맨 뒤로 미뤄 오버슈팅을 막는다 - 이전에는 이 체크가 없어서 정신이
-    // 계속 최우선으로 뽑혀 목표치를 한참 넘기고 있었다.
+    // 넣지 않고 맨 뒤로 미뤄 오버슈팅을 막는다.
     const acBehind =
       this.config.targetAC <= 0 || ctx.currentAC === null || ctx.currentAC === undefined
         ? true // 목표를 안 정했으면(0) 기존처럼 정상 우선순위로 취급
         : ctx.currentAC < this.config.targetAC;
     if (acBehind) order.push('정신');
 
-    order.push(ctx.mySpeed !== null && ctx.mySpeed < this.config.speedStatThreshold ? '속도' : '행운');
-    order.push('행운', '속도');
+    // 속도가 직업별 기준(물리딜 800 / 신술 600) 미만이면 속도, 아니면 직업별
+    // 폴백 스탯(물리딜=행운, 신술=힘)을 고른다.
+    order.push(ctx.mySpeed !== null && ctx.mySpeed < profile.speedThreshold ? '속도' : profile.fallbackStat);
+    order.push(profile.fallbackStat, '속도');
     if (!acBehind) order.push('정신'); // 목표 달성 후엔 최후순위로만 (다른 선택지 없을 때)
-    order.push('지능');
+    // 정말 다른 선택지가 없을 때 고르는 최후의 최후 스탯 - 물리딜은 지능(회피만
+    // 올려줘서 사실상 안 씀), 신술은 행운(신술은 행운을 아예 안 찍기로 함).
+    order.push(profile.mainStat === '힘' ? '지능' : '행운');
 
     for (const s of order) {
       if (offeredStats.includes(s)) return s;
@@ -3091,7 +3198,11 @@
 
   Modules.deepdungeon.pickBestAbilityItem = async function (items) {
     const abilityItems = items.filter((it) => it.isAbility);
-    const allRequired = [...this.config.requiredTier1, ...this.config.requiredLifePair];
+    const profile = this.getJobProfile();
+    const allRequired = [
+      ...Object.keys(profile.requiredTargets),
+      ...(profile.requiredLifePair ? profile.requiredLifePair.names : []),
+    ];
     for (const it of abilityItems) {
       if (allRequired.includes(it.name)) return it;
     }
@@ -3152,12 +3263,31 @@
 
     if (hpPct <= cfg.emergencyHpPercent) {
       if (options.includes('휴식')) return '휴식';
-      if (options.includes('상점')) return '상점';
+      if (options.includes('상점')) {
+        this.shopVisitReason = 'fallback';
+        return '상점';
+      }
     }
 
     if (floor !== null && cfg.bossPreFloors.includes(floor) && hpPct <= cfg.bossPreFloorHpPercent) {
       if (options.includes('휴식')) return '휴식';
-      if (options.includes('상점')) return '상점';
+      if (options.includes('상점')) {
+        this.shopVisitReason = 'fallback';
+        return '상점';
+      }
+    }
+
+    // 대장간: 마술 전용 - 45층 이후에 뜨면 딱 한 번만 들어가서 장비를 강화한다.
+    // 그 전에 뜨거나, 이미 한 번 방문했으면 다른 선택지를 고른다(대장간을 옵션
+    // 목록에서 그냥 무시하는 것과 같음).
+    if (
+      cfg.jobMode === '마술' &&
+      options.includes('대장간') &&
+      floor !== null &&
+      floor >= 45 &&
+      !this.usedSmithyOnce
+    ) {
+      return '대장간';
     }
 
     if ((await this.isRequiredPhaseActive()) && options.includes('제단')) return '제단';
@@ -3169,7 +3299,10 @@
       // 위주로 전환. 정예 전투는 그래도 전투 자체보단 낫고 위험도 없어서 유지.
       if (options.includes('특수 이벤트')) return '특수 이벤트';
       if (options.includes('정예 전투')) return '정예 전투';
-      if (options.includes('상점') && tokens >= cfg.tokenShopThreshold) return '상점';
+      if (options.includes('상점') && tokens >= cfg.tokenShopThreshold) {
+        this.shopVisitReason = 'deliberate';
+        return '상점';
+      }
       if (options.includes('전투')) return '전투';
     } else {
       // 1단계: 아직 필수/추천 어빌을 다 못 갖춤 → 전투(정예/일반)로 스탯·어빌 수집.
@@ -3178,19 +3311,25 @@
       if (options.includes('정예 전투')) return '정예 전투';
       if (options.includes('전투')) return '전투';
       if (options.includes('특수 이벤트')) return '특수 이벤트';
-      if (options.includes('상점') && tokens >= cfg.tokenShopThreshold) return '상점';
+      if (options.includes('상점') && tokens >= cfg.tokenShopThreshold) {
+        this.shopVisitReason = 'deliberate';
+        return '상점';
+      }
     }
 
     // 제단은 위에서 이미 "승급할 필수 어빌이 있는지" 판단해서 필요할 때만
     // 골랐다. 여기 폴백에서 조건 없이 다시 고르면, 승급할 게 없는데도 일단
     // 들어갔다가 "건너뜁니다"로 나오는(입장 후 판단) 상황이 생기므로 넣지 않는다.
-    if (options.includes('상점')) return '상점';
+    if (options.includes('상점')) {
+      this.shopVisitReason = 'fallback';
+      return '상점';
+    }
     if (options.includes('휴식')) return '휴식';
     return options[0] || null;
   };
 
   Modules.deepdungeon.getFloorEventOptions = function () {
-    const known = ['정예 전투', '전투', '휴식', '상점', '제단', '특수 이벤트', '보스 전투'];
+    const known = ['정예 전투', '전투', '휴식', '상점', '제단', '특수 이벤트', '보스 전투', '대장간'];
     const text = Core.bodyText();
     return known.filter((label) => {
       const re = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
@@ -3255,7 +3394,11 @@
     const abilityCardsRaw = cards.slice(1, -1);
     const abilityCards = abilityCardsRaw.map((c) => this.parseRewardAbilityCard(c)).filter(Boolean);
 
-    const allRequired = [...this.config.requiredTier1, ...this.config.requiredLifePair];
+    const profile = this.getJobProfile();
+    const allRequired = [
+      ...Object.keys(profile.requiredTargets),
+      ...(profile.requiredLifePair ? profile.requiredLifePair.names : []),
+    ];
     let pick = abilityCards.find((a) => allRequired.includes(a.name));
     if (!pick) {
       await this.ensureAbilityPanelExpanded();
@@ -3286,24 +3429,27 @@
     await this.ensureAbilityPanelExpanded();
     const abilities = this.readAbilities();
     const text = Core.bodyText();
-    const names = [];
+    const results = [];
     for (const a of abilities) {
       const escaped = a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const re = new RegExp(`${escaped}\\s*\\n\\s*(동|은|금|칠색)\\s*→\\s*(동|은|금|칠색)`);
-      if (re.test(text)) names.push(a.name);
+      const m = text.match(re);
+      if (m) results.push({ name: a.name, from: m[1], to: m[2] });
     }
-    return names;
+    return results;
   };
 
   Modules.deepdungeon.handleAltarScreen = async function () {
     const isFountain = Core.bodyText().includes('샘물 마시기');
     const wantCount = isFountain ? 2 : 1;
-    const candidates = await this.parseAltarCandidates();
+    const candidates = await this.parseAltarCandidates(); // [{name, from, to}, ...]
+    const candidateNames = candidates.map((c) => c.name);
+    const profile = this.getJobProfile();
 
     let targets = candidates.length > 0 ? this.pickAltarTargets(candidates, wantCount) : [];
 
     if (targets.length === 0) {
-      // 승급할 필수 어빌이 없다 (전부 이미 칠색이거나, 아직 보유하지 않았거나).
+      // 승급할 필수 어빌이 없다 (전부 이미 목표 등급이거나, 아직 보유하지 않았거나).
       // 제단(단일 선택)은 아무것도 안 골라도 "다음 층으로"가 활성화되는 경우가
       // 많아 그대로 건너뛸 수 있지만, 축복의 샘(2개 선택)은 2개를 채우기 전까지
       // "다음 층으로"가 비활성 상태라 이 방법으로 건너뛸 수 없다. 버튼이 실제로
@@ -3325,8 +3471,8 @@
         `${isFountain ? '축복의 샘' : '제단'}: 필수 어빌이 없고 건너뛸 수도 없어(다음 층으로 비활성), 부득이하게 다른 어빌로 채웁니다.`
       );
       const fallbackPool = [
-        ...this.config.recommendedAbilities.filter((n) => candidates.includes(n)),
-        ...candidates,
+        ...profile.recommendedAbilities.filter((n) => candidateNames.includes(n)),
+        ...candidateNames,
       ];
       for (const name of fallbackPool) {
         if (targets.length >= wantCount) break;
@@ -3336,8 +3482,8 @@
       // 필수 대상이 일부만 있는 경우(예: 축복의 샘 2슬롯 중 1개만 필수 후보) -
       // 나머지 자리도 채워야 확인 버튼이 활성화되므로 같은 폴백 풀로 채운다.
       const fallbackPool = [
-        ...this.config.recommendedAbilities.filter((n) => candidates.includes(n)),
-        ...candidates,
+        ...profile.recommendedAbilities.filter((n) => candidateNames.includes(n)),
+        ...candidateNames,
       ];
       for (const name of fallbackPool) {
         if (targets.length >= wantCount) break;
@@ -3415,9 +3561,96 @@
     return true;
   };
 
+  // 대장간: 무기를 먼저 최대한 강화하고, 조각이 남으면 방어구 → 악세서리 순으로
+  // 넘어가며 마저 강화한다 (마술 전용, 45층 이후 딱 한 번).
+  Modules.deepdungeon.readSmithyShards = function () {
+    const m = Core.bodyText().match(/장비\s*조각\s*:\s*([\d,]+)/);
+    return m ? parseInt(m[1].replace(/,/g, ''), 10) : 0;
+  };
+
+  // "무기"/"방어구"/"악세서리" 글자는 실제 버튼 안의 텍스트가 아니라, 아이콘
+  // 전용 버튼 옆에 붙은 별도 라벨이다. Core.findButtonByText로는 못 찾으므로,
+  // 라벨 텍스트를 가진 leaf에서 조상으로 올라가며 그 안에 있는 첫 번째 버튼을
+  // 찾는다 (실전 확인: 라벨의 6단계 위 조상 안에 실제 버튼이 있음).
+  Modules.deepdungeon.findSlotSelectButton = function (slotLabel) {
+    const leaf = [...document.querySelectorAll('*')].find(
+      (el) => el.children.length === 0 && el.textContent.trim() === slotLabel
+    );
+    if (!leaf) return null;
+    let node = leaf;
+    for (let i = 0; i < 8 && node; i++) {
+      const btn = node.querySelector('button');
+      if (btn) return btn;
+      node = node.parentElement;
+    }
+    return null;
+  };
+
+  Modules.deepdungeon.enhanceSlotToMax = async function (slotLabel) {
+    const tabBtn = this.findSlotSelectButton(slotLabel);
+    if (tabBtn) {
+      tabBtn.click();
+      await Core.humanDelay(400, 800);
+    } else {
+      Core.log('deepdungeon', `대장간: "${slotLabel}" 슬롯 선택 버튼을 찾지 못했습니다.`);
+    }
+
+    // 슬롯 선택 직후 "10회 강화" 버튼이 활성화되기까지 렌더링 지연이 있을 수
+    // 있어, 고정 대기 대신 활성화될 때까지 재확인한다. 조각이 부족해서 원래
+    // 비활성인 경우엔 여기서 재시도만 소모하고 자연스럽게 넘어간다.
+    const firstEnhanceBtn = await Core.retryStep(
+      `"${slotLabel}" 강화 버튼 활성화 대기`,
+      () => {
+        const b = Core.allButtons().find(
+          (btn) => btn.textContent.trim().includes('강화') && /\d+회\s*강화/.test(btn.textContent.trim())
+        );
+        return b && !b.disabled ? b : null;
+      },
+      { attempts: 4, waits: [500, 800, 1200, 1500] }
+    );
+    if (!firstEnhanceBtn) {
+      Core.log('deepdungeon', `대장간: "${slotLabel}" 강화 버튼이 활성화되지 않았습니다 (조각 부족이거나 이미 최대일 수 있음).`);
+      return;
+    }
+
+    for (let i = 0; i < 30; i++) {
+      const enhanceBtn = Core.allButtons().find((b) => b.textContent.trim().includes('강화') && /\d+회\s*강화/.test(b.textContent.trim()));
+      if (!enhanceBtn || enhanceBtn.disabled) break;
+      const shardsBefore = this.readSmithyShards();
+      enhanceBtn.click();
+      await Core.humanDelay(600, 1100);
+      const shardsAfter = this.readSmithyShards();
+      Core.log('deepdungeon', `대장간: ${slotLabel} 강화 시도 (조각 ${shardsBefore} → ${shardsAfter})`);
+      if (shardsAfter >= shardsBefore) break; // 조각이 안 줄었으면 더 강화가 안 된 것(소진/최대)
+      if (shardsAfter <= 0) break;
+    }
+  };
+
+  Modules.deepdungeon.handleSmithy = async function () {
+    Core.log('deepdungeon', `대장간 도착 (보유 조각: ${this.readSmithyShards()}) - 무기부터 최대한 강화합니다.`);
+    await this.enhanceSlotToMax('무기');
+    if (this.readSmithyShards() > 0) await this.enhanceSlotToMax('방어구');
+    if (this.readSmithyShards() > 0) await this.enhanceSlotToMax('악세서리');
+
+    this.usedSmithyOnce = true;
+    Core.log('deepdungeon', `대장간 완료 (남은 조각: ${this.readSmithyShards()})`);
+
+    const nextBtn = await Core.retryStep('"다음 층으로" 버튼 찾기', () => Core.findButtonByText('다음 층으로'));
+    if (nextBtn) {
+      nextBtn.click();
+      await Core.humanDelay(600, 1200);
+    }
+    return true;
+  };
+
   Modules.deepdungeon.handleNormalShop = async function () {
     const hp = this.readHp();
     const hpPct = hp ? (hp.cur / hp.max) * 100 : 100;
+    const profile = this.getJobProfile();
+    // 마술이 "상점"을 의도적으로(토큰 기준 충족) 고른 게 아니라 다른 선택지가
+    // 없어서 어쩔 수 없이 들어온 경우엔, 스탯 구매만 하고 어빌/장비조각 구매는
+    // 하지 않는다. 물리딜/신술은 이 구분 없이 항상 기존 방식대로 동작한다.
+    const statOnly = profile.buyEquipmentShards && this.shopVisitReason !== 'deliberate';
 
     for (let i = 0; i < 8; i++) {
       const items = this.parseShopItems();
@@ -3433,11 +3666,13 @@
         }
       }
 
-      const abilityPick = await this.pickBestAbilityItem(items);
-      if (abilityPick && abilityPick.cost !== null && tokens >= abilityPick.cost) {
-        Core.log('deepdungeon', `상점: 어빌리티 [${abilityPick.name}] (${abilityPick.grade}) 구매`);
-        await this.buyShopItem(abilityPick);
-        continue;
+      if (!statOnly) {
+        const abilityPick = await this.pickBestAbilityItem(items);
+        if (abilityPick && abilityPick.cost !== null && tokens >= abilityPick.cost) {
+          Core.log('deepdungeon', `상점: 어빌리티 [${abilityPick.name}] (${abilityPick.grade}) 구매`);
+          await this.buyShopItem(abilityPick);
+          continue;
+        }
       }
 
       const statItem = items.find((it) => it.title.startsWith('스탯 선택 보상'));
@@ -3445,6 +3680,15 @@
         Core.log('deepdungeon', '상점: 스탯 선택 보상 구매');
         await this.buyShopItem(statItem);
         continue;
+      }
+
+      if (!statOnly && profile.buyEquipmentShards) {
+        const shardItem = items.find((it) => it.title.startsWith('장비 조각 x100'));
+        if (shardItem && shardItem.cost !== null && tokens >= shardItem.cost) {
+          Core.log('deepdungeon', '상점: 장비 조각 x100 구매 (여유 토큰 소진)');
+          await this.buyShopItem(shardItem);
+          continue;
+        }
       }
       break;
     }
@@ -3853,6 +4097,9 @@
     if (text.includes('등급을 승급할 어빌리티를 선택하세요') || text.includes('샘물 마시기')) {
       return await this.handleAltarScreen();
     }
+    if (text.includes('강화할 장비를 선택하세요')) {
+      return await this.handleSmithy();
+    }
     if (text.includes('휴식 공간을 발견했습니다')) {
       return await this.handleRestScreen();
     }
@@ -3885,7 +4132,9 @@
   Modules.deepdungeon.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0; // 매크로를 다시 시작할 때마다 "이번 실행"의 도전 횟수로 리셋
-    Core.log('deepdungeon', '심층던전 자동클리어 시작');
+    mod.usedSmithyOnce = false;
+
+    Core.log('deepdungeon', `심층던전 자동클리어 시작 (${mod.config.jobMode})`);
 
     await mod.goToDeepDungeon();
     if (!mod.running) return;
@@ -4004,6 +4253,17 @@
       return;
     }
     if (mod.running) return;
+    // 재전직은 사용자가 이번 실행을 직접 확인한 경우에만 시작한다.
+    // 체크 상태는 저장하지 않으며 시작과 동시에 다시 해제한다.
+    if (moduleId === 'rejob') {
+      const safetyCheck = UIRefs.rejob && UIRefs.rejob.safetyCheck;
+      if (!safetyCheck || !safetyCheck.checked) {
+        Core.showBanner('rejob', '재전직 시작 안전 확인을 먼저 체크해주세요.');
+        Core.log('rejob', '안전 확인 미체크로 시작을 차단했습니다.');
+        return;
+      }
+      safetyCheck.checked = false;
+    }
     Core.hideBanner();
     Core.activeModuleId = moduleId;
     mod.runId = (mod.runId || 0) + 1;
@@ -4066,7 +4326,8 @@
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
       const otherRunning = Core.activeModuleId && Core.activeModuleId !== id;
-      refs.startBtn.disabled = mod.running || otherRunning;
+      const safetyLocked = id === 'rejob' && refs.safetyCheck && !refs.safetyCheck.checked;
+      refs.startBtn.disabled = mod.running || otherRunning || safetyLocked;
       refs.stopBtn.disabled = !mod.running;
       const cycleLabel =
         id === 'dungeon'
@@ -4154,6 +4415,17 @@
     hiddenRoomRow.appendChild(hiddenRoomLabel);
     container.appendChild(hiddenRoomRow);
 
+    const safetyRow = document.createElement('label');
+    safetyRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:7px 0 4px; color:#ffcc80; font-size:11px; cursor:pointer;';
+    const safetyCheck = document.createElement('input');
+    safetyCheck.type = 'checkbox';
+    safetyCheck.checked = false; // 저장하지 않음: 새로고침하면 항상 해제
+    const safetyText = document.createElement('span');
+    safetyText.textContent = '재전직 시작 안전 확인 (체크해야 시작 가능)';
+    safetyRow.appendChild(safetyCheck);
+    safetyRow.appendChild(safetyText);
+    container.appendChild(safetyRow);
+
     const btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
     const startBtn = document.createElement('button');
@@ -4166,6 +4438,10 @@
     const statusEl = document.createElement('span');
     statusEl.textContent = '대기중';
     statusEl.style.cssText = 'margin-left:4px; font-size:11px;';
+    safetyCheck.addEventListener('change', () => {
+      Core.hideBanner();
+      Core.updateModuleButtons();
+    });
     startBtn.addEventListener('click', () => Core.startModule('rejob'));
     stopBtn.addEventListener('click', () => Core.requestStopModule('rejob'));
     btnRow.appendChild(startBtn);
@@ -4176,7 +4452,9 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [scoreInput, tierSelect, maxInput, hiddenRoomCheck];
+    refs.safetyCheck = safetyCheck;
+    refs.inputs = [scoreInput, tierSelect, maxInput, hiddenRoomCheck, safetyCheck];
+    Core.updateModuleButtons();
   }
 
   const AUTOHUNT_PERSIST_KEYS = ['groundSuffix', 'floor', 'goldThreshold', 'minEnergy', 'ignoreProtectionOff'];
@@ -4487,11 +4765,11 @@
           emergencyHpPercent: this.config.emergencyHpPercent,
           bossPreFloorHpPercent: this.config.bossPreFloorHpPercent,
           hpDropTriggerPercent: this.config.hpDropTriggerPercent,
-          speedStatThreshold: this.config.speedStatThreshold,
           wanderingSoulFloorThreshold: this.config.wanderingSoulFloorThreshold,
           targetAC: this.config.targetAC,
           targetDefense: this.config.targetDefense,
           retryIfWeeklyDamageUnder1M: this.config.retryIfWeeklyDamageUnder1M,
+          jobMode: this.config.jobMode,
         })
       );
     } catch (e) {
@@ -4505,7 +4783,9 @@
       if (!raw) return;
       const saved = JSON.parse(raw);
       Object.keys(saved).forEach((k) => {
-        if (typeof saved[k] === 'number' || typeof saved[k] === 'boolean') this.config[k] = saved[k];
+        if (typeof saved[k] === 'number' || typeof saved[k] === 'boolean' || typeof saved[k] === 'string') {
+          this.config[k] = saved[k];
+        }
       });
     } catch (e) {
       /* 저장된 값이 손상됐으면 기본값 그대로 사용 */
@@ -4519,8 +4799,40 @@
     const refs = UIRefs.deepdungeon;
     mod.loadConfigIntoSelf();
 
-    container.appendChild(labelEl('필수 어빌: 관통=집중=정확한 한 발 > 라이프 드레인 > 재생 (등급 무관 최우선)'));
-    container.appendChild(labelEl('추천 어빌(금·칠색만 채용): 매직컬 댄싱/분노의 일격/연속 타격/전환/샤프스/피의 맹약/정복자의 발걸음/심연의 기운'));
+    container.appendChild(labelEl('직업 (물리딜/신술 둘 다 지원)'));
+    const jobSelect = document.createElement('select');
+    jobSelect.style.cssText = inputStyle();
+    const JOB_OPTIONS = ['물리딜', '신술', '마술'];
+    JOB_OPTIONS.forEach((name) => {
+      const o = document.createElement('option');
+      o.value = name;
+      o.textContent = name;
+      if (name === mod.config.jobMode) o.selected = true;
+      jobSelect.appendChild(o);
+    });
+    container.appendChild(jobSelect);
+
+    const requiredLabel = labelEl('');
+    const recommendedLabel = labelEl('');
+    container.appendChild(requiredLabel);
+    container.appendChild(recommendedLabel);
+
+    function renderJobDescription() {
+      const profile = mod.getJobProfile();
+      const targetParts = Object.entries(profile.requiredTargets).map(([name, target]) => `${name}(${target})`);
+      if (profile.requiredLifePair) {
+        targetParts.push(`[${profile.requiredLifePair.names.join('/')}](${profile.requiredLifePair.target}, 하나만)`);
+      }
+      requiredLabel.textContent = `필수 어빌(등급 무관 최우선 채용, 괄호=제단 목표 등급): ${targetParts.join(' · ')}`;
+      recommendedLabel.textContent = `추천 어빌(금·칠색만 채용, 최대 ${profile.recommendedCap}개): ${profile.recommendedAbilities.join('/')}`;
+    }
+    renderJobDescription();
+
+    jobSelect.addEventListener('change', (e) => {
+      mod.config.jobMode = e.target.value;
+      mod.saveConfig();
+      renderJobDescription();
+    });
 
     container.appendChild(labelEl('토큰 상점 방문 기준'));
     const tokenInput = document.createElement('input');
@@ -4621,7 +4933,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [tokenInput, emergInput, bossPreInput, acInput, defInput, retryCheck];
+    refs.inputs = [jobSelect, tokenInput, emergInput, bossPreInput, acInput, defInput, retryCheck];
   }
 
   function buildPanel() {
