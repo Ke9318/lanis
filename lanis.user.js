@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.7.2-stable
+// @version      1.7.3-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -6944,13 +6944,30 @@
         // 직후 바로 다음 카드를 찾으면 못 찾는 경우가 확인됨).
         await M.sleep(800);
         try {
+          // 속성돌을 사용하기 전에 주간 8단계 보상 상태부터 확인한다.
+          // 보상이 모두 달성된 보스라면 오늘 속성으로 바꿀 이유가 없으므로
+          // 속성 확인/인벤토리 이동 자체를 생략한다.
+          if (!ALLOW_CLEARED_BOSS_TEST) {
+            const rewardProgress = M.getWeeklyRewardProgress(entry.label);
+            if (!rewardProgress) {
+              throw new Error(`"${entry.label}" 주간 보상 상태를 읽지 못해 속성 변경 전에 안전하게 중단`);
+            }
+            if (M.uiLog) {
+              M.uiLog(`🎁 "${entry.label}" 주간 보상 ${rewardProgress.achieved}/${rewardProgress.total} 확인`);
+            }
+            if (rewardProgress.exhausted) {
+              localStorage.removeItem(PENDING_KEY);
+              if (M.uiLog) M.uiLog(`⏭ "${entry.label}"은(는) 주간 보상 소진 - 속성 변경 없이 완료 처리`);
+              return {
+                entered: true,
+                cleared: true,
+                alreadyCleared: true,
+                rewardsExhausted: true,
+              };
+            }
+          }
           if (M.uiLog) M.uiLog(`🔎 "${entry.label}" 속성 확인 중...`);
           await M.ensureElementForBoss(entry.label);
-          if (!ALLOW_CLEARED_BOSS_TEST && M.isBossAlreadyCleared(entry.label)) {
-            localStorage.removeItem(PENDING_KEY);
-            if (M.uiLog) M.uiLog(`⏭ "${entry.label}"은(는) 이미 클리어됨 - 완료 처리`);
-            return { entered: true, cleared: true, alreadyCleared: true };
-          }
           if (M.uiLog) M.uiLog(`🧭 "${entry.label}" 카드 찾는 중...`);
           await M.enterBossBattle(entry.label);
           await M.sleep(500);
