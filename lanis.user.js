@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.7.4-stable
+// @version      1.7.5-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -6093,6 +6093,12 @@
     if (M._workerSleepFn && !M._workerDead) return M._workerSleepFn(ms);
     return new Promise((r) => setTimeout(r, ms));
   };
+  M.throwIfStopped = () => {
+    if (!M.stopRequested) return;
+    const error = new Error('사용자 정지 요청');
+    error.isUserStop = true;
+    throw error;
+  };
   M.rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
   // 메뉴를 읽고 다음 행동을 결정하는 사람의 반응 시간을 흉내 내는 공통 대기.
   // 백그라운드에서도 Worker 타이머를 사용하므로 탭 포커스 유무와 무관하게 동작.
@@ -6183,14 +6189,33 @@
 
   // --- 프리셋 -----------------------------------------------------------------
   M.openPresetPanel = async () => {
+    M.throwIfStopped();
     const btn = await M.waitFor(() => M.findButtonByText('프리셋 변경'));
     if (!btn) throw new Error('프리셋 변경 버튼 못찾음');
+    M.throwIfStopped();
     btn.click();
-    const tab = await M.waitFor(() => M.findButtonByText('프리셋'), 5000);
-    if (tab) {
-      tab.click();
-      await M.waitFor(() => M.queryAll('*').some((el) => el.children.length === 0 && el.textContent.trim() === '이 보스 전용'), 5000);
-    }
+    // 전투 행동줄과 패널 내부에 "프리셋" 버튼이 각각 하나씩 존재한다.
+    // 첫 번째 버튼을 누르면 패널 탭이 바뀌지 않으므로, "프리셋(구)"와
+    // "종합" 탭을 함께 가진 패널 내부의 버튼만 찾는다.
+    const tab = await M.waitFor(() => {
+      const candidates = M.queryAll('button').filter((button) => button.textContent.trim() === '프리셋');
+      return candidates.find((button) => {
+        let node = button.parentElement;
+        for (let depth = 0; node && depth < 7; depth++, node = node.parentElement) {
+          const labels = [...node.querySelectorAll('button')].map((item) => item.textContent.trim());
+          if (labels.includes('프리셋(구)') && labels.includes('종합')) return true;
+        }
+        return false;
+      }) || null;
+    }, 5000);
+    if (!tab) throw new Error('프리셋 패널 내부의 "프리셋" 탭을 못찾음');
+    M.throwIfStopped();
+    tab.click();
+    const ready = await M.waitFor(
+      () => M.queryAll('*').some((el) => el.children.length === 0 && el.textContent.trim() === '이 보스 전용'),
+      5000
+    );
+    if (!ready) throw new Error('보스 전용 프리셋 목록 전환 실패');
   };
   M.closePresetPanel = () => {
     const b = M.findButtonByText('프리셋 패널 닫기');
@@ -6199,6 +6224,7 @@
   M.applyBossPreset = async (name, { requireConfirmation = false, attempts = 1 } = {}) => {
     let confirmed = false;
     for (let attempt = 1; attempt <= attempts && !confirmed; attempt++) {
+      M.throwIfStopped();
       await M.openPresetPanel();
       const found = await M.waitFor(() => M.findLeafByExactText(name), 5000);
       if (!found) {
@@ -6206,6 +6232,7 @@
         throw new Error('프리셋 이름 못찾음: ' + name);
       }
       await M.sleep(M.rand(300, 650));
+      M.throwIfStopped();
       const fresh = M.findLeafByExactText(name);
       if (!fresh) {
         M.closePresetPanel();
@@ -6240,13 +6267,16 @@
 
   // --- 턴 진행 / 회복 / 스크롤 --------------------------------------------------
   M.clickTurn = async (n) => {
+    M.throwIfStopped();
     const btn = await M.waitFor(() => M.findButtonByText(`턴 진행${n}턴`));
     if (!btn) throw new Error('턴 진행 버튼 못찾음: ' + n);
+    M.throwIfStopped();
     btn.click();
     const startBtn = await M.waitFor(() => M.findConfirmInOpenDialog(['전투 시작']));
     if (!startBtn) throw new Error('전투 시작 확인 버튼(모달 내) 못찾음');
     // 클릭 직전 재검색: 모달이 그 사이 다시 그려졌을 수 있음
     await M.sleep(M.rand(100, 300));
+    M.throwIfStopped();
     const freshStart = M.findConfirmInOpenDialog(['전투 시작']) || startBtn;
     freshStart.click();
     // 턴 진행 결과가 로그/HP에 반영될 시간을 기다림 (고정이지만, 이후
@@ -6255,20 +6285,25 @@
   };
 
   M.clickRecover = async () => {
+    M.throwIfStopped();
     const btn = await M.waitFor(() => M.findButtonByText('회복2턴'));
     if (!btn) throw new Error('회복 버튼 못찾음');
+    M.throwIfStopped();
     btn.click();
     const startBtn = await M.waitFor(() => M.findConfirmInOpenDialog(['회복', '전투 시작', '회복 시작']));
     if (!startBtn) throw new Error('회복 확인 버튼(모달 내) 못찾음');
     await M.sleep(M.rand(100, 300));
+    M.throwIfStopped();
     const freshStart = M.findConfirmInOpenDialog(['회복', '전투 시작', '회복 시작']) || startBtn;
     freshStart.click();
     await M.sleep(1800);
   };
 
   M.useScrolls = async (names) => {
+    M.throwIfStopped();
     const openBtn = await M.waitFor(() => M.queryAll('button').find((b) => b.textContent.trim().startsWith('전투 스크롤 사용')));
     if (!openBtn) throw new Error('전투 스크롤 사용 버튼 못찾음');
+    M.throwIfStopped();
     openBtn.click();
     await M.waitFor(() => M.findLeafByExactText(`스크롤:${names[0]}`), 5000);
     // 이미 "활성" 상태로 지속 중인 스크롤을 다시 클릭하면 오히려 꺼버리게
@@ -6276,6 +6311,7 @@
     // 새로 켜야 하는 것만 클릭한다.
     let newlySelected = 0;
     for (const name of names) {
+      M.throwIfStopped();
       const label = `스크롤:${name}`;
       const el = await M.waitFor(() => M.findLeafByExactText(label), 5000);
       if (!el) throw new Error('스크롤 옵션 못찾음: ' + label);
@@ -6295,6 +6331,7 @@
     const confirmBtn = await M.waitFor(() => M.findConfirmByPatternInOpenDialog(confirmPattern));
     if (!confirmBtn) throw new Error('스크롤 확정 버튼(모달 내) 못찾음');
     await M.sleep(M.rand(100, 300));
+    M.throwIfStopped();
     const freshConfirm = M.findConfirmByPatternInOpenDialog(confirmPattern) || confirmBtn;
     freshConfirm.click();
     await M.sleep(800);
@@ -6947,7 +6984,11 @@
       } catch (e) {
         // 전투 로직 실행 도중 에러(모달 타이밍 등)가 나도 여기서 삼켜서
         // 큐 전체가 중단되지 않게 한다.
-        if (M.uiLog) M.uiLog(`⚠ "${entry.label}" 전투 중 오류: ${e.message}`);
+        if (M.uiLog) {
+          M.uiLog(e && e.isUserStop
+            ? `■ "${entry.label}" 사용자 정지 확인`
+            : `⚠ "${entry.label}" 전투 중 오류: ${e.message}`);
+        }
         return { entered: true, cleared: false };
       }
     };
@@ -7602,8 +7643,11 @@
       M.stopRequested = true;
       localStorage.removeItem(PENDING_KEY);
       localStorage.removeItem(QUEUE_KEY);
+      const cancel = M.findConfirmInOpenDialog(['취소', '닫기']);
+      if (cancel) cancel.click();
+      M.closePresetPanel();
       M.antiThrottle.stop();
-      M.uiLog('■ 정지 요청됨 (다음 턴 진행 전에 멈춤, 큐/재개 예약도 취소)');
+      M.uiLog('■ 정지 요청됨 (열린 선택창 닫음, 추가 프리셋·턴·회복·스크롤 클릭 즉시 차단)');
     });
     if (window.__lanisBossCoordinator) window.__lanisBossCoordinator.refresh();
   }
