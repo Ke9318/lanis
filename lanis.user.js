@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.8.0-stable
+// @version      1.8.1-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -4725,7 +4725,14 @@
     return loopPromise;
   };
 
-  Core.requestStopModule = function (moduleId) {
+  Core.requestStopModule = function (moduleId, options = {}) {
+    // 일일 연속 실행이 소유한 하위 모듈의 정지는 곧 일일 전체 정지다.
+    // 하위 모듈만 끄면 daily.mainLoop의 catch가 이를 "이슈"로 처리한 뒤
+    // 다음 작업(특히 보스)을 다시 시작할 수 있다.
+    if (Core.dailyActive && !options.fromDailyStop) {
+      Core.stopDaily();
+      return;
+    }
     const mod = Modules[moduleId];
     if (!mod || !mod.running) return;
     mod.runId = (mod.runId || 0) + 1;
@@ -4765,6 +4772,9 @@
     },
     isDailyActive() {
       return !!Core.dailyActive;
+    },
+    hasDailyRun() {
+      return !!Core.dailyActive || !!Modules.daily.loadState();
     },
     requestDailyStop() {
       Core.stopDaily();
@@ -4837,6 +4847,7 @@
 
   // -------------------------- 일일 연속 실행 --------------------------
   const DAILY_STATE_KEY = 'lrm-daily-sequence-state';
+  const DAILY_AUTH_SCHEMA = 'daily-explicit-v2';
   // localStorage의 오래된 running 값만으로 작업을 자동 시작하지 않는다.
   // 사용자가 이 탭에서 직접 시작했을 때만 sessionStorage 허가가 생기며,
   // 정지/탭 종료 시 사라진다.
@@ -4948,9 +4959,21 @@
   Modules.daily.mainLoop = async function () {
     let state = this.loadState();
     if (!state) return;
+    let auth = null;
+    try {
+      auth = JSON.parse(sessionStorage.getItem(DAILY_AUTH_KEY) || 'null');
+    } catch (e) {
+      auth = null;
+    }
+    // 지연된 mainLoop 호출이 정지 뒤 도착해도 실행 상태를 다시 살리지 못한다.
+    if (
+      !auth ||
+      auth.schema !== DAILY_AUTH_SCHEMA ||
+      auth.startedAt !== state.startedAt ||
+      this.stopRequested
+    ) return;
     Core.dailyActive = true;
     this.running = true;
-    this.stopRequested = false;
     Core.updateModuleButtons();
 
     while (state.running && state.index < state.steps.length && !this.stopRequested) {
@@ -4962,10 +4985,12 @@
         state.reports.push({ step, label, ok: true, detail });
         Core.log('daily', `✅ ${label}: ${detail}`);
       } catch (e) {
+        if (this.stopRequested) break;
         const detail = e && e.message ? e.message : String(e);
         state.reports.push({ step, label, ok: false, detail });
         Core.log('daily', `⚠ ${label} 이슈: ${detail} → 다음 작업으로 이동`);
       }
+      if (this.stopRequested) break;
       state.index += 1;
       this.saveState(state);
       await Core.humanDelay(900, 1600);
@@ -5044,7 +5069,9 @@
       reports: [],
       startedAt: Date.now(),
     };
+    mod.stopRequested = false;
     sessionStorage.setItem(DAILY_AUTH_KEY, JSON.stringify({
+      schema: DAILY_AUTH_SCHEMA,
       startedAt: state.startedAt,
       issuedAt: Date.now(),
     }));
@@ -5072,7 +5099,7 @@
       mod.saveState(state);
     }
     if (Core.activeModuleId && Modules[Core.activeModuleId]) {
-      Core.requestStopModule(Core.activeModuleId);
+      Core.requestStopModule(Core.activeModuleId, { fromDailyStop: true });
     }
     if (window.__bossMacro) {
       if (typeof window.__bossMacro.clearBossRunState === 'function') {
@@ -6035,7 +6062,10 @@
       let authorized = false;
       try {
         const auth = JSON.parse(sessionStorage.getItem(DAILY_AUTH_KEY) || 'null');
-        authorized = !!auth && auth.startedAt === dailyState.startedAt;
+        authorized =
+          !!auth &&
+          auth.schema === DAILY_AUTH_SCHEMA &&
+          auth.startedAt === dailyState.startedAt;
       } catch (e) {
         authorized = false;
       }
@@ -6159,7 +6189,7 @@
   M.sleep = async (ms) => {
     const deadline = Date.now() + Math.max(0, ms);
     while (Date.now() < deadline) {
-      if (M.stopRequested && M.isRunning) {
+      if (M.stopRequested) {
         const error = new Error('사용자 정지 요청');
         error.isUserStop = true;
         throw error;
@@ -6171,7 +6201,7 @@
         await new Promise((resolve) => setTimeout(resolve, chunk));
       }
     }
-    if (M.stopRequested && M.isRunning) {
+    if (M.stopRequested) {
       const error = new Error('사용자 정지 요청');
       error.isUserStop = true;
       throw error;
@@ -6644,6 +6674,7 @@
   // 이 왕복은 사이트 내 메뉴 클릭(캐릭>스킬, 뒤로가기)으로만 하는 SPA 전환이라
   // 새로고침이 없고 전투 상태가 유지됨을 실전 확인함.
   M.setDealSkillForBossElement = async (bossLabel) => {
+    M.throwIfStopped();
     const element = M.getBossElementInBattle(bossLabel);
     if (!element) return { changed: false, reason: '보스 속성 확인 실패' };
     const targetSkill = M.ELEMENT_TO_SKILL[element];
@@ -6653,6 +6684,7 @@
     // 다음 동작으로 넘어가면, 뒤로가기가 실패하거나 엉뚱한 화면으로 가도
     // 모른 채 진행하게 됨(실전 검증 전 반드시 고칠 항목으로 지적됨).
     const goBackAndConfirmBattle = async () => {
+      M.throwIfStopped();
       history.back();
       const ok = await M.waitFor(() => M.isInBattleScreen(bossLabel), 6000, 200);
       if (!ok) throw new Error('스킬관리 화면에서 전투화면으로 복귀 확인 실패');
@@ -6660,11 +6692,13 @@
 
     const charBtn = M.findButtonByText('캐릭');
     if (!charBtn) return { changed: false, reason: '"캐릭" 메뉴 못찾음' };
+    M.throwIfStopped();
     charBtn.click();
     // 드롭다운 메뉴 항목은 <button>이 아니라 <li role="menuitem">로 렌더링됨
     // (실전 테스트에서 확인). 태그 제한 없이 텍스트로 찾는다.
     const skillItem = await M.waitFor(() => M.queryAll('*').find((el) => el.children.length === 0 && el.textContent.trim() === '스킬'));
     if (!skillItem) return { changed: false, reason: '"스킬" 메뉴 못찾음' };
+    M.throwIfStopped();
     skillItem.click();
     await M.waitFor(() => M.queryAll('*').some((el) => el.children.length === 0 && el.textContent.trim() === '항상'), 5000);
 
@@ -6691,6 +6725,7 @@
       return { changed: false, reason: '이미 설정되어 있음', skill: targetSkill, element };
     }
 
+    M.throwIfStopped();
     input.click();
     // "사용 가능한 스킬" 목록의 스킬명도 <button>이 아니라 <p> 텍스트라서
     // (실전 테스트에서 확인) 태그 제한 없이 텍스트로 찾아 클릭한다.
@@ -6699,6 +6734,7 @@
       await goBackAndConfirmBattle();
       return { changed: false, reason: `스킬 목록에서 "${targetSkill}" 못찾음` };
     }
+    M.throwIfStopped();
     skillBtn.click();
     await M.sleep(500);
 
@@ -6774,6 +6810,7 @@
   const PENDING_KEY = 'lrm-boss-ref-pending';
   const QUEUE_KEY = 'lrm-boss-ref-queue';
   const RUN_AUTH_KEY = 'lrm-boss-ref-explicit-run-auth';
+  const RUN_AUTH_SCHEMA = 'boss-explicit-v2';
   // 사용자가 정지를 눌렀다는 사실을 새로고침 뒤에도 유지한다. 큐/pending만
   // 지우면 클릭 직전 저장된 페이지 상태나 다른 일일 실행 경로가 다시 큐를
   // 만들 수 있으므로, 명시적인 다음 시작 전까지 자동 재개를 금지한다.
@@ -6798,13 +6835,70 @@
     }
   };
 
+  // alert()는 브라우저의 JavaScript와 페이지 입력을 모두 정지시켜 사용자가
+  // 정지 버튼을 누를 수 없게 한다. 보스 실행 중 알림은 비차단 배너로 표시한다.
+  M.showBossNotice = (message, isError = true) => {
+    let notice = document.getElementById('lrm-boss-nonblocking-notice');
+    if (!notice) {
+      notice = document.createElement('div');
+      notice.id = 'lrm-boss-nonblocking-notice';
+      notice.style.cssText =
+        'position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:2147483647;' +
+        'max-width:620px;padding:12px 42px 12px 14px;border-radius:8px;color:#fff;' +
+        'font-size:13px;white-space:pre-wrap;box-shadow:0 4px 18px #000;background:#7f1d1d;';
+      const close = document.createElement('button');
+      close.textContent = '×';
+      close.style.cssText =
+        'position:absolute;right:10px;top:5px;border:0;background:transparent;color:#fff;' +
+        'font-size:24px;cursor:pointer;';
+      close.addEventListener('click', () => notice.remove());
+      notice.appendChild(close);
+      document.body.appendChild(notice);
+    }
+    notice.style.background = isError ? '#7f1d1d' : '#166534';
+    let text = notice.querySelector('[data-message]');
+    if (!text) {
+      text = document.createElement('span');
+      text.dataset.message = '1';
+      notice.appendChild(text);
+    }
+    text.textContent = message;
+    if (M.uiLog) M.uiLog(message);
+  };
+
   M.armBossRun = () => {
     localStorage.removeItem(STOP_LATCH_KEY);
-    sessionStorage.setItem(RUN_AUTH_KEY, JSON.stringify({
+    const auth = {
+      schema: RUN_AUTH_SCHEMA,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       issuedAt: Date.now(),
       tabPath: location.pathname,
-    }));
+    };
+    sessionStorage.setItem(RUN_AUTH_KEY, JSON.stringify(auth));
     M.stopRequested = false;
+    return auth;
+  };
+
+  M.getBossRunAuth = () => {
+    try {
+      return JSON.parse(sessionStorage.getItem(RUN_AUTH_KEY) || 'null');
+    } catch (e) {
+      return null;
+    }
+  };
+
+  M.isBossRunAuthorized = (expectedId = null) => {
+    if (M.stopRequested || localStorage.getItem(STOP_LATCH_KEY)) return false;
+    const auth = M.getBossRunAuth();
+    if (!auth || auth.schema !== RUN_AUTH_SCHEMA || !auth.id) return false;
+    return !expectedId || auth.id === expectedId;
+  };
+
+  M.assertBossRunAuthorized = (expectedId = null) => {
+    if (M.isBossRunAuthorized(expectedId)) return;
+    const error = new Error('사용자 실행 허가가 취소되어 보스 작업을 중단합니다.');
+    error.isUserStop = true;
+    throw error;
   };
 
   M.isInBattleScreen = (bossLabel) => {
@@ -6876,6 +6970,7 @@
   };
 
   M.openCharacterMenuItem = async (itemText) => {
+    M.throwIfStopped();
     const findVisibleItem = () => M.queryAll('[role="menuitem"], [role="option"], li, button, a')
       .find((el) => el.textContent.trim() === itemText && M.isVisible(el));
 
@@ -6888,12 +6983,14 @@
       const charBtn = await M.waitFor(() => M.findButtonByText('캐릭'), 5000);
       if (!charBtn) throw new Error('"캐릭" 메뉴 버튼 못찾음');
       await M.humanPause(500, 900);
+      M.throwIfStopped();
       charBtn.click();
       await M.humanPause(650, 1100);
       item = await M.waitFor(findVisibleItem, 5000);
     }
     if (!item) throw new Error(`캐릭 메뉴에서 "${itemText}" 못찾음`);
     await M.humanPause(550, 1000);
+    M.throwIfStopped();
     item.click();
 
     // SPA 이동이 실제로 시작되기 전에 다음 단계가 현재 화면 DOM을 읽으면
@@ -6922,14 +7019,17 @@
   };
 
   M.goToBossListViaMenu = async () => {
+    M.throwIfStopped();
     const battleBtn = await M.waitFor(() => M.findButtonByText('전투'), 5000);
     if (!battleBtn) throw new Error('"전투" 메뉴 버튼 못찾음');
+    M.throwIfStopped();
     battleBtn.click();
     const bossItem = await M.waitFor(
       () => M.queryAll('*').find((el) => el.children.length === 0 && el.textContent.trim() === '보스'),
       5000
     );
     if (!bossItem) throw new Error('전투 메뉴에서 "보스" 못찾음');
+    M.throwIfStopped();
     bossItem.click();
     const arrived = await M.waitFor(
       () => location.pathname.replace(/\/$/, '') === '/personal-boss',
@@ -6940,6 +7040,7 @@
   };
 
   M.useElementStone = async (element) => {
+    M.throwIfStopped();
     await M.openCharacterMenuItem('인벤토리');
     const consumableTab = await M.waitFor(
       () => M.queryAll('[role="tab"], button')
@@ -6948,6 +7049,7 @@
     );
     if (!consumableTab) throw new Error('인벤토리 소모품 탭 못찾음');
     await M.humanPause(600, 1100);
+    M.throwIfStopped();
     consumableTab.click();
     await M.humanPause(750, 1300);
 
@@ -6973,12 +7075,14 @@
       );
       if (!next) break;
       await M.humanPause(500, 900);
+      M.throwIfStopped();
       next.click();
       await M.humanPause(650, 1100);
     }
     if (!useButton) throw new Error(`"${stoneName}" 사용 버튼 못찾음`);
     // 돌 이름과 수량을 확인한 뒤 사용하는 시간.
     await M.humanPause(900, 1600);
+    M.throwIfStopped();
     useButton.click();
 
     const confirm = await M.waitFor(
@@ -6987,6 +7091,7 @@
     );
     if (!confirm) throw new Error(`"${stoneName}" 사용 확인 모달 못찾음`);
     await M.humanPause(700, 1200);
+    M.throwIfStopped();
     confirm.click();
     await M.humanPause(1200, 1800);
   };
@@ -6994,6 +7099,7 @@
   // 모든 직업 공통 전처리: 보스 목록의 오늘 속성과 내 정보의 캐릭터 속성을
   // 비교하고, 다르면 인벤토리에서 해당 속성의 돌을 한 개 사용한 뒤 재검증한다.
   M.ensureElementForBoss = async (bossLabel) => {
+    M.throwIfStopped();
     const startHistoryLength = history.length;
     const targetElement = M.getBossElementFromList(bossLabel);
     if (!targetElement) throw new Error(`"${bossLabel}"의 오늘 속성을 읽지 못함`);
@@ -7045,6 +7151,7 @@
     // 기준으로 우선 복귀하고 실패할 때만 메뉴 방식을 폴백으로 사용한다.
     const historyDelta = startHistoryLength - history.length;
     if (historyDelta < 0) {
+      M.throwIfStopped();
       history.go(historyDelta);
       const returnedByHistory = await M.waitFor(
         () => location.pathname.replace(/\/$/, '') === '/personal-boss',
@@ -7060,15 +7167,18 @@
   };
 
   M.enterBossBattle = async (bossLabel) => {
+    M.throwIfStopped();
     // 일반/HARD 탭이 있으면 일반 탭 보장 (지금 다루는 보스는 모두 일반 모드)
     const normalTab = M.findButtonByText('일반');
     if (normalTab) {
+      M.throwIfStopped();
       normalTab.click();
       await M.sleep(300);
     }
     let btn = M.findBossCardActionButton(bossLabel);
     if (!btn) throw new Error(`"${bossLabel}" 카드에서 도전 버튼을 못찾음 (목록 페이지가 맞는지 확인 필요)`);
     let btnText = btn.textContent.trim();
+    M.throwIfStopped();
     btn.click();
     await M.sleep(500);
 
@@ -7078,6 +7188,7 @@
     // 위해 기존 도전을 포기하고, 목록 렌더링 후 대상 카드 버튼을 다시 누른다.
     const abandonConfirm = M.findConfirmInOpenDialog(['포기', '포기하기']);
     if (abandonConfirm) {
+      M.throwIfStopped();
       abandonConfirm.click();
       const returned = await M.waitFor(
         () => location.pathname.replace(/\/$/, '') === '/personal-boss',
@@ -7088,6 +7199,7 @@
       btn = await M.waitFor(() => M.findBossCardActionButton(bossLabel), 8000, 200);
       if (!btn) throw new Error(`기존 도전 포기 후 "${bossLabel}" 도전 버튼을 못찾음`);
       btnText = btn.textContent.trim();
+      M.throwIfStopped();
       btn.click();
       await M.sleep(500);
     }
@@ -7095,12 +7207,14 @@
     if (btnText === '도전하기') {
       const confirmBtn = M.findConfirmInOpenDialog(['도전', '확인']);
       if (confirmBtn) {
+        M.throwIfStopped();
         confirmBtn.click();
         await M.sleep(1200);
       }
     } else if (btnText === '재도전') {
       const confirmBtn = M.findConfirmInOpenDialog(['재도전', '도전', '확인']);
       if (confirmBtn) {
+        M.throwIfStopped();
         confirmBtn.click();
         await M.sleep(1200);
       }
@@ -7110,18 +7224,21 @@
   };
 
   M.abandonCurrentBossAttempt = async () => {
+    M.throwIfStopped();
     const candidates = ['도전 포기', '전투 포기', '포기하기', '포기'];
     const button = await M.waitFor(
       () => candidates.map((text) => M.findButtonByText(text)).find(Boolean),
       5000
     );
     if (!button) throw new Error('현재 보스 도전의 포기 버튼을 못찾음');
+    M.throwIfStopped();
     button.click();
     const confirm = await M.waitFor(
       () => M.findConfirmInOpenDialog(['포기', '포기하기', '확인']),
       5000
     );
     if (!confirm) throw new Error('도전 포기 확인 모달의 "포기" 버튼을 못찾음');
+    M.throwIfStopped();
     confirm.click();
     const returned = await M.waitFor(
       () => location.pathname.replace(/\/$/, '') === '/personal-boss',
@@ -7143,6 +7260,7 @@
   //     성공으로 오판할 수 있어(실전 지적됨), 반드시 보스 함수 자신이 보고한
   //     cleared 값을 근거로 삼는다.
   M.driveToBossAndRun = async (key, jobOverride = null) => {
+    M.assertBossRunAuthorized();
     const entry = BOSS_REGISTRY[key];
     if (!entry) return { entered: false, cleared: false };
     const runName = M.getRunFunctionName(key, jobOverride);
@@ -7246,6 +7364,7 @@
 
       // 개인 보스 목록 페이지가 아니면 이동 (풀 새로고침 발생 가능 - pending 값으로 재개됨)
       if (M.uiLog) M.uiLog('➡ 개인 보스 목록으로 이동 중...');
+      M.assertBossRunAuthorized();
       location.href = 'https://lanis.me/personal-boss';
       // location.href 대입은 "즉시" 페이지를 끊지 않는다 - 실제 브라우저가
       // 이동을 처리하기까지 짧은 시차가 있어서, 이 대입 직후 바로 false를
@@ -7451,6 +7570,7 @@
   };
 
   M.claimBossRewards = async () => {
+    M.throwIfStopped();
     let claimed = 0;
     for (let round = 0; round < 12; round++) {
       const button = M.queryAll('button').find((el) =>
@@ -7459,12 +7579,14 @@
       );
       if (!button) break;
       await M.humanPause(650, 1100);
+      M.throwIfStopped();
       button.click();
       claimed++;
       await M.humanPause(900, 1500);
       const confirm = M.findConfirmInOpenDialog(['확인', '받기']);
       if (confirm) {
         await M.humanPause(450, 800);
+        M.throwIfStopped();
         confirm.click();
         await M.humanPause(700, 1200);
       }
@@ -7482,16 +7604,21 @@
   };
 
   M.runDailySelectedBosses = async () => {
+    const auth = M.getBossRunAuth();
+    M.assertBossRunAuthorized(auth && auth.id);
     const selected = BOSS_ORDER.filter((key) => loadSelectedBosses().includes(key));
     if (selected.length === 0) throw new Error('선택한 보스가 없습니다.');
 
     if (location.pathname.replace(/\/$/, '') !== '/personal-boss') {
+      M.assertBossRunAuthorized(auth.id);
       location.href = 'https://lanis.me/personal-boss';
       return await new Promise(() => {});
     }
 
     await M.waitFor(() => selected.some((key) => M.findBossCardActionButton(BOSS_REGISTRY[key].label)), 10000, 250);
+    M.assertBossRunAuthorized(auth.id);
     await M.claimBossRewards();
+    M.assertBossRunAuthorized(auth.id);
 
     const progressBefore = selected.map((key) => ({
       key,
@@ -7505,6 +7632,7 @@
     const remaining = progressBefore.filter((item) => !item.progress.exhausted).map((item) => item.key);
 
     if (remaining.length === 0) {
+      M.assertBossRunAuthorized(auth.id);
       if (M.uiLog) M.uiLog('선택한 보스의 주간 보상 소진 확인 → 수호자 도전 후 포기');
       await M.enterBossBattle(BOSS_REGISTRY.fallenGuardian.label);
       const entered = await M.waitFor(() => M.isInBattleScreen(BOSS_REGISTRY.fallenGuardian.label), 10000, 250);
@@ -7521,11 +7649,13 @@
       if (!M.isRunning) M.continueBossQueue().catch((e) => M.uiLog && M.uiLog(`❌ ${e.message}`));
       await M.waitForBossQueueEnd();
     } else {
+      M.assertBossRunAuthorized(auth.id);
       await M.startBossQueue(remaining);
       await M.waitForBossQueueEnd();
     }
 
     if (location.pathname.replace(/\/$/, '') !== '/personal-boss') {
+      M.assertBossRunAuthorized(auth.id);
       location.href = 'https://lanis.me/personal-boss';
       return await new Promise(() => {});
     }
@@ -7546,7 +7676,8 @@
       if (M.uiLog) M.uiLog('⛔ 이미 실행 중이라 새 요청을 무시함');
       return;
     }
-    M.armBossRun();
+    const auth = M.getBossRunAuth();
+    M.assertBossRunAuthorized(auth && auth.id);
     M.antiThrottle.start();
     const remaining = BOSS_ORDER.filter((k) => selectedKeys.includes(k));
     const q = {
@@ -7555,6 +7686,7 @@
       entryFailStreak: 0,
       failedLabels: [],
       job: M.getSelectedJob(),
+      authId: auth.id,
     };
     localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
     try {
@@ -7567,22 +7699,27 @@
   // 큐를 이어서 진행. 새로고침이 일어나도(예: 목록 페이지 이동) localStorage에
   // 남은 큐가 있으면 resumePendingIfAny가 이 함수를 다시 호출해 이어감.
   M.continueBossQueue = async () => {
-    let raw = localStorage.getItem(QUEUE_KEY);
-    if (!raw) return;
-
-    while (true) {
-      raw = localStorage.getItem(QUEUE_KEY);
+    // 일일 복구와 보스 복구가 같은 순간 호출되어도 큐 소비자는 하나만 둔다.
+    if (M.queueRunning) return;
+    M.queueRunning = true;
+    try {
+      let raw = localStorage.getItem(QUEUE_KEY);
       if (!raw) return;
-      const q = JSON.parse(raw);
-      if (q.attempts === undefined) q.attempts = 0;
-      if (q.entryFailStreak === undefined) q.entryFailStreak = 0;
-      if (M.stopRequested || q.remaining.length === 0) break;
+
+      while (true) {
+        raw = localStorage.getItem(QUEUE_KEY);
+        if (!raw) return;
+        const q = JSON.parse(raw);
+        if (q.attempts === undefined) q.attempts = 0;
+        if (q.entryFailStreak === undefined) q.entryFailStreak = 0;
+        if (!M.isBossRunAuthorized(q.authId) || q.remaining.length === 0) break;
 
       const key = q.remaining[0];
       const entry = BOSS_REGISTRY[key];
       if (M.uiLog) M.uiLog(`▶▶ [큐] "${entry.label}" 도전 시작 (남은 ${q.remaining.length}개)`);
 
       const result = await M.driveToBossAndRun(key, q.job || M.getSelectedJob());
+      if (!M.isBossRunAuthorized(q.authId)) return;
 
       // 페이지 이동이 예약된 경우: 실패로 세지 않고, 큐도 그대로 둔 채
       // 조용히 종료한다 (실제 새로고침이 일어나면 resumePendingIfAny가
@@ -7597,6 +7734,7 @@
       const raw2 = localStorage.getItem(QUEUE_KEY);
       if (!raw2) return; // 그 사이 정지 등으로 큐가 지워졌으면 종료
       const q2 = JSON.parse(raw2);
+      if (!M.isBossRunAuthorized(q2.authId)) return;
       if (q2.attempts === undefined) q2.attempts = 0;
       if (q2.entryFailStreak === undefined) q2.entryFailStreak = 0;
 
@@ -7634,7 +7772,7 @@
         if (q2.entryFailStreak >= 3) {
           localStorage.removeItem(QUEUE_KEY);
           if (M.uiLog) M.uiLog('🛑 진입 자체가 계속 실패 - 큐 중단');
-          alert(`⚠ "${entry.label}" 전투 화면 진입에 3회 연속 실패했습니다(카드/버튼을 못 찾음).\n공략 시도조차 못 한 상태입니다. 페이지 상태나 보스 목록을 확인해주세요.`);
+          M.showBossNotice(`⚠ "${entry.label}" 전투 화면 진입에 3회 연속 실패했습니다(카드/버튼을 못 찾음).\n공략 시도조차 못 한 상태입니다. 페이지 상태나 보스 목록을 확인해주세요.`);
           return;
         }
         localStorage.setItem(QUEUE_KEY, JSON.stringify(q2));
@@ -7660,24 +7798,25 @@
       if (q2.attempts >= 3) {
         localStorage.removeItem(QUEUE_KEY);
         if (M.uiLog) M.uiLog(`🛑 "${entry.label}" 3회 연속 공략 실패 - 큐 중단`);
-        alert(`⚠ "${entry.label}" 공략에 3회 연속 실패했습니다.\n설정(프리셋/스킬 등)이나 공략 로직을 점검해주세요. 큐를 중단합니다.`);
+        M.showBossNotice(`⚠ "${entry.label}" 공략에 3회 연속 실패했습니다.\n설정(프리셋/스킬 등)이나 공략 로직을 점검해주세요. 큐를 중단합니다.`);
         return;
       }
       localStorage.setItem(QUEUE_KEY, JSON.stringify(q2));
       // remaining은 그대로 둬서 같은 보스를 다시 시도함
     }
 
-    const finalRaw = localStorage.getItem(QUEUE_KEY);
-    const failedLabels = finalRaw ? JSON.parse(finalRaw).failedLabels : [];
-    localStorage.removeItem(QUEUE_KEY);
-    if (M.uiLog) M.uiLog('=== 보스 큐 종료 ===');
-    if (failedLabels.length > 0) {
-      // 실패가 하나라도 있었으면 팝업으로 알림 (사용자 요청)
-      alert(`일부 보스는 재시도 끝에 처치했지만 중간에 실패가 있었습니다: ${failedLabels.join(', ')}\n로그를 확인해주세요.`);
-    } else if (!M.stopRequested) {
-      // 전부 성공은 alert()로 방해하지 않고 로그에만 남김
-      // (alert는 브라우저 네이티브 모달이라 다음 자동화까지 막아버릴 수 있음)
-      if (M.uiLog) M.uiLog('🎉 선택한 보스를 모두 처치했습니다!');
+      const finalRaw = localStorage.getItem(QUEUE_KEY);
+      const failedLabels = finalRaw ? JSON.parse(finalRaw).failedLabels : [];
+      localStorage.removeItem(QUEUE_KEY);
+      if (M.uiLog) M.uiLog('=== 보스 큐 종료 ===');
+      if (failedLabels.length > 0) {
+        // 실패가 하나라도 있었으면 비차단 배너로 알림.
+        M.showBossNotice(`일부 보스는 재시도 끝에 처치했지만 중간에 실패가 있었습니다: ${failedLabels.join(', ')}\n로그를 확인해주세요.`);
+      } else if (!M.stopRequested) {
+        if (M.uiLog) M.uiLog('🎉 선택한 보스를 모두 처치했습니다!');
+      }
+    } finally {
+      M.queueRunning = false;
     }
   };
 
@@ -7836,7 +7975,11 @@
 
     panel.querySelector('#lrm-boss-ref-stop').addEventListener('click', () => {
       const coordinator = window.__lanisBossCoordinator;
-      if (coordinator && coordinator.isDailyActive && coordinator.isDailyActive()) {
+      if (
+        coordinator &&
+        ((coordinator.isDailyActive && coordinator.isDailyActive()) ||
+         (coordinator.hasDailyRun && coordinator.hasDailyRun()))
+      ) {
         coordinator.requestDailyStop();
         return;
       }
@@ -7867,7 +8010,31 @@
     }
     const queueRaw = localStorage.getItem(QUEUE_KEY);
     if (queueRaw) {
+      let queuedAuthId = null;
+      try {
+        queuedAuthId = JSON.parse(queueRaw).authId || null;
+      } catch (e) {
+        queuedAuthId = null;
+      }
+      if (!queuedAuthId || !M.isBossRunAuthorized(queuedAuthId)) {
+        M.clearBossRunState();
+        if (M.uiLog) M.uiLog('■ 실행 허가가 일치하지 않는 보스 큐 폐기');
+        return;
+      }
       setTimeout(() => {
+        const currentRaw = localStorage.getItem(QUEUE_KEY);
+        let currentQueue = null;
+        try {
+          currentQueue = currentRaw ? JSON.parse(currentRaw) : null;
+        } catch (e) {
+          currentQueue = null;
+        }
+        // 예약 당시의 큐가 정지/새 실행으로 바뀌었으면 절대 재개하지 않는다.
+        if (!currentQueue || currentQueue.authId !== queuedAuthId ||
+            !M.isBossRunAuthorized(queuedAuthId)) {
+          if (M.uiLog) M.uiLog('■ 정지 또는 실행 변경 감지 - 예약된 보스 큐 재개 취소');
+          return;
+        }
         if (M.uiLog) M.uiLog('⏳ 보스 큐 이어서 진행');
         const coordinator = window.__lanisBossCoordinator;
         if (coordinator && !coordinator.acquire()) {
@@ -7888,7 +8055,18 @@
     }
     const pending = localStorage.getItem(PENDING_KEY);
     if (pending && BOSS_REGISTRY[pending]) {
+      const pendingAuth = M.getBossRunAuth();
+      const pendingAuthId = pendingAuth && pendingAuth.id;
       setTimeout(() => {
+        // 정지 버튼은 pending과 허가를 모두 지운다. 예약 콜백은 캡처한
+        // 과거 값이 아니라 현재 저장값/허가를 다시 비교해야 한다.
+        if (
+          localStorage.getItem(PENDING_KEY) !== pending ||
+          !M.isBossRunAuthorized(pendingAuthId)
+        ) {
+          if (M.uiLog) M.uiLog('■ 정지 또는 실행 변경 감지 - 예약된 보스 요청 재개 취소');
+          return;
+        }
         if (M.uiLog) M.uiLog(`⏳ 이전 요청 이어서 진행: ${BOSS_REGISTRY[pending].label}`);
         const coordinator = window.__lanisBossCoordinator;
         if (coordinator && !coordinator.acquire()) {
