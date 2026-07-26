@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.6.0-stable
+// @version      1.6.1-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5828,31 +5828,46 @@
     const b = M.findButtonByText('프리셋 패널 닫기');
     if (b) b.click();
   };
-  M.applyBossPreset = async (name) => {
-    await M.openPresetPanel();
-    const found = await M.waitFor(() => M.findLeafByExactText(name), 5000);
-    if (!found) {
+  M.applyBossPreset = async (name, { requireConfirmation = false, attempts = 1 } = {}) => {
+    let confirmed = false;
+    for (let attempt = 1; attempt <= attempts && !confirmed; attempt++) {
+      await M.openPresetPanel();
+      const found = await M.waitFor(() => M.findLeafByExactText(name), 5000);
+      if (!found) {
+        M.closePresetPanel();
+        throw new Error('프리셋 이름 못찾음: ' + name);
+      }
+      await M.sleep(M.rand(300, 650));
+      const fresh = M.findLeafByExactText(name);
+      if (!fresh) {
+        M.closePresetPanel();
+        throw new Error('프리셋 이름 못찾음(재검색 실패): ' + name);
+      }
+      // 글자 leaf 자체가 아니라 실제 클릭 이벤트가 걸린 가장 가까운 버튼/행을
+      // 누른다. 특히 "정신일도"는 글자만 클릭되면 토스트도 장비 변경도 없이
+      // 다음 단계로 넘어가는 사례가 있었다.
+      const clickTarget = fresh.closest('button, [role="button"], [tabindex]') || fresh;
+      clickTarget.click();
+      confirmed = await M.waitFor(
+        () => M.queryAll('*').some((el) =>
+          el.children.length === 0 &&
+          el.textContent.includes(name) &&
+          el.textContent.includes('적용')
+        ),
+        3000,
+        150
+      );
       M.closePresetPanel();
-      throw new Error('프리셋 이름 못찾음: ' + name);
+      if (!confirmed && attempt < attempts) {
+        if (M.uiLog) M.uiLog(`↻ 프리셋 "${name}" 적용 확인 실패 (${attempt}/${attempts}) - 다시 적용`);
+        await M.humanPause(500, 900);
+      }
     }
-    // 클릭 직전에 다시 찾아서 클릭 (그 사이 화면이 다시 그려졌을 수 있으므로
-    // 처음 찾은 참조가 아니라 최신 요소를 클릭한다)
-    await M.sleep(M.rand(150, 350));
-    const fresh = M.findLeafByExactText(name);
-    if (!fresh) { M.closePresetPanel(); throw new Error('프리셋 이름 못찾음(재검색 실패): ' + name); }
-    fresh.click();
-    // 클릭이 실제로 반영됐는지 확인 없이 바로 패널을 닫으면 적용이 누락될
-    // 수 있다는 지적(실전 검증 전 반드시 고칠 항목)에 따라, 게임이 보여주는
-    // "프리셋 'OO'을(를) 적용했습니다" 토스트를 짧게 기다린다. 토스트
-    // 문구가 다르거나 너무 빨리 사라져 못 잡더라도(치명적이지 않음) 그냥
-    // 진행한다 - 완전히 막지는 않되, 확인 시도는 반드시 한다.
-    const confirmed = await M.waitFor(
-      () => M.queryAll('*').some((el) => el.children.length === 0 && el.textContent.includes(`'${name}'`) && el.textContent.includes('적용')),
-      2500,
-      150
-    );
+    if (!confirmed && requireConfirmation) {
+      throw new Error(`프리셋 "${name}" 적용을 ${attempts}회 시도했지만 확인하지 못함`);
+    }
     if (M.uiLog && !confirmed) M.uiLog(`(참고) 프리셋 "${name}" 적용 확인 토스트를 못 봤음 - 계속 진행`);
-    M.closePresetPanel();
+    return confirmed;
   };
 
   // --- 턴 진행 / 회복 / 스크롤 --------------------------------------------------
@@ -6396,6 +6411,20 @@
     const startHistoryLength = history.length;
     const targetElement = M.getBossElementFromList(bossLabel);
     if (!targetElement) throw new Error(`"${bossLabel}"의 오늘 속성을 읽지 못함`);
+    const cacheKey = 'lrm-boss-element-verified';
+    try {
+      const cached = JSON.parse(sessionStorage.getItem(cacheKey) || 'null');
+      const today = new Date().toLocaleDateString('en-CA');
+      if (
+        cached &&
+        cached.date === today &&
+        cached.bossLabel === bossLabel &&
+        cached.element === targetElement
+      ) {
+        if (M.uiLog) M.uiLog(`속성 확인 생략: "${bossLabel}" ${targetElement} 속성은 이번 탭에서 이미 검증됨`);
+        return { targetElement, currentElement: targetElement, cached: true };
+      }
+    } catch (e) {}
 
     await M.openCharacterMenuItem('내 정보');
     let currentElement = await M.waitFor(() => M.getCharacterElementOnStatus(), 8000);
@@ -6414,6 +6443,15 @@
     } else if (M.uiLog) {
       M.uiLog(`속성 일치 확인: ${targetElement}`);
     }
+
+    try {
+      sessionStorage.setItem(cacheKey, JSON.stringify({
+        date: new Date().toLocaleDateString('en-CA'),
+        bossLabel,
+        element: targetElement,
+        verifiedAt: Date.now(),
+      }));
+    } catch (e) {}
 
     // 속성 확인을 시작한 보스 목록의 이력 위치로 정확히 돌아간다.
     // 상단 전투 메뉴는 페이지에 따라 메뉴 항목의 DOM 구조가 달라져 "보스"
@@ -7518,7 +7556,9 @@
     if (stopped()) return { log, cleared: false };
 
     // 4단계: 정신일도 (5턴 1회 시도 - 회복이 개입했으면 그렇게 로그에 남김)
-    await M.applyBossPreset('정신일도');
+    // 검술 엔트의 핵심 단계다. 클릭 누락을 허용하면 정신일도를 쓰지 않은 채
+    // 딜 프리셋으로 넘어가므로, 적용 토스트를 확인할 때까지 최대 3회 재시도한다.
+    await M.applyBossPreset('정신일도', { requireConfirmation: true, attempts: 3 });
     push('[3단계] 정신일도 프리셋 적용');
     if (stopped()) return { log, cleared: false };
     let recoveryCount = 0;
