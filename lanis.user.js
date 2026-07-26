@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.9.0-stable
+// @version      1.9.1-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -6829,15 +6829,61 @@
       vineWraith: 'runVineWraithMagic',
     },
   };
+  const BOSS_JOB_BY_CLASS_NAME = Object.freeze({
+    검제: '검술',
+    천무: '체술',
+    신궁: '궁술',
+    대마법사: '마술',
+    암영: '인술',
+  });
+  const SUPPORTED_BOSS_JOBS = Object.freeze(Object.keys(BOSS_RUN_BY_JOB));
+
+  M.getCharacterBossJobOnStatus = () => {
+    const matches = M.queryAll('*')
+      .filter((el) =>
+        el.children.length === 0 &&
+        Object.prototype.hasOwnProperty.call(BOSS_JOB_BY_CLASS_NAME, el.textContent.trim())
+      )
+      .map((el) => el.textContent.trim());
+    const unique = [...new Set(matches)];
+    if (unique.length !== 1) return null;
+    return {
+      className: unique[0],
+      job: BOSS_JOB_BY_CLASS_NAME[unique[0]],
+    };
+  };
+
+  M.detectBossJob = async () => {
+    M.throwIfStopped();
+    await M.openCharacterMenuItem('내 정보');
+    const detected = await M.waitFor(() => M.getCharacterBossJobOnStatus(), 8000, 200);
+    if (!detected || !SUPPORTED_BOSS_JOBS.includes(detected.job)) {
+      throw new Error(
+        '내 정보에서 지원 직업(검제·천무·신궁·대마법사·암영)을 정확히 판별하지 못했습니다.'
+      );
+    }
+    if (M.uiLog) M.uiLog(`직업 자동 감지: ${detected.className} → ${detected.job}`);
+    const select = document.getElementById('lrm-boss-ref-job');
+    if (select) select.value = detected.job;
+    saveSelectedJob(detected.job);
+    await M.goToBossListViaMenu();
+    M.throwIfStopped();
+    return detected;
+  };
+
   M.getSelectedJob = () => {
     const sel = document.getElementById('lrm-boss-ref-job');
     const value = sel ? sel.value : loadSelectedJob();
-    return ['검술', '인술', '궁술', '체술', '마술'].includes(value) ? value : '궁술';
+    return SUPPORTED_BOSS_JOBS.includes(value) ? value : null;
   };
   M.getRunFunctionName = (key, jobOverride = null) => {
     const job = jobOverride || M.getSelectedJob();
-    const table = BOSS_RUN_BY_JOB[job] || BOSS_RUN_BY_JOB['검술'];
-    return table[key] || BOSS_RUN_BY_JOB['검술'][key];
+    if (!job || !BOSS_RUN_BY_JOB[job]) {
+      throw new Error(`지원하지 않거나 판별되지 않은 보스 직업입니다: ${job || '없음'}`);
+    }
+    const runName = BOSS_RUN_BY_JOB[job][key];
+    if (!runName) throw new Error(`${job}의 "${key}" 보스 로직이 등록되지 않았습니다.`);
+    return runName;
   };
   const PENDING_KEY = 'lrm-boss-ref-pending';
   const QUEUE_KEY = 'lrm-boss-ref-queue';
@@ -7703,17 +7749,20 @@
     const auth = M.getBossRunAuth();
     M.assertBossRunAuthorized(auth && auth.id);
     M.antiThrottle.start();
-    const remaining = BOSS_ORDER.filter((k) => selectedKeys.includes(k));
-    const q = {
-      remaining,
-      attempts: 0,
-      entryFailStreak: 0,
-      failedLabels: [],
-      job: M.getSelectedJob(),
-      authId: auth.id,
-    };
-    localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
     try {
+      const detected = await M.detectBossJob();
+      M.assertBossRunAuthorized(auth.id);
+      const remaining = BOSS_ORDER.filter((k) => selectedKeys.includes(k));
+      const q = {
+        remaining,
+        attempts: 0,
+        entryFailStreak: 0,
+        failedLabels: [],
+        job: detected.job,
+        className: detected.className,
+        authId: auth.id,
+      };
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
       await M.continueBossQueue();
     } finally {
       M.antiThrottle.stop();
@@ -7887,8 +7936,8 @@
     panel.style.cssText = 'color:#eee; font-size:12px; font-family:sans-serif;';
     panel.innerHTML = `
       <div>
-        <div style="font-size:11px; color:#999; margin-bottom:2px;">직업 (검술·인술·궁술·체술·마술 지원)</div>
-        <select id="lrm-boss-ref-job" style="width:100%; margin-bottom:10px; padding:5px; background:#111; color:#eee; border:1px solid #555; border-radius:4px; cursor:pointer;">
+        <div style="font-size:11px; color:#999; margin-bottom:2px;">직업 (보스 시작 시 내 정보에서 자동 감지)</div>
+        <select id="lrm-boss-ref-job" disabled title="실행 시 실제 직업으로 자동 갱신됩니다." style="width:100%; margin-bottom:10px; padding:5px; background:#111; color:#eee; border:1px solid #555; border-radius:4px;">
           <option value="검술">검술</option>
           <option value="인술">인술</option>
           <option value="궁술">궁술</option>
