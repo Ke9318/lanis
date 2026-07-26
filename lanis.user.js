@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.7.5-stable
+// @version      1.7.6-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -139,8 +139,19 @@
   };
 
   Core.waitFor = async function (fn, timeoutMs = 15000, intervalMs = 300, shouldCancel = Core.defaultShouldCancel) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
+    let deadline = Date.now() + timeoutMs;
+    let lastTick = Date.now();
+    while (true) {
+      const now = Date.now();
+      const delayedBy = now - lastTick;
+      // 다른 탭/창에 있을 때 Chrome이 메인 스레드와 렌더링을 늦춘 시간은
+      // 실제 DOM 대기 제한에서 제외한다. 다시 포커스됐다는 이유만으로
+      // 즉시 타임아웃 처리되는 문제를 방지한다.
+      if (document.hidden || delayedBy > Math.max(1200, intervalMs * 4)) {
+        deadline += delayedBy;
+      }
+      lastTick = now;
+      if (now >= deadline) break;
       if (shouldCancel && shouldCancel()) return null;
       let result = null;
       try {
@@ -6109,8 +6120,18 @@
   // 탭에서 렌더링이 늦어져도, 실제로 준비될 때까지 계속 재확인함.
   // stopRequested가 켜지면 즉시 빠져나오게 해서 "정지" 버튼 반응성을 높인다.
   M.waitFor = async function (fn, timeoutMs = 15000, intervalMs = 300) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
+    let deadline = Date.now() + timeoutMs;
+    let lastTick = Date.now();
+    while (true) {
+      const now = Date.now();
+      const delayedBy = now - lastTick;
+      // 보스는 짧은 모달/프리셋/턴 결과 대기가 연속된다. 백그라운드
+      // throttling으로 콜백이 늦어진 시간은 타임아웃 예산에서 제외한다.
+      if (document.hidden || delayedBy > Math.max(1200, intervalMs * 4)) {
+        deadline += delayedBy;
+      }
+      lastTick = now;
+      if (now >= deadline) break;
       if (M.stopRequested) return null;
       const result = fn();
       if (result) return result;
