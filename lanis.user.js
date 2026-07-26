@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.7.0-stable
+// @version      1.7.1-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -257,6 +257,68 @@
     if (!(await Core.safeClick(() =>
       [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim().endsWith(suffixText))
     ))) throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
+  };
+
+  // ---------------- 공용 프리셋 적용 (던전·자동사냥·심층던전 공용) ----------------
+  Core.applyCommonPreset = async function (presetName, moduleId) {
+    await Core.clickNavMenuExact('캐릭', '프리셋');
+    const pageReady = await Core.waitFor(
+      () => Core.bodyText().includes('공용 프리셋') && Core.bodyText().includes('현재 상태 저장'),
+      15000,
+      300
+    );
+    if (!pageReady) throw new Error('공용 프리셋 화면 진입을 확인하지 못했습니다.');
+
+    const findPresetCard = () => {
+      const nameLeaf = Core.gameElements('*').find(
+        (el) => el.children.length === 0 && el.textContent.trim() === presetName
+      );
+      if (!nameLeaf) return null;
+      let node = nameLeaf.parentElement;
+      for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+        const applyButtons = [...node.querySelectorAll('button')].filter(
+          (button) => button.textContent.trim() === '적용'
+        );
+        const hasManagementButtons = [...node.querySelectorAll('button')].some(
+          (button) => button.textContent.trim() === '전체 갱신'
+        );
+        if (applyButtons.length === 1 && hasManagementButtons) {
+          return { card: node, button: applyButtons[0] };
+        }
+      }
+      return null;
+    };
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const preset = await Core.waitFor(findPresetCard, 5000, 250);
+      if (!preset) {
+        throw new Error(`공용 프리셋 "${presetName}"을 찾지 못했습니다. 캐릭 → 프리셋에서 먼저 만들어주세요.`);
+      }
+      if (!(await Core.safeClick(() => {
+        const current = findPresetCard();
+        return current ? current.button : null;
+      }, { beforeMin: 650, beforeMax: 1100, afterMin: 100, afterMax: 250 }))) {
+        throw new Error(`공용 프리셋 "${presetName}" 적용 버튼 클릭에 실패했습니다.`);
+      }
+      const confirmed = await Core.waitFor(
+        () => {
+          const text = Core.bodyText();
+          return text.includes(presetName) &&
+            (text.includes('적용했습니다') || text.includes('적용 완료') || text.includes('불러왔습니다'));
+        },
+        3500,
+        150
+      );
+      if (confirmed) {
+        Core.log(moduleId, `공용 프리셋 "${presetName}" 적용 확인`);
+        return true;
+      }
+      if (attempt < 2) {
+        Core.log(moduleId, `공용 프리셋 "${presetName}" 적용 확인 실패 (${attempt}/2) → 재시도`);
+        await Core.humanDelay(500, 900);
+      }
+    }
+    throw new Error(`공용 프리셋 "${presetName}" 적용 결과를 확인하지 못했습니다.`);
   };
 
   // ---------------- 캐릭터 속성 확인/변경 (자동사냥·던전 공용) ----------------
@@ -587,6 +649,7 @@
     stopRequested: false,
     config: {
       dungeon: true,
+      arena: true,
       boss: true,
       autohunt: true,
       deepdungeon: true,
@@ -1725,6 +1788,8 @@
   Modules.autohunt.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
+    Core.log('autohunt', '시작 전 공용 프리셋 "사냥" 적용');
+    await Core.applyCommonPreset('사냥', 'autohunt');
     Core.log('autohunt', `시작 전 원래 속성(${mod.config.originalElement}) 확인`);
     await Core.ensureCharacterElement(mod.config.originalElement, 'autohunt');
     Core.log(
@@ -3015,6 +3080,8 @@
   Modules.dungeon.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = mod.loadClearCount();
+    Core.log('dungeon', '시작 전 공용 프리셋 "던전" 적용');
+    await Core.applyCommonPreset('던전', 'dungeon');
     Core.log('dungeon', `시작 전 원래 속성(${mod.config.originalElement}) 확인`);
     await Core.ensureCharacterElement(mod.config.originalElement, 'dungeon');
     Core.log('dungeon', `던전 자동클리어 시작 (오늘 이미 클리어한 던전: ${mod.cycleCount}개)`);
@@ -4438,7 +4505,14 @@
     mod.usedSmithyOnce = false;
 
     Core.log('deepdungeon', `심층던전 자동클리어 시작 (${mod.config.jobMode})`);
-
+    Core.log('deepdungeon', '시작 전 공용 프리셋 "심층던전" 적용');
+    await Core.applyCommonPreset('심층던전', 'deepdungeon');
+    const deepOriginalElement = Modules.autohunt.config.originalElement;
+    if (!Core.ELEMENT_OPTIONS.includes(deepOriginalElement)) {
+      throw new Error('자동사냥 탭에서 원래 속성을 먼저 선택해주세요.');
+    }
+    Core.log('deepdungeon', `시작 전 원래 속성(${deepOriginalElement}) 확인`);
+    await Core.ensureCharacterElement(deepOriginalElement, 'deepdungeon');
     await mod.goToDeepDungeon();
     if (!mod.running) return;
 
@@ -4548,9 +4622,13 @@
       Core.showBanner(moduleId, '일일 연속 실행이 진행 중입니다. 먼저 일일 작업을 정지해주세요.');
       return null;
     }
+    const requiredElement =
+      moduleId === 'deepdungeon'
+        ? Modules.autohunt.config.originalElement
+        : mod.config && mod.config.originalElement;
     if (
-      (moduleId === 'autohunt' || moduleId === 'dungeon') &&
-      !Core.ELEMENT_OPTIONS.includes(mod.config.originalElement)
+      (moduleId === 'autohunt' || moduleId === 'dungeon' || moduleId === 'deepdungeon') &&
+      !Core.ELEMENT_OPTIONS.includes(requiredElement)
     ) {
       Core.showBanner(moduleId, '시작 전에 원래 속성을 선택해주세요.');
       Core.log(moduleId, '원래 속성 미선택으로 시작을 차단했습니다.');
@@ -4723,9 +4801,10 @@
 
   // -------------------------- 일일 연속 실행 --------------------------
   const DAILY_STATE_KEY = 'lrm-daily-sequence-state';
-  const DAILY_CONFIG_KEYS = ['dungeon', 'boss', 'autohunt', 'deepdungeon'];
+  const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'boss', 'autohunt', 'deepdungeon'];
   const DAILY_STEP_LABELS = {
     dungeon: '던전',
+    arena: '아레나',
     boss: '보스',
     autohunt: '자동사냥',
     deepdungeon: '심층던전',
@@ -4788,6 +4867,14 @@
       await this.runCoreModule('dungeon');
       return await this.verifyDungeon();
     }
+    if (step === 'arena') {
+      await this.runCoreModule('arena');
+      const count = Modules.arena.readTodayBattleCount();
+      if (count === null || count < Modules.arena.config.targetBattles) {
+        throw new Error(`아레나 목표 횟수 확인 실패: ${count ?? '읽기 실패'}/${Modules.arena.config.targetBattles}`);
+      }
+      return `오늘 아레나 ${count}/${Modules.arena.config.targetBattles}회 확인`;
+    }
     if (step === 'boss') {
       const boss = await Core.waitFor(() => window.__bossMacro || null, 10000, 250, null);
       if (!boss || typeof boss.runDailySelectedBosses !== 'function') {
@@ -4806,9 +4893,6 @@
       if (before === null) throw new Error('심층던전 시작 전 주간 누적 데미지를 읽지 못함');
       if (before >= 1000000) return `이미 주간 누적 데미지 ${before.toLocaleString()} - 실행 생략`;
 
-      if (Core.ELEMENT_OPTIONS.includes(Modules.autohunt.config.originalElement)) {
-        await Core.ensureCharacterElement(Modules.autohunt.config.originalElement, 'deepdungeon');
-      }
       const previousRetry = mod.config.retryIfWeeklyDamageUnder1M;
       mod.config.retryIfWeeklyDamageUnder1M = true;
       try {
@@ -4880,13 +4964,20 @@
       Core.showBanner('daily', '다른 작업이 실행 중입니다. 정지 후 다시 시작해주세요.');
       return;
     }
-    const steps = ['dungeon', 'boss', 'autohunt', 'deepdungeon'].filter((key) => mod.config[key]);
+    const steps = ['dungeon', 'arena', 'boss', 'autohunt', 'deepdungeon'].filter((key) => mod.config[key]);
     if (steps.length === 0) {
       Core.showBanner('daily', '실행할 일일 작업을 하나 이상 체크해주세요.');
       return;
     }
     if (
-      (steps.includes('dungeon') || steps.includes('autohunt') || steps.includes('deepdungeon')) &&
+      steps.includes('dungeon') &&
+      !Core.ELEMENT_OPTIONS.includes(Modules.dungeon.config.originalElement)
+    ) {
+      Core.showBanner('daily', '던전 탭에서 원래 속성을 먼저 선택해주세요.');
+      return;
+    }
+    if (
+      (steps.includes('autohunt') || steps.includes('deepdungeon')) &&
       !Core.ELEMENT_OPTIONS.includes(Modules.autohunt.config.originalElement)
     ) {
       Core.showBanner('daily', '자동사냥 탭에서 원래 속성을 먼저 선택해주세요.');
@@ -5639,13 +5730,14 @@
     Core.loadModuleConfig('daily', DAILY_CONFIG_KEYS);
 
     const intro = document.createElement('div');
-    intro.textContent = '체크한 작업을 던전 → 보스 → 자동사냥 → 심층던전 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
+    intro.textContent = '체크한 작업을 던전 → 아레나 → 보스 → 자동사냥 → 심층던전 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
     intro.style.cssText = 'color:#ccc; font-size:11px; line-height:1.5; margin-bottom:8px;';
     container.appendChild(intro);
 
     const inputs = [];
     [
       ['dungeon', '던전 — 입장 가능한 던전 모두 클리어'],
+      ['arena', '아레나 — 설정한 오늘 총 전투 횟수까지'],
       ['boss', '보스 — 선택한 보스 중 주간 보상이 남은 보스'],
       ['autohunt', '자동사냥 — 설정한 행동력 제한까지'],
       ['deepdungeon', '심층던전 — 주간 누적 피해 100만까지'],
