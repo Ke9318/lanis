@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.7.8-stable
+// @version      1.7.9-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -4799,7 +4799,15 @@
 
     const bossPanel = document.getElementById('lrm-boss-ref-panel');
     if (bossPanel) {
-      const bossRunning = Core.activeModuleId === 'boss';
+      const bossEngine = window.__bossMacro;
+      // 페이지 이동/재개 타이밍에는 코디네이터의 activeModuleId가 잠깐
+      // 풀릴 수 있다. 실제 엔진·저장 큐도 함께 봐야 정지 버튼이 실행
+      // 도중 잘못 비활성화되지 않는다.
+      const bossRunning =
+        Core.activeModuleId === 'boss' ||
+        !!(bossEngine && bossEngine.isRunning) ||
+        !!localStorage.getItem('lrm-boss-ref-queue') ||
+        !!localStorage.getItem('lrm-boss-ref-pending');
       const anyModuleRunning = !!Core.activeModuleId || Core.dailyActive;
       const startBtn = bossPanel.querySelector('#lrm-boss-ref-run-queue');
       const stopBtn = bossPanel.querySelector('#lrm-boss-ref-stop');
@@ -5053,7 +5061,11 @@
     }
     if (window.__bossMacro) {
       if (typeof window.__bossMacro.clearBossRunState === 'function') {
-        window.__bossMacro.clearBossRunState();
+        if (typeof window.__bossMacro.requestImmediateStop === 'function') {
+          window.__bossMacro.requestImmediateStop();
+        } else {
+          window.__bossMacro.clearBossRunState();
+        }
       } else {
         window.__bossMacro.stopRequested = true;
         localStorage.setItem('lrm-boss-ref-user-stopped', String(Date.now()));
@@ -6110,9 +6122,29 @@
     }
   })();
 
-  M.sleep = (ms) => {
-    if (M._workerSleepFn && !M._workerDead) return M._workerSleepFn(ms);
-    return new Promise((r) => setTimeout(r, ms));
+  // 긴 Worker 대기를 한 번에 걸면 그 사이 정지를 눌러도 타이머가 끝날
+  // 때까지 현재 async 함수가 살아 있다. 250ms 단위로 쪼개 매번 정지
+  // 상태를 검사하여, 백그라운드에서도 실제 클릭 흐름을 즉시 끊는다.
+  M.sleep = async (ms) => {
+    const deadline = Date.now() + Math.max(0, ms);
+    while (Date.now() < deadline) {
+      if (M.stopRequested && M.isRunning) {
+        const error = new Error('사용자 정지 요청');
+        error.isUserStop = true;
+        throw error;
+      }
+      const chunk = Math.min(250, Math.max(1, deadline - Date.now()));
+      if (M._workerSleepFn && !M._workerDead) {
+        await M._workerSleepFn(chunk);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, chunk));
+      }
+    }
+    if (M.stopRequested && M.isRunning) {
+      const error = new Error('사용자 정지 요청');
+      error.isUserStop = true;
+      throw error;
+    }
   };
   M.throwIfStopped = () => {
     if (!M.stopRequested) return;
@@ -6720,6 +6752,17 @@
     localStorage.setItem(STOP_LATCH_KEY, String(Date.now()));
     localStorage.removeItem(PENDING_KEY);
     localStorage.removeItem(QUEUE_KEY);
+  };
+
+  M.requestImmediateStop = () => {
+    M.clearBossRunState();
+    M.antiThrottle.stop();
+    const cancel = M.findConfirmInOpenDialog(['취소', '닫기']);
+    if (cancel) cancel.click();
+    M.closePresetPanel();
+    if (M.uiLog) {
+      M.uiLog('■ 즉시 정지됨 (실행 대기·보스 큐·자동 재개 상태 모두 폐기)');
+    }
   };
 
   M.armBossRun = () => {
@@ -7755,12 +7798,7 @@
     });
 
     panel.querySelector('#lrm-boss-ref-stop').addEventListener('click', () => {
-      M.clearBossRunState();
-      const cancel = M.findConfirmInOpenDialog(['취소', '닫기']);
-      if (cancel) cancel.click();
-      M.closePresetPanel();
-      M.antiThrottle.stop();
-      M.uiLog('■ 정지 요청됨 (열린 선택창 닫음, 추가 프리셋·턴·회복·스크롤 클릭 즉시 차단)');
+      M.requestImmediateStop();
     });
     if (window.__lanisBossCoordinator) window.__lanisBossCoordinator.refresh();
   }
