@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.7.6-stable
+// @version      1.7.7-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5026,6 +5026,11 @@
       reports: [],
       startedAt: Date.now(),
     };
+    // 사용자가 새 일일 실행을 명시적으로 누른 경우에만 이전 보스 정지
+    // 래치를 해제한다.
+    if (window.__bossMacro && typeof window.__bossMacro.armBossRun === 'function') {
+      window.__bossMacro.armBossRun();
+    }
     mod.saveState(state);
     mod.mainLoop().catch((e) => {
       Core.dailyActive = false;
@@ -5047,9 +5052,14 @@
       Core.requestStopModule(Core.activeModuleId);
     }
     if (window.__bossMacro) {
-      window.__bossMacro.stopRequested = true;
-      localStorage.removeItem('lrm-boss-ref-pending');
-      localStorage.removeItem('lrm-boss-ref-queue');
+      if (typeof window.__bossMacro.clearBossRunState === 'function') {
+        window.__bossMacro.clearBossRunState();
+      } else {
+        window.__bossMacro.stopRequested = true;
+        localStorage.setItem('lrm-boss-ref-user-stopped', String(Date.now()));
+        localStorage.removeItem('lrm-boss-ref-pending');
+        localStorage.removeItem('lrm-boss-ref-queue');
+      }
     }
   };
 
@@ -6438,6 +6448,44 @@
     return set;
   };
 
+  // HP/MP DOM이 전투 종료 순간 다시 그려지면 마지막 공격은 성공했어도
+  // 상태 파서가 null을 반환할 수 있다. 실제 클리어 팝업을 독립적인 성공
+  // 신호로 읽어, 이를 공략 실패/재도전으로 잘못 집계하지 않는다.
+  M.findBossClearPopup = (bossLabel = '') => {
+    const markers = M.queryAll('*').filter((el) => {
+      if (!M.isVisible(el) || el.children.length !== 0) return false;
+      const text = el.textContent.trim();
+      return /^보스 클리어!?$/.test(text) ||
+        (text.includes('처치했습니다') && (!bossLabel || text.includes(bossLabel)));
+    });
+    for (const marker of markers) {
+      let node = marker;
+      for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+        const text = node.textContent || '';
+        if (
+          text.includes('보스 클리어') &&
+          text.includes('처치했습니다') &&
+          (!bossLabel || text.includes(bossLabel))
+        ) {
+          return node;
+        }
+      }
+    }
+    return null;
+  };
+
+  M.consumeBossClearPopup = async (bossLabel = '') => {
+    const popup = M.findBossClearPopup(bossLabel);
+    if (!popup) return false;
+    const confirm = [...popup.querySelectorAll('button')]
+      .find((btn) => M.isVisible(btn) && btn.textContent.trim() === '확인');
+    if (confirm) {
+      await M.sleep(350);
+      confirm.click();
+    }
+    return true;
+  };
+
   // 클리어 팝업의 "확인" 버튼을 닫아준다 (모달 스코프)
   M.closeClearPopupIfAny = async () => {
     await M.sleep(500);
@@ -6646,6 +6694,22 @@
   };
   const PENDING_KEY = 'lrm-boss-ref-pending';
   const QUEUE_KEY = 'lrm-boss-ref-queue';
+  // 사용자가 정지를 눌렀다는 사실을 새로고침 뒤에도 유지한다. 큐/pending만
+  // 지우면 클릭 직전 저장된 페이지 상태나 다른 일일 실행 경로가 다시 큐를
+  // 만들 수 있으므로, 명시적인 다음 시작 전까지 자동 재개를 금지한다.
+  const STOP_LATCH_KEY = 'lrm-boss-ref-user-stopped';
+
+  M.clearBossRunState = () => {
+    M.stopRequested = true;
+    localStorage.setItem(STOP_LATCH_KEY, String(Date.now()));
+    localStorage.removeItem(PENDING_KEY);
+    localStorage.removeItem(QUEUE_KEY);
+  };
+
+  M.armBossRun = () => {
+    localStorage.removeItem(STOP_LATCH_KEY);
+    M.stopRequested = false;
+  };
 
   M.isInBattleScreen = (bossLabel) => {
     const heading = M.findLeafByExactText(bossLabel);
@@ -6997,12 +7061,19 @@
     const runAndReport = async () => {
       try {
         const result = await M[runName]();
+        const popupCleared = await M.consumeBossClearPopup(entry.label);
         return {
           entered: true,
-          cleared: !!(result && result.cleared),
+          cleared: popupCleared || !!(result && result.cleared),
           retryRequired: !!(result && result.retryRequired),
         };
       } catch (e) {
+        // 마지막 공격 직후 클리어 모달 때문에 HP/MP 읽기가 실패한 경우에도
+        // 화면에 명백한 처치 결과가 있으면 성공이다.
+        if (await M.consumeBossClearPopup(entry.label)) {
+          if (M.uiLog) M.uiLog(`✅ "${entry.label}" 클리어 팝업 확인 - 성공 처리`);
+          return { entered: true, cleared: true, retryRequired: false };
+        }
         // 전투 로직 실행 도중 에러(모달 타이밍 등)가 나도 여기서 삼켜서
         // 큐 전체가 중단되지 않게 한다.
         if (M.uiLog) {
@@ -7220,6 +7291,7 @@
       if (M.uiLog) M.uiLog('⛔ 이미 실행 중이라 새 요청을 무시함');
       return;
     }
+    M.armBossRun();
     M.antiThrottle.start();
     localStorage.setItem(PENDING_KEY, key);
     try {
@@ -7373,6 +7445,7 @@
       if (M.uiLog) M.uiLog('⛔ 이미 실행 중이라 새 요청을 무시함');
       return;
     }
+    M.armBossRun();
     M.antiThrottle.start();
     const remaining = BOSS_ORDER.filter((k) => selectedKeys.includes(k));
     const q = {
@@ -7635,7 +7708,7 @@
         M.uiLog('⚠ 다른 통합 매크로 모듈이 실행 중이라 보스 시작을 차단했습니다.');
         return;
       }
-      M.stopRequested = false;
+      M.armBossRun();
       setRunningState(true);
       M.uiLog(`▶ 보스 도전 시작 (선택: ${checked.length}개)`);
       try {
@@ -7661,9 +7734,7 @@
     });
 
     panel.querySelector('#lrm-boss-ref-stop').addEventListener('click', () => {
-      M.stopRequested = true;
-      localStorage.removeItem(PENDING_KEY);
-      localStorage.removeItem(QUEUE_KEY);
+      M.clearBossRunState();
       const cancel = M.findConfirmInOpenDialog(['취소', '닫기']);
       if (cancel) cancel.click();
       M.closePresetPanel();
@@ -7678,6 +7749,12 @@
 
   // 새로고침/재접속으로 스크립트가 다시 로드된 경우, 진행 중이던 요청이 있으면 자동으로 이어감
   (function resumePendingIfAny() {
+    if (localStorage.getItem(STOP_LATCH_KEY)) {
+      localStorage.removeItem(PENDING_KEY);
+      localStorage.removeItem(QUEUE_KEY);
+      if (M.uiLog) M.uiLog('■ 이전 사용자 정지 상태 유지 - 자동 재개하지 않음');
+      return;
+    }
     const queueRaw = localStorage.getItem(QUEUE_KEY);
     if (queueRaw) {
       setTimeout(() => {
