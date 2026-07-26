@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.5.1-stable
-// @description  재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 / 개인 보스 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
+// @version      1.6.0-stable
+// @description  재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
 // @grant        none
@@ -24,6 +24,8 @@
     originalTitle: document.title,
     titleFlashInterval: null,
     audioCtx: null, // 알림음 재생용 (v1.2.24)
+    dailyActive: false,
+    moduleResults: {},
   };
 
   const PANEL_POS_KEY = 'lrm-unified-panel-pos'; // 패널 위치 저장용 localStorage 키 (하나의 패널이므로 키도 하나)
@@ -492,6 +494,7 @@
   };
 
   Core.notifyStopped = function (moduleId, msg) {
+    Core.moduleResults[moduleId] = { ok: false, message: msg, at: Date.now() };
     Core.log(moduleId, `⚠ ${msg}`);
     Core.showBanner(moduleId, msg, false);
     Core.playStopSound();
@@ -499,6 +502,7 @@
   };
 
   Core.notifyCompleted = function (moduleId, msg) {
+    Core.moduleResults[moduleId] = { ok: true, message: msg, at: Date.now() };
     Core.log(moduleId, `✅ ${msg}`);
     Core.showBanner(moduleId, msg, true);
     Core.playCompleteSound();
@@ -565,6 +569,7 @@
   // 모듈 정의: 재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전
   // ==========================================================================
   const MODULE_LABELS = {
+    daily: '일일',
     rejob: '재전직',
     autohunt: '자동사냥',
     raremap: '레어맵',
@@ -574,6 +579,18 @@
   };
 
   const Modules = {};
+
+  Modules.daily = {
+    id: 'daily',
+    running: false,
+    stopRequested: false,
+    config: {
+      dungeon: true,
+      boss: true,
+      autohunt: true,
+      deepdungeon: true,
+    },
+  };
 
   // -------------------------- 모듈 1: 재전직 --------------------------
   Modules.rejob = {
@@ -1585,7 +1602,7 @@
 
       const energy = mod.readEnergy();
       if (energy !== null && energy < mod.config.minEnergy) {
-        Core.notifyStopped('autohunt', `행동력 부족(${energy}/2000, 기준 ${mod.config.minEnergy}) — 정지합니다.`);
+        Core.notifyCompleted('autohunt', `설정한 행동력 제한 도달(${energy}/2000, 기준 ${mod.config.minEnergy})`);
         break;
       }
 
@@ -1598,7 +1615,7 @@
       const previousResultText = Core.bodyText();
       const okClick = await mod.clickHuntX50();
       if (okClick === 'disabled') {
-        Core.notifyStopped('autohunt', '행동력이 부족하여 사냥 버튼이 비활성화되어 있습니다 — 정지합니다.');
+        Core.notifyCompleted('autohunt', '행동력 제한에 도달해 사냥 버튼이 비활성화되었습니다.');
         break;
       }
       if (okClick !== 'clicked') {
@@ -2862,6 +2879,7 @@
     const queue = mod.scanEligibleDungeons();
     if (queue.length === 0) {
       Core.log('dungeon', '입장 가능한 던전이 없습니다 (전부 완료됐거나 입장권이 없음). 정지합니다.');
+      Core.moduleResults.dungeon = { ok: true, message: '입장 가능한 모든 던전 완료 또는 입장권 소진', at: Date.now() };
       mod.running = false;
       Core.activeModuleId = Core.activeModuleId === 'dungeon' ? null : Core.activeModuleId;
       Core.updateModuleButtons();
@@ -2882,6 +2900,9 @@
     }
 
     Core.log('dungeon', `던전 자동클리어 종료. 오늘 클리어한 던전: ${mod.cycleCount}개`);
+    if (!Core.moduleResults.dungeon || Core.moduleResults.dungeon.ok === null) {
+      Core.moduleResults.dungeon = { ok: true, message: `입장 가능한 던전 ${mod.cycleCount}개 완료`, at: Date.now() };
+    }
     mod.running = false;
     Core.activeModuleId = Core.activeModuleId === 'dungeon' ? null : Core.activeModuleId;
     Core.updateModuleButtons();
@@ -4361,9 +4382,13 @@
   // ==========================================================================
   // 공용 시작/정지 처리 (한 번에 하나의 모듈만 실행되도록 보호)
   // ==========================================================================
-  Core.startModule = function (moduleId) {
+  Core.startModule = function (moduleId, options = {}) {
     const mod = Modules[moduleId];
-    if (!mod) return;
+    if (!mod) return null;
+    if (Core.dailyActive && !options.fromDaily) {
+      Core.showBanner(moduleId, '일일 연속 실행이 진행 중입니다. 먼저 일일 작업을 정지해주세요.');
+      return null;
+    }
     if (
       (moduleId === 'autohunt' || moduleId === 'dungeon') &&
       !Core.ELEMENT_OPTIONS.includes(mod.config.originalElement)
@@ -4401,6 +4426,7 @@
     const runId = mod.runId;
     mod.running = true;
     mod.stopRequested = false;
+    Core.moduleResults[moduleId] = { ok: null, message: '실행 중', at: Date.now() };
     if (moduleId === 'rejob') {
       mod.nextRestAt = mod.cycleCount + Core.rand(mod.config.restEvery[0], mod.config.restEvery[1]);
     }
@@ -4413,6 +4439,11 @@
         await mod.mainLoop(runId);
       })
       .catch((e) => {
+        Core.moduleResults[moduleId] = {
+          ok: false,
+          message: e && e.message ? e.message : String(e),
+          at: Date.now(),
+        };
         if (!Core.isRunCancelled(moduleId, runId)) {
           Core.log(moduleId, `처리되지 않은 오류: ${e && e.message ? e.message : String(e)}`);
           Core.showBanner(moduleId, `처리되지 않은 오류로 정지했습니다: ${e && e.message ? e.message : String(e)}`, false);
@@ -4432,6 +4463,7 @@
         Core.updateModuleButtons();
       });
     mod.loopPromise = loopPromise;
+    return loopPromise;
   };
 
   Core.requestStopModule = function (moduleId) {
@@ -4479,7 +4511,7 @@
   // ==========================================================================
   // 패널 UI (탭 구조, 하나의 패널을 다섯 모듈이 공유)
   // ==========================================================================
-  const UIRefs = { rejob: {}, autohunt: {}, raremap: {}, dungeon: {}, deepdungeon: {} };
+  const UIRefs = { daily: {}, rejob: {}, autohunt: {}, raremap: {}, dungeon: {}, deepdungeon: {} };
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
@@ -4487,7 +4519,9 @@
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
-      const otherRunning = Core.activeModuleId && Core.activeModuleId !== id;
+      const otherRunning =
+        (Core.activeModuleId && Core.activeModuleId !== id) ||
+        (Core.dailyActive && !mod.running);
       const safetyLocked = id === 'rejob' && refs.safetyCheck && !refs.safetyCheck.checked;
       refs.startBtn.disabled = mod.running || otherRunning || safetyLocked;
       refs.stopBtn.disabled = !mod.running;
@@ -4504,7 +4538,7 @@
     const bossPanel = document.getElementById('lrm-boss-ref-panel');
     if (bossPanel) {
       const bossRunning = Core.activeModuleId === 'boss';
-      const anyModuleRunning = !!Core.activeModuleId;
+      const anyModuleRunning = !!Core.activeModuleId || Core.dailyActive;
       const startBtn = bossPanel.querySelector('#lrm-boss-ref-run-queue');
       const stopBtn = bossPanel.querySelector('#lrm-boss-ref-stop');
       if (startBtn) startBtn.disabled = anyModuleRunning;
@@ -4512,6 +4546,228 @@
       bossPanel.querySelectorAll('#lrm-boss-ref-job, .lrm-boss-check').forEach((input) => {
         input.disabled = bossRunning;
       });
+    }
+
+    const dailyRefs = UIRefs.daily;
+    if (dailyRefs.startBtn) {
+      dailyRefs.startBtn.disabled = Core.dailyActive || !!Core.activeModuleId;
+      dailyRefs.stopBtn.disabled = !Core.dailyActive;
+      if (dailyRefs.inputs) dailyRefs.inputs.forEach((input) => {
+        input.disabled = Core.dailyActive;
+      });
+      dailyRefs.statusEl.textContent = Core.dailyActive ? '연속 실행중' : '대기중';
+    }
+  };
+
+  // -------------------------- 일일 연속 실행 --------------------------
+  const DAILY_STATE_KEY = 'lrm-daily-sequence-state';
+  const DAILY_CONFIG_KEYS = ['dungeon', 'boss', 'autohunt', 'deepdungeon'];
+  const DAILY_STEP_LABELS = {
+    dungeon: '던전',
+    boss: '보스',
+    autohunt: '자동사냥',
+    deepdungeon: '심층던전',
+  };
+
+  Modules.daily.loadState = function () {
+    try {
+      const value = JSON.parse(localStorage.getItem(DAILY_STATE_KEY) || 'null');
+      return value && value.running ? value : null;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  Modules.daily.saveState = function (state) {
+    localStorage.setItem(DAILY_STATE_KEY, JSON.stringify(state));
+  };
+
+  Modules.daily.verifyDungeon = async function () {
+    await Modules.dungeon.goToDungeonSelect();
+    const remaining = Modules.dungeon.scanEligibleDungeons();
+    if (remaining.length > 0) {
+      throw new Error(`아직 입장 가능한 던전이 남아 있음: ${remaining.map((d) => d.label).join(', ')}`);
+    }
+    return '입장 가능한 모든 던전 완료 또는 입장권 소진 확인';
+  };
+
+  Modules.daily.verifyAutohunt = async function () {
+    const mod = Modules.autohunt;
+    const onGround = await mod.ensureOnGround(mod.config.groundSuffix, mod.config.floor);
+    if (!onGround) throw new Error('사냥 종료 후 사냥터 화면을 확인하지 못함');
+    const energy = mod.readEnergy();
+    if (energy === null) throw new Error('사냥 종료 후 행동력을 읽지 못함');
+    if (energy >= mod.config.minEnergy) {
+      throw new Error(`행동력이 제한 이상으로 남음: ${energy}/2000 (기준 ${mod.config.minEnergy})`);
+    }
+    return `행동력 제한 도달 확인: ${energy}/2000`;
+  };
+
+  Modules.daily.verifyDeepDungeon = async function () {
+    const mod = Modules.deepdungeon;
+    await mod.goToDeepDungeon();
+    const damage = await mod.readWeeklyCumulativeDamage();
+    if (damage === null) throw new Error('심층던전 주간 누적 데미지를 읽지 못함');
+    if (damage < 1000000) throw new Error(`주간 누적 데미지가 아직 100만 미만: ${damage.toLocaleString()}`);
+    return `주간 누적 데미지 ${damage.toLocaleString()} 확인`;
+  };
+
+  Modules.daily.runCoreModule = async function (moduleId) {
+    Core.moduleResults[moduleId] = { ok: null, message: '일일 작업에서 시작', at: Date.now() };
+    const promise = Core.startModule(moduleId, { fromDaily: true });
+    if (!promise) throw new Error(`${DAILY_STEP_LABELS[moduleId]} 시작이 차단됨`);
+    await promise;
+    const result = Core.moduleResults[moduleId];
+    if (result && result.ok === false) throw new Error(result.message);
+  };
+
+  Modules.daily.runStep = async function (step) {
+    if (step === 'dungeon') {
+      await this.runCoreModule('dungeon');
+      return await this.verifyDungeon();
+    }
+    if (step === 'boss') {
+      const boss = await Core.waitFor(() => window.__bossMacro || null, 10000, 250, null);
+      if (!boss || typeof boss.runDailySelectedBosses !== 'function') {
+        throw new Error('보스 일일 실행 엔진을 찾지 못함');
+      }
+      return await boss.runDailySelectedBosses();
+    }
+    if (step === 'autohunt') {
+      await this.runCoreModule('autohunt');
+      return await this.verifyAutohunt();
+    }
+    if (step === 'deepdungeon') {
+      const mod = Modules.deepdungeon;
+      await mod.goToDeepDungeon();
+      const before = await mod.readWeeklyCumulativeDamage();
+      if (before === null) throw new Error('심층던전 시작 전 주간 누적 데미지를 읽지 못함');
+      if (before >= 1000000) return `이미 주간 누적 데미지 ${before.toLocaleString()} - 실행 생략`;
+
+      if (Core.ELEMENT_OPTIONS.includes(Modules.autohunt.config.originalElement)) {
+        await Core.ensureCharacterElement(Modules.autohunt.config.originalElement, 'deepdungeon');
+      }
+      const previousRetry = mod.config.retryIfWeeklyDamageUnder1M;
+      mod.config.retryIfWeeklyDamageUnder1M = true;
+      try {
+        await this.runCoreModule('deepdungeon');
+      } finally {
+        mod.config.retryIfWeeklyDamageUnder1M = previousRetry;
+      }
+      return await this.verifyDeepDungeon();
+    }
+    throw new Error(`알 수 없는 일일 단계: ${step}`);
+  };
+
+  Modules.daily.mainLoop = async function () {
+    let state = this.loadState();
+    if (!state) return;
+    Core.dailyActive = true;
+    this.running = true;
+    this.stopRequested = false;
+    Core.updateModuleButtons();
+
+    while (state.running && state.index < state.steps.length && !this.stopRequested) {
+      const step = state.steps[state.index];
+      const label = DAILY_STEP_LABELS[step] || step;
+      Core.log('daily', `▶ [${state.index + 1}/${state.steps.length}] ${label} 시작`);
+      try {
+        const detail = await this.runStep(step);
+        state.reports.push({ step, label, ok: true, detail });
+        Core.log('daily', `✅ ${label}: ${detail}`);
+      } catch (e) {
+        const detail = e && e.message ? e.message : String(e);
+        state.reports.push({ step, label, ok: false, detail });
+        Core.log('daily', `⚠ ${label} 이슈: ${detail} → 다음 작업으로 이동`);
+      }
+      state.index += 1;
+      this.saveState(state);
+      await Core.humanDelay(900, 1600);
+    }
+
+    const stopped = this.stopRequested || !state.running;
+    state.running = false;
+    this.saveState(state);
+    Core.dailyActive = false;
+    this.running = false;
+    Core.activeModuleId = null;
+    Core.updateModuleButtons();
+
+    if (stopped) {
+      Core.showBanner('daily', '사용자 요청으로 일일 연속 실행을 정지했습니다.', false);
+      return;
+    }
+
+    const issues = state.reports.filter((report) => !report.ok);
+    const summary = state.reports
+      .map((report) => `${report.ok ? '✅' : '⚠'} ${report.label}: ${report.detail}`)
+      .join('\n');
+    if (issues.length === 0) {
+      Core.showBanner('daily', '선택한 일일 작업을 모두 완료하고 사후 확인했습니다.', true);
+      Core.playCompleteSound();
+    } else {
+      Core.showBanner('daily', `${issues.length}개 작업에서 이슈가 있었습니다. 일일 로그를 확인해주세요.`, false);
+      Core.playStopSound();
+    }
+    alert(`일일 연속 실행 결과\n\n${summary || '실행한 작업 없음'}`);
+  };
+
+  Core.startDaily = function () {
+    const mod = Modules.daily;
+    if (Core.dailyActive || mod.running || Core.activeModuleId) {
+      Core.showBanner('daily', '다른 작업이 실행 중입니다. 정지 후 다시 시작해주세요.');
+      return;
+    }
+    const steps = ['dungeon', 'boss', 'autohunt', 'deepdungeon'].filter((key) => mod.config[key]);
+    if (steps.length === 0) {
+      Core.showBanner('daily', '실행할 일일 작업을 하나 이상 체크해주세요.');
+      return;
+    }
+    if (
+      (steps.includes('dungeon') || steps.includes('autohunt') || steps.includes('deepdungeon')) &&
+      !Core.ELEMENT_OPTIONS.includes(Modules.autohunt.config.originalElement)
+    ) {
+      Core.showBanner('daily', '자동사냥 탭에서 원래 속성을 먼저 선택해주세요.');
+      return;
+    }
+    if (steps.includes('boss')) {
+      const checkedBosses = [...document.querySelectorAll('#lrm-boss-ref-panel .lrm-boss-check:checked')];
+      if (checkedBosses.length === 0) {
+        Core.showBanner('daily', '보스 탭에서 일일 실행할 보스를 하나 이상 체크해주세요.');
+        return;
+      }
+    }
+    const state = {
+      running: true,
+      index: 0,
+      steps,
+      reports: [],
+      startedAt: Date.now(),
+    };
+    mod.saveState(state);
+    mod.mainLoop().catch((e) => {
+      Core.dailyActive = false;
+      mod.running = false;
+      Core.showBanner('daily', `일일 실행 자체 오류: ${e.message}`, false);
+      Core.updateModuleButtons();
+    });
+  };
+
+  Core.stopDaily = function () {
+    const mod = Modules.daily;
+    mod.stopRequested = true;
+    const state = mod.loadState();
+    if (state) {
+      state.running = false;
+      mod.saveState(state);
+    }
+    if (Core.activeModuleId && Modules[Core.activeModuleId]) {
+      Core.requestStopModule(Core.activeModuleId);
+    }
+    if (window.__bossMacro) {
+      window.__bossMacro.stopRequested = true;
+      localStorage.removeItem('lrm-boss-ref-pending');
+      localStorage.removeItem('lrm-boss-ref-queue');
     }
   };
 
@@ -5160,6 +5416,68 @@
     }
   }
 
+  function buildDailyTab(container) {
+    const mod = Modules.daily;
+    const refs = UIRefs.daily;
+    Core.loadModuleConfig('daily', DAILY_CONFIG_KEYS);
+
+    const intro = document.createElement('div');
+    intro.textContent = '체크한 작업을 던전 → 보스 → 자동사냥 → 심층던전 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
+    intro.style.cssText = 'color:#ccc; font-size:11px; line-height:1.5; margin-bottom:8px;';
+    container.appendChild(intro);
+
+    const inputs = [];
+    [
+      ['dungeon', '던전 — 입장 가능한 던전 모두 클리어'],
+      ['boss', '보스 — 선택한 보스 중 주간 보상이 남은 보스'],
+      ['autohunt', '자동사냥 — 설정한 행동력 제한까지'],
+      ['deepdungeon', '심층던전 — 주간 누적 피해 100만까지'],
+    ].forEach(([key, text]) => {
+      const row = document.createElement('label');
+      row.style.cssText = 'display:flex; align-items:flex-start; gap:7px; margin:7px 0; cursor:pointer;';
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.checked = !!mod.config[key];
+      check.addEventListener('change', () => {
+        mod.config[key] = check.checked;
+        Core.saveModuleConfig('daily', DAILY_CONFIG_KEYS);
+      });
+      const label = document.createElement('span');
+      label.textContent = text;
+      row.append(check, label);
+      container.appendChild(row);
+      inputs.push(check);
+    });
+
+    const note = document.createElement('div');
+    note.textContent = '보스 보상이 모두 끝난 날은 수호자에 입장한 뒤 포기하여 일일 도전 과제만 처리합니다. 문제가 생긴 단계는 기록하고 다음 단계로 넘어갑니다.';
+    note.style.cssText = 'color:#f5a623; font-size:10px; line-height:1.45; margin:8px 0;';
+    container.appendChild(note);
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; gap:6px; margin-top:6px;';
+    const startBtn = document.createElement('button');
+    startBtn.textContent = '일일 실행';
+    startBtn.style.cssText = btnStyle('#2e7d32');
+    const stopBtn = document.createElement('button');
+    stopBtn.textContent = '정지';
+    stopBtn.style.cssText = btnStyle('#c62828');
+    stopBtn.disabled = true;
+    startBtn.addEventListener('click', () => Core.startDaily());
+    stopBtn.addEventListener('click', () => Core.stopDaily());
+    row.append(startBtn, stopBtn);
+    container.appendChild(row);
+
+    const statusEl = document.createElement('div');
+    statusEl.textContent = '대기중';
+    statusEl.style.cssText = 'font-size:11px; color:#aaa; margin-top:5px;';
+    container.appendChild(statusEl);
+    refs.startBtn = startBtn;
+    refs.stopBtn = stopBtn;
+    refs.statusEl = statusEl;
+    refs.inputs = inputs;
+  }
+
   function buildPanel() {
     const panel = document.createElement('div');
     panel.id = 'lrm-panel';
@@ -5173,14 +5491,24 @@
 
     const header = document.createElement('div');
     header.id = 'lrm-drag-handle';
-    header.textContent = '🎯 라니스 통합 매크로';
-    header.style.cssText = 'cursor:move; font-weight:bold; padding:8px 10px; background:#262626; border-radius:8px 8px 0 0; user-select:none;';
+    header.style.cssText = 'cursor:move; font-weight:bold; padding:6px 8px 6px 10px; background:#262626; border-radius:8px 8px 0 0; user-select:none; display:flex; align-items:center; justify-content:space-between;';
+    const title = document.createElement('span');
+    title.textContent = '🎯 라니스 통합 매크로';
+    const dailyHeaderBtn = document.createElement('button');
+    dailyHeaderBtn.textContent = '일일';
+    dailyHeaderBtn.style.cssText = 'padding:4px 12px; border:1px solid #f5a623; border-radius:12px; background:#1a1a1a; color:#f5a623; cursor:pointer; font-size:11px; font-weight:bold;';
+    dailyHeaderBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+    dailyHeaderBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      switchTab('daily');
+    });
+    header.append(title, dailyHeaderBtn);
     panel.appendChild(header);
 
     const tabBar = document.createElement('div');
     tabBar.style.cssText = 'display:flex; border-bottom:1px solid #444; flex-wrap:wrap;';
     const tabButtons = {};
-    Object.keys(MODULE_LABELS).forEach((id) => {
+    Object.keys(MODULE_LABELS).filter((id) => id !== 'daily').forEach((id) => {
       const tabBtn = document.createElement('button');
       tabBtn.textContent = MODULE_LABELS[id];
       tabBtn.style.cssText = 'flex:1; min-width:60px; padding:6px 0; background:#1a1a1a; color:#eee; border:none; cursor:pointer; font-size:12px;';
@@ -5205,15 +5533,20 @@
     buildDungeonTab(tabContents.dungeon);
     buildDeepDungeonTab(tabContents.deepdungeon);
     buildBossTab(tabContents.boss);
+    buildDailyTab(tabContents.daily);
     panel.appendChild(contentWrap);
 
     function switchTab(id) {
       activeTab = id;
       Object.keys(tabContents).forEach((k) => {
         tabContents[k].style.display = k === id ? 'block' : 'none';
-        tabButtons[k].style.background = k === id ? '#333' : '#1a1a1a';
-        tabButtons[k].style.borderBottom = k === id ? '2px solid #f5a623' : 'none';
+        if (tabButtons[k]) {
+          tabButtons[k].style.background = k === id ? '#333' : '#1a1a1a';
+          tabButtons[k].style.borderBottom = k === id ? '2px solid #f5a623' : 'none';
+        }
       });
+      dailyHeaderBtn.style.background = id === 'daily' ? '#f5a623' : '#1a1a1a';
+      dailyHeaderBtn.style.color = id === 'daily' ? '#111' : '#f5a623';
     }
     switchTab(activeTab);
 
@@ -5279,7 +5612,18 @@
   function init() {
     if (document.getElementById('lrm-panel')) return;
     buildPanel();
-    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 / 보스)');
+    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 / 보스 / 일일)');
+    setTimeout(() => {
+      const dailyState = Modules.daily.loadState();
+      if (!dailyState || Modules.daily.running) return;
+      Core.log('daily', `페이지 이동 후 일일 작업 재개 (${dailyState.index + 1}/${dailyState.steps.length})`);
+      Modules.daily.mainLoop().catch((e) => {
+        Core.dailyActive = false;
+        Modules.daily.running = false;
+        Core.showBanner('daily', `일일 실행 재개 오류: ${e.message}`, false);
+        Core.updateModuleButtons();
+      });
+    }, 1800);
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
@@ -5905,23 +6249,11 @@
   };
 
   M.isBossAlreadyCleared = (bossLabel) => {
-    const headings = M.findAllLeavesByExactText(bossLabel);
-    const all = M.queryAll('*');
-    for (const heading of headings) {
-      const headingIdx = all.indexOf(heading);
-      if (headingIdx === -1) continue;
-      for (let i = headingIdx + 1; i < all.length; i++) {
-        const el = all[i];
-        if (el.children.length !== 0) continue;
-        const text = el.textContent.trim();
-        if (text && text !== bossLabel && BOSS_CARD_BOUNDARY_NAMES.includes(text)) break;
-        if (text === '클리어' || text === '도전 완료') return true;
-        // 다른 보스의 실제 도전 버튼까지 갔다면 현재 후보 카드에는 클리어
-        // 표시가 없다는 뜻이므로 다음 동명 후보를 확인한다.
-        if (['도전하기', '계속하기', '재도전'].includes(text)) break;
-      }
-    }
-    return false;
+    // 보상 단계 목록에는 미완료 보스도 항상 마지막 단계 이름으로 "클리어"가
+    // 표시된다. 이 텍스트만 검사하면 모든 보스를 완료로 오인한다. 실제 완료
+    // 카드에서만 행동 버튼이 "재도전"으로 바뀌므로 그 상태를 기준으로 삼는다.
+    const action = M.findBossCardActionButton(bossLabel);
+    return !!action && action.textContent.trim() === '재도전';
   };
 
   M.getBossElementFromList = (bossLabel) => {
@@ -6414,6 +6746,141 @@
 
   // 약한 순서 (BOSS_REGISTRY 등록 순서와 동일)
   const BOSS_ORDER = ['fallenGuardian', 'voidEmperor', 'vineEnt', 'vineWraith'];
+
+  M.getBossCardContainer = (bossLabel) => {
+    const milestoneLabels = ['클리어', '13%', '25%', '38%', '50%', '63%', '75%', '88%'];
+    for (const heading of M.findAllLeavesByExactText(bossLabel)) {
+      let node = heading.parentElement;
+      for (let depth = 0; node && depth < 9; depth++, node = node.parentElement) {
+        const text = node.textContent || '';
+        const action = [...node.querySelectorAll('button')]
+          .find((button) => ['도전하기', '계속하기', '재도전'].includes(button.textContent.trim()));
+        const milestoneCount = milestoneLabels.filter((label) =>
+          [...node.querySelectorAll('*')].some((el) => el.children.length === 0 && el.textContent.trim() === label)
+        ).length;
+        if (action && milestoneCount >= 8) return node;
+      }
+    }
+    return null;
+  };
+
+  M.getWeeklyRewardProgress = (bossLabel) => {
+    const card = M.getBossCardContainer(bossLabel);
+    if (!card) return null;
+    const labels = ['클리어', '13%', '25%', '38%', '50%', '63%', '75%', '88%'];
+    let achieved = 0;
+    const details = [];
+    for (const label of labels) {
+      const leaf = [...card.querySelectorAll('*')]
+        .find((el) => el.children.length === 0 && el.textContent.trim() === label);
+      if (!leaf) {
+        details.push({ label, achieved: false });
+        continue;
+      }
+      const candidates = [leaf, leaf.previousElementSibling, leaf.parentElement,
+        leaf.parentElement && leaf.parentElement.previousElementSibling,
+        leaf.parentElement && leaf.parentElement.parentElement]
+        .filter(Boolean);
+      const orange = candidates.some((el) => {
+        const style = getComputedStyle(el);
+        const combined = `${style.color} ${style.borderColor} ${style.backgroundColor}`;
+        return /rgb\(255,\s*152,\s*0\)/.test(combined);
+      });
+      if (orange) achieved++;
+      details.push({ label, achieved: orange });
+    }
+    return { achieved, total: labels.length, exhausted: achieved >= labels.length, details };
+  };
+
+  M.claimBossRewards = async () => {
+    let claimed = 0;
+    for (let round = 0; round < 12; round++) {
+      const button = M.queryAll('button').find((el) =>
+        ['보상 모두 받기', '보상 받기'].includes(el.textContent.trim()) &&
+        M.isVisible(el) && !el.disabled
+      );
+      if (!button) break;
+      await M.humanPause(650, 1100);
+      button.click();
+      claimed++;
+      await M.humanPause(900, 1500);
+      const confirm = M.findConfirmInOpenDialog(['확인', '받기']);
+      if (confirm) {
+        await M.humanPause(450, 800);
+        confirm.click();
+        await M.humanPause(700, 1200);
+      }
+    }
+    return claimed;
+  };
+
+  M.waitForBossQueueEnd = async (timeoutMs = 45 * 60 * 1000) => {
+    const start = Date.now();
+    while (localStorage.getItem(QUEUE_KEY)) {
+      if (M.stopRequested) throw new Error('사용자가 보스 실행을 정지했습니다.');
+      if (Date.now() - start > timeoutMs) throw new Error('보스 큐 완료 대기 시간이 초과되었습니다.');
+      await M.sleep(1000);
+    }
+  };
+
+  M.runDailySelectedBosses = async () => {
+    const selected = BOSS_ORDER.filter((key) => loadSelectedBosses().includes(key));
+    if (selected.length === 0) throw new Error('선택한 보스가 없습니다.');
+
+    if (location.pathname.replace(/\/$/, '') !== '/personal-boss') {
+      location.href = 'https://lanis.me/personal-boss';
+      return await new Promise(() => {});
+    }
+
+    await M.waitFor(() => selected.some((key) => M.findBossCardActionButton(BOSS_REGISTRY[key].label)), 10000, 250);
+    await M.claimBossRewards();
+
+    const progressBefore = selected.map((key) => ({
+      key,
+      label: BOSS_REGISTRY[key].label,
+      progress: M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label),
+    }));
+    const unreadable = progressBefore.filter((item) => !item.progress);
+    if (unreadable.length) {
+      throw new Error(`주간 보상 횟수를 읽지 못한 보스: ${unreadable.map((item) => item.label).join(', ')}`);
+    }
+    const remaining = progressBefore.filter((item) => !item.progress.exhausted).map((item) => item.key);
+
+    if (remaining.length === 0) {
+      if (M.uiLog) M.uiLog('선택한 보스의 주간 보상 소진 확인 → 수호자 도전 후 포기');
+      await M.enterBossBattle(BOSS_REGISTRY.fallenGuardian.label);
+      const entered = await M.waitFor(() => M.isInBattleScreen(BOSS_REGISTRY.fallenGuardian.label), 10000, 250);
+      if (!entered) throw new Error('일일 과제용 수호자 전투 진입을 확인하지 못했습니다.');
+      await M.abandonCurrentBossAttempt();
+      return '선택 보스 주간 보상 소진 확인, 수호자 도전 후 포기 완료';
+    }
+
+    if (M.uiLog) {
+      M.uiLog(`주간 보상이 남은 보스: ${remaining.map((key) => BOSS_REGISTRY[key].label).join(', ')}`);
+    }
+    const existingQueue = localStorage.getItem(QUEUE_KEY);
+    if (existingQueue) {
+      if (!M.isRunning) M.continueBossQueue().catch((e) => M.uiLog && M.uiLog(`❌ ${e.message}`));
+      await M.waitForBossQueueEnd();
+    } else {
+      await M.startBossQueue(remaining);
+      await M.waitForBossQueueEnd();
+    }
+
+    if (location.pathname.replace(/\/$/, '') !== '/personal-boss') {
+      location.href = 'https://lanis.me/personal-boss';
+      return await new Promise(() => {});
+    }
+    await M.claimBossRewards();
+    const failed = remaining.filter((key) => {
+      const progress = M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label);
+      return !progress || !progress.exhausted;
+    });
+    if (failed.length) {
+      throw new Error(`처치 후에도 주간 보상 완료를 확인하지 못함: ${failed.map((key) => BOSS_REGISTRY[key].label).join(', ')}`);
+    }
+    return `보상 잔여 보스 ${remaining.length}종 처치 및 보상 수령 확인`;
+  };
 
   // 선택한 보스들을 약한 순서대로 정렬해 큐에 저장하고 시작
   M.startBossQueue = async (selectedKeys) => {
