@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.4.3-stable
-// @description  재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 자동클리어 매크로를 하나의 패널로 통합. 탭으로 전환, 패널 위치 저장, 동시에 하나의 모듈만 실행되도록 보호.
+// @version      1.5.0-stable
+// @description  재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 자동클리어와 개인 보스 자동화를 제공. 기존 통합 패널과 보스 도구는 서로 독립적으로 동작.
 // @match        https://lanis.me/*
 // @run-at       document-idle
 // @grant        none
@@ -255,6 +255,120 @@
     if (!(await Core.safeClick(() =>
       [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim().endsWith(suffixText))
     ))) throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
+  };
+
+  // ---------------- 캐릭터 속성 확인/변경 (자동사냥·던전 공용) ----------------
+  Core.ELEMENT_OPTIONS = ['불', '물', '번개', '별', '바람', '빛', '어둠'];
+
+  Core.gameElements = function (selector) {
+    return [...document.querySelectorAll(selector)].filter(
+      (el) =>
+        !el.closest('#lrm-panel') &&
+        !el.closest('#lrm-banner') &&
+        !el.closest('#lrm-boss-ref-panel')
+    );
+  };
+
+  Core.readCharacterElementOnStatus = function () {
+    const leaf = Core.gameElements('*').find(
+      (el) =>
+        el.children.length === 0 &&
+        /^속성\s*:\s*(불|물|번개|별|바람|빛|어둠)$/.test(el.textContent.trim())
+    );
+    if (!leaf) return null;
+    const match = leaf.textContent.trim().match(/^속성\s*:\s*(.+)$/);
+    return match ? match[1].trim() : null;
+  };
+
+  Core.goToCharacterPage = async function (itemText, expectedPath) {
+    await Core.clickNavMenuExact('캐릭', itemText);
+    const arrived = await Core.waitFor(
+      () => location.pathname.replace(/\/$/, '') === expectedPath,
+      10000,
+      250
+    );
+    if (!arrived) throw new Error(`캐릭 메뉴 "${itemText}" 이동 확인 실패`);
+    await Core.humanDelay(700, 1300);
+  };
+
+  Core.useElementStone = async function (targetElement, moduleId) {
+    const stoneName = `${targetElement}의 돌`;
+    await Core.goToCharacterPage('인벤토리', '/inventory');
+
+    const consumableTab = await Core.waitFor(
+      () =>
+        Core.gameElements('[role="tab"], button').find(
+          (el) => el.textContent.trim() === '소모품' && el.getClientRects().length > 0
+        ) || null,
+      8000
+    );
+    if (!consumableTab) throw new Error('인벤토리 소모품 탭을 찾지 못했습니다.');
+    if (!(await Core.safeClick(consumableTab, { beforeMin: 600, beforeMax: 1100, afterMin: 700, afterMax: 1300 }))) {
+      throw new Error('소모품 탭을 열지 못했습니다.');
+    }
+
+    let useButton = null;
+    for (let page = 1; page <= 20 && !useButton; page++) {
+      const row = Core.gameElements('tr').find(
+        (tr) => tr.textContent.includes(stoneName) && tr.getClientRects().length > 0
+      );
+      if (row) {
+        useButton =
+          [...row.querySelectorAll('button')].find(
+            (button) =>
+              ['사용', '사용하기'].includes(button.textContent.trim()) &&
+              button.getClientRects().length > 0
+          ) || null;
+        break;
+      }
+      const next = Core.gameElements('button').find(
+        (button) =>
+          button.getAttribute('aria-label') === 'Go to next page' &&
+          !button.disabled &&
+          button.getClientRects().length > 0
+      );
+      if (!next) break;
+      if (!(await Core.safeClick(next, { beforeMin: 500, beforeMax: 900, afterMin: 650, afterMax: 1100 }))) break;
+    }
+    if (!useButton) throw new Error(`인벤토리에서 "${stoneName}"을 찾지 못했습니다.`);
+
+    if (!(await Core.safeClick(useButton, { beforeMin: 900, beforeMax: 1600 }))) {
+      throw new Error(`"${stoneName}" 사용 버튼이 클릭 직전에 사라졌습니다.`);
+    }
+    const confirm = await Core.waitFor(
+      () => Core.findButtonInDialog('아이템 사용', '확인') || Core.findButtonInDialog(stoneName, '확인'),
+      6000
+    );
+    if (!confirm) throw new Error(`"${stoneName}" 사용 확인창을 찾지 못했습니다.`);
+    if (!(await Core.safeClick(confirm, { beforeMin: 700, beforeMax: 1200, afterMin: 1200, afterMax: 1800 }))) {
+      throw new Error(`"${stoneName}" 사용을 확정하지 못했습니다.`);
+    }
+    Core.log(moduleId, `${stoneName} 1개 사용 완료`);
+  };
+
+  Core.ensureCharacterElement = async function (targetElement, moduleId) {
+    if (!Core.ELEMENT_OPTIONS.includes(targetElement)) {
+      throw new Error(`지원하지 않는 목표 속성입니다: ${targetElement}`);
+    }
+
+    await Core.goToCharacterPage('내 정보', '/status');
+    let currentElement = await Core.waitFor(() => Core.readCharacterElementOnStatus(), 8000, 250);
+    if (!currentElement) throw new Error('내 정보에서 현재 캐릭터 속성을 읽지 못했습니다.');
+
+    if (currentElement === targetElement) {
+      Core.log(moduleId, `속성 확인 완료: ${targetElement} (변경 불필요)`);
+      return true;
+    }
+
+    Core.log(moduleId, `속성 불일치: 현재 ${currentElement} / 설정 ${targetElement} → ${targetElement}의 돌 사용`);
+    await Core.useElementStone(targetElement, moduleId);
+    await Core.goToCharacterPage('내 정보', '/status');
+    currentElement = await Core.waitFor(() => Core.readCharacterElementOnStatus(), 8000, 250);
+    if (currentElement !== targetElement) {
+      throw new Error(`속성 변경 검증 실패: 현재 ${currentElement || '확인 불가'} / 목표 ${targetElement}`);
+    }
+    Core.log(moduleId, `속성 변경 및 재검증 완료: ${targetElement}`);
+    return true;
   };
 
   Core.bankDepositAll = async function (moduleId) {
@@ -1254,6 +1368,7 @@
     stopRequested: false,
     cycleCount: 0,
     config: {
+      originalElement: '',
       groundSuffix: '광산',
       floor: null,
       goldThreshold: 1000000,
@@ -1433,6 +1548,8 @@
   Modules.autohunt.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
+    Core.log('autohunt', `시작 전 원래 속성(${mod.config.originalElement}) 확인`);
+    await Core.ensureCharacterElement(mod.config.originalElement, 'autohunt');
     Core.log(
       'autohunt',
       `매크로 시작: 사냥터=${mod.config.groundSuffix}${mod.config.floor ? ' ' + mod.config.floor + '층' : ''}, 입금 기준=${mod.config.goldThreshold.toLocaleString()}G, 최소 행동력=${mod.config.minEnergy}`
@@ -1741,6 +1858,7 @@
     stopRequested: false,
     cycleCount: 0,
     config: {
+      originalElement: '',
       enableDailySewer: true,
       rerollMinTokens: 50,
       instantClear: {
@@ -2652,6 +2770,7 @@
       localStorage.setItem(
         DUNGEON_CONFIG_KEY,
         JSON.stringify({
+          originalElement: this.config.originalElement,
           enableDailySewer: this.config.enableDailySewer,
           rerollMinTokens: this.config.rerollMinTokens,
           instantClear: this.config.instantClear,
@@ -2668,6 +2787,7 @@
       const raw = localStorage.getItem(DUNGEON_CONFIG_KEY);
       if (!raw) return;
       const saved = JSON.parse(raw);
+      if (Core.ELEMENT_OPTIONS.includes(saved.originalElement)) this.config.originalElement = saved.originalElement;
       if (typeof saved.enableDailySewer === 'boolean') this.config.enableDailySewer = saved.enableDailySewer;
       if (typeof saved.rerollMinTokens === 'number') this.config.rerollMinTokens = saved.rerollMinTokens;
       if (saved.instantClear) {
@@ -2718,6 +2838,8 @@
   Modules.dungeon.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = mod.loadClearCount();
+    Core.log('dungeon', `시작 전 원래 속성(${mod.config.originalElement}) 확인`);
+    await Core.ensureCharacterElement(mod.config.originalElement, 'dungeon');
     Core.log('dungeon', `던전 자동클리어 시작 (오늘 이미 클리어한 던전: ${mod.cycleCount}개)`);
 
     const resumeDungeon = mod.detectResumeDungeon();
@@ -4241,6 +4363,14 @@
   Core.startModule = function (moduleId) {
     const mod = Modules[moduleId];
     if (!mod) return;
+    if (
+      (moduleId === 'autohunt' || moduleId === 'dungeon') &&
+      !Core.ELEMENT_OPTIONS.includes(mod.config.originalElement)
+    ) {
+      Core.showBanner(moduleId, '시작 전에 원래 속성을 선택해주세요.');
+      Core.log(moduleId, '원래 속성 미선택으로 시작을 차단했습니다.');
+      return;
+    }
     if (Core.activeModuleId && Core.activeModuleId !== moduleId) {
       Core.showBanner(
         moduleId,
@@ -4457,12 +4587,33 @@
     Core.updateModuleButtons();
   }
 
-  const AUTOHUNT_PERSIST_KEYS = ['groundSuffix', 'floor', 'goldThreshold', 'minEnergy', 'ignoreProtectionOff'];
+  const AUTOHUNT_PERSIST_KEYS = ['originalElement', 'groundSuffix', 'floor', 'goldThreshold', 'minEnergy', 'ignoreProtectionOff'];
 
   function buildAutohuntTab(container) {
     const mod = Modules.autohunt;
     const refs = UIRefs.autohunt;
     Core.loadModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
+
+    container.appendChild(labelEl('원래 속성 (시작 전 자동 확인·변경)'));
+    const elementSelect = document.createElement('select');
+    elementSelect.style.cssText = inputStyle();
+    const elementPlaceholder = document.createElement('option');
+    elementPlaceholder.value = '';
+    elementPlaceholder.textContent = '속성 선택 필요';
+    elementPlaceholder.selected = !Core.ELEMENT_OPTIONS.includes(mod.config.originalElement);
+    elementSelect.appendChild(elementPlaceholder);
+    Core.ELEMENT_OPTIONS.forEach((element) => {
+      const option = document.createElement('option');
+      option.value = element;
+      option.textContent = element;
+      option.selected = element === mod.config.originalElement;
+      elementSelect.appendChild(option);
+    });
+    elementSelect.addEventListener('change', (e) => {
+      mod.config.originalElement = e.target.value;
+      Core.saveModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
+    });
+    container.appendChild(elementSelect);
 
     container.appendChild(labelEl('사냥터'));
     const groundSelect = document.createElement('select');
@@ -4569,7 +4720,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [groundSelect, floorSelect, goldInput, energyInput, protCheck];
+    refs.inputs = [elementSelect, groundSelect, floorSelect, goldInput, energyInput, protCheck];
   }
 
   const RAREMAP_PERSIST_KEYS = ['maxCycles'];
@@ -4624,6 +4775,27 @@
     const mod = Modules.dungeon;
     const refs = UIRefs.dungeon;
     mod.loadConfigIntoSelf();
+
+    container.appendChild(labelEl('원래 속성 (시작 전 자동 확인·변경)'));
+    const elementSelect = document.createElement('select');
+    elementSelect.style.cssText = inputStyle();
+    const elementPlaceholder = document.createElement('option');
+    elementPlaceholder.value = '';
+    elementPlaceholder.textContent = '속성 선택 필요';
+    elementPlaceholder.selected = !Core.ELEMENT_OPTIONS.includes(mod.config.originalElement);
+    elementSelect.appendChild(elementPlaceholder);
+    Core.ELEMENT_OPTIONS.forEach((element) => {
+      const option = document.createElement('option');
+      option.value = element;
+      option.textContent = element;
+      option.selected = element === mod.config.originalElement;
+      elementSelect.appendChild(option);
+    });
+    elementSelect.addEventListener('change', (e) => {
+      mod.config.originalElement = e.target.value;
+      mod.saveConfig();
+    });
+    container.appendChild(elementSelect);
 
     const dailyRow = document.createElement('div');
     dailyRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
@@ -4751,7 +4923,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [dailyCheck, rerollInput, ...instantInputs];
+    refs.inputs = [elementSelect, dailyCheck, rerollInput, ...instantInputs];
   }
 
   const DEEPDUNGEON_CONFIG_KEY = 'lrm-deepdungeon-config';
@@ -5063,3 +5235,2880 @@
     window.addEventListener('DOMContentLoaded', init);
   }
 })();
+
+// ==================== 독립 개인 보스 자동화 도구 ====================
+// ============================================================================
+// 라니스 개인 보스전 자동화 로직 - 참고용 프로토타입
+// (기존 lanis_user.js 통합 매크로에는 아직 병합하지 않음. 검증 완료 후 합칠 예정)
+//
+// 템퍼몽키에 이 파일을 별도 스크립트로 등록하면, 보스 도전 화면에서 브라우저
+// 패널에서 직업과 보스를 선택해 실행하거나, 콘솔(F12)에서 직업별
+// run* 함수를 직접 호출할 수 있음.
+//
+// 마술은 수호자·황제·엔트 로직이 연결되어 있으며, 망령은 실전 공략이
+// 확정되기 전까지 안전하게 실행을 중단하도록 되어 있음.
+//
+// ⚠️ 매우 중요한 안전 규칙 ⚠️
+// 화면 오른쪽의 "🎯 라니스 통합 매크로" GUI 패널은 사용자가 직접 조작하는
+// 영역이며, 이 보스전 스크립트는 그 패널의 어떤 버튼/요소도 절대 클릭하거나
+// 검색 대상으로 삼으면 안 됨. 아래 M.queryAll 계열 함수들은 macroPanelRoot에
+// 포함된 요소를 항상 제외하도록 구현되어 있음 (이 규칙을 지우지 말 것).
+//
+// 과거 사고 사례: "회복" 액션 확인 버튼을 찾을 때 페이지 전체에서 '시작'
+// 이라는 일반 텍스트로 fallback 검색을 했다가, 매크로 패널의 "재전직" 탭
+// "시작" 버튼을 잘못 클릭해 실제 재전직 자동매크로가 의도치 않게 실행된 적
+// 있음. 그래서:
+//   1) 모든 요소 검색은 macroPanelRoot를 제외한다 (M.queryAll)
+//   2) 확인/시작 버튼은 반드시 "현재 열려있는 모달(팝업) 안"에서만 찾는다
+//      (M.findConfirmInOpenDialog) - 페이지 전체에서 텍스트로 찾지 않는다
+// ============================================================================
+
+(function () {
+  const M = {};
+  window.__bossMacro = M;
+
+  // ==========================================================================
+  // 백그라운드(포커스 없는) 탭에서 메인 스레드 setTimeout이 크롬에 의해
+  // 강제로 느려지는 문제 대응. Web Worker 안에서 타이머를 돌리면 그 영향을
+  // 덜 받는다(기존 lanis_user.js의 Core._bgSleep과 동일한 패턴, 실전에서
+  // 자동사냥이 백그라운드에서도 안 멈추는 걸로 이미 검증된 방식).
+  //
+  // 단, Worker만으로 완전히 해결되는 건 아님(다른 분석에서 지적받은 내용):
+  //   - Worker는 DOM에 접근 못 하므로 클릭 자체는 결국 메인 스레드에서 해야 함
+  //   - Worker 타이머가 정확히 끝나도, 그 시점에 React 렌더링이 아직 안
+  //     끝나 있으면 찾는 버튼이 없을 수 있음
+  //   - 그래서 "고정 시간 대기 후 한 번만 확인"이 아니라, M.waitFor로
+  //     원하는 상태가 나타날 때까지 반복 확인하는 방식을 같이 써야 함
+  M._workerSleepFn = (function () {
+    try {
+      const workerCode =
+        'self.onmessage = function (e) {' +
+        '  var id = e.data.id, ms = e.data.ms;' +
+        '  setTimeout(function () { postMessage(id); }, ms);' +
+        '};';
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      const worker = new Worker(url);
+      const pending = new Map(); // id -> { resolve, ms, startedAt }
+      let counter = 0;
+      worker.onmessage = function (e) {
+        const entry = pending.get(e.data);
+        if (entry) {
+          pending.delete(e.data);
+          entry.resolve();
+        }
+      };
+      // 워커가 죽으면(에러) 대기 중이던 Promise들이 영원히 안 풀려서
+      // 매크로가 "말없이" 영구 정지하는 심각한 문제가 있었음. 워커가
+      // 죽으면 즉시 일반 setTimeout으로 전환하고, 그 시점에 이미 걸려있던
+      // 모든 대기도 각자 남은 시간만큼 일반 타이머로 넘겨서 마저 풀어준다.
+      worker.onerror = function () {
+        M._workerDead = true;
+        for (const [id, entry] of pending) {
+          pending.delete(id);
+          const elapsed = Date.now() - entry.startedAt;
+          const remaining = Math.max(0, entry.ms - elapsed);
+          setTimeout(entry.resolve, remaining);
+        }
+      };
+      return function (ms) {
+        if (M._workerDead) return new Promise((resolve) => setTimeout(resolve, ms));
+        return new Promise((resolve) => {
+          const id = ++counter;
+          pending.set(id, { resolve, ms, startedAt: Date.now() });
+          worker.postMessage({ id, ms });
+        });
+      };
+    } catch (e) {
+      return null; // 워커를 만들 수 없는 환경 - 아래에서 기존 방식으로 폴백
+    }
+  })();
+
+  M.sleep = (ms) => {
+    if (M._workerSleepFn && !M._workerDead) return M._workerSleepFn(ms);
+    return new Promise((r) => setTimeout(r, ms));
+  };
+  M.rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+  // 메뉴를 읽고 다음 행동을 결정하는 사람의 반응 시간을 흉내 내는 공통 대기.
+  // 백그라운드에서도 Worker 타이머를 사용하므로 탭 포커스 유무와 무관하게 동작.
+  M.humanPause = (min = 600, max = 1200) => M.sleep(M.rand(min, max));
+
+  // 원하는 조건(fn이 truthy를 반환)이 나타날 때까지 반복 확인.
+  // 고정 시간만 자고 한 번만 확인하는 것보다 훨씬 안정적 - 백그라운드
+  // 탭에서 렌더링이 늦어져도, 실제로 준비될 때까지 계속 재확인함.
+  // stopRequested가 켜지면 즉시 빠져나오게 해서 "정지" 버튼 반응성을 높인다.
+  M.waitFor = async function (fn, timeoutMs = 15000, intervalMs = 300) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (M.stopRequested) return null;
+      const result = fn();
+      if (result) return result;
+      await M.sleep(intervalMs);
+    }
+    return null;
+  };
+
+  // --- 매크로 패널(사용자 GUI) 격리 -----------------------------------------
+  function findMacroRoot() {
+    const marker = [...document.querySelectorAll('*')].find(
+      (el) => el.children.length === 0 && el.textContent.includes('라니스 통합 매크로')
+    );
+    let root = marker;
+    let steps = 0;
+    while (
+      root &&
+      steps < 10 &&
+      !(root.textContent.includes('심층던전') && root.textContent.includes('로그'))
+    ) {
+      root = root.parentElement;
+      steps++;
+    }
+    return root || null;
+  }
+  M.macroPanelRoot = findMacroRoot();
+  M.refreshMacroRoot = () => { M.macroPanelRoot = findMacroRoot(); };
+  M.inMacroPanel = (el) =>
+    !!el.closest('#lrm-panel, #lrm-banner') ||
+    (M.macroPanelRoot ? M.macroPanelRoot.contains(el) : false);
+  M.queryAll = (selector) =>
+    [...document.querySelectorAll(selector)].filter((el) => !M.inMacroPanel(el));
+
+  M.findButtonByText = (text) =>
+    M.queryAll('button').find(
+      (b) => b.textContent.trim() === text || b.getAttribute('aria-label') === text
+    ) || null;
+
+  M.findLeafByExactText = (text) =>
+    M.queryAll('*').find((el) => el.children.length === 0 && el.textContent.trim() === text) ||
+    null;
+
+  // 확인/시작류 버튼은 반드시 "현재 열려있는 모달" 안에서만 찾는다
+  // 실제로 화면에 "보이는" 요소인지 확인 (DOM엔 남아있지만 숨겨진 모달이
+  // 열린 모달로 취급되는 문제 방지)
+  M.isVisible = (el) => {
+    if (!el || !el.isConnected) return false;
+    if (el.getClientRects().length === 0) return false;
+    const style = getComputedStyle(el);
+    return style.visibility !== 'hidden' && style.display !== 'none';
+  };
+
+  M.findConfirmInOpenDialog = (candidates) => {
+    const dialogs = M.queryAll('[role="dialog"], [role="presentation"]').filter(M.isVisible);
+    for (const d of dialogs) {
+      for (const text of candidates) {
+        const btn = [...d.querySelectorAll('button')].find((b) => b.textContent.trim() === text && M.isVisible(b));
+        if (btn) return btn;
+      }
+    }
+    return null;
+  };
+
+  // "N개 스크롤 사용" 확정 버튼처럼, 안전 규칙(확인 버튼은 반드시 열린
+  // 모달 안에서만 찾는다)을 지키면서도 candidates가 정규식 패턴인 경우를
+  // 위한 버전. 스크롤 확정 버튼을 페이지 전체에서 찾던 문제(실전 지적됨)를
+  // 고치기 위해 추가.
+  M.findConfirmByPatternInOpenDialog = (pattern) => {
+    const dialogs = M.queryAll('[role="dialog"], [role="presentation"]').filter(M.isVisible);
+    for (const d of dialogs) {
+      const btn = [...d.querySelectorAll('button')].find((b) => pattern.test(b.textContent.trim()) && M.isVisible(b));
+      if (btn) return btn;
+    }
+    return null;
+  };
+
+  // --- 프리셋 -----------------------------------------------------------------
+  M.openPresetPanel = async () => {
+    const btn = await M.waitFor(() => M.findButtonByText('프리셋 변경'));
+    if (!btn) throw new Error('프리셋 변경 버튼 못찾음');
+    btn.click();
+    const tab = await M.waitFor(() => M.findButtonByText('프리셋'), 5000);
+    if (tab) {
+      tab.click();
+      await M.waitFor(() => M.queryAll('*').some((el) => el.children.length === 0 && el.textContent.trim() === '이 보스 전용'), 5000);
+    }
+  };
+  M.closePresetPanel = () => {
+    const b = M.findButtonByText('프리셋 패널 닫기');
+    if (b) b.click();
+  };
+  M.applyBossPreset = async (name) => {
+    await M.openPresetPanel();
+    const found = await M.waitFor(() => M.findLeafByExactText(name), 5000);
+    if (!found) {
+      M.closePresetPanel();
+      throw new Error('프리셋 이름 못찾음: ' + name);
+    }
+    // 클릭 직전에 다시 찾아서 클릭 (그 사이 화면이 다시 그려졌을 수 있으므로
+    // 처음 찾은 참조가 아니라 최신 요소를 클릭한다)
+    await M.sleep(M.rand(150, 350));
+    const fresh = M.findLeafByExactText(name);
+    if (!fresh) { M.closePresetPanel(); throw new Error('프리셋 이름 못찾음(재검색 실패): ' + name); }
+    fresh.click();
+    // 클릭이 실제로 반영됐는지 확인 없이 바로 패널을 닫으면 적용이 누락될
+    // 수 있다는 지적(실전 검증 전 반드시 고칠 항목)에 따라, 게임이 보여주는
+    // "프리셋 'OO'을(를) 적용했습니다" 토스트를 짧게 기다린다. 토스트
+    // 문구가 다르거나 너무 빨리 사라져 못 잡더라도(치명적이지 않음) 그냥
+    // 진행한다 - 완전히 막지는 않되, 확인 시도는 반드시 한다.
+    const confirmed = await M.waitFor(
+      () => M.queryAll('*').some((el) => el.children.length === 0 && el.textContent.includes(`'${name}'`) && el.textContent.includes('적용')),
+      2500,
+      150
+    );
+    if (M.uiLog && !confirmed) M.uiLog(`(참고) 프리셋 "${name}" 적용 확인 토스트를 못 봤음 - 계속 진행`);
+    M.closePresetPanel();
+  };
+
+  // --- 턴 진행 / 회복 / 스크롤 --------------------------------------------------
+  M.clickTurn = async (n) => {
+    const btn = await M.waitFor(() => M.findButtonByText(`턴 진행${n}턴`));
+    if (!btn) throw new Error('턴 진행 버튼 못찾음: ' + n);
+    btn.click();
+    const startBtn = await M.waitFor(() => M.findConfirmInOpenDialog(['전투 시작']));
+    if (!startBtn) throw new Error('전투 시작 확인 버튼(모달 내) 못찾음');
+    // 클릭 직전 재검색: 모달이 그 사이 다시 그려졌을 수 있음
+    await M.sleep(M.rand(100, 300));
+    const freshStart = M.findConfirmInOpenDialog(['전투 시작']) || startBtn;
+    freshStart.click();
+    // 턴 진행 결과가 로그/HP에 반영될 시간을 기다림 (고정이지만, 이후
+    // 각 단계에서 다시 waitFor로 실제 결과를 확인하므로 큰 문제 없음)
+    await M.sleep(1800);
+  };
+
+  M.clickRecover = async () => {
+    const btn = await M.waitFor(() => M.findButtonByText('회복2턴'));
+    if (!btn) throw new Error('회복 버튼 못찾음');
+    btn.click();
+    const startBtn = await M.waitFor(() => M.findConfirmInOpenDialog(['회복', '전투 시작', '회복 시작']));
+    if (!startBtn) throw new Error('회복 확인 버튼(모달 내) 못찾음');
+    await M.sleep(M.rand(100, 300));
+    const freshStart = M.findConfirmInOpenDialog(['회복', '전투 시작', '회복 시작']) || startBtn;
+    freshStart.click();
+    await M.sleep(1800);
+  };
+
+  M.useScrolls = async (names) => {
+    const openBtn = await M.waitFor(() => M.queryAll('button').find((b) => b.textContent.trim().startsWith('전투 스크롤 사용')));
+    if (!openBtn) throw new Error('전투 스크롤 사용 버튼 못찾음');
+    openBtn.click();
+    await M.waitFor(() => M.findLeafByExactText(`스크롤:${names[0]}`), 5000);
+    // 이미 "활성" 상태로 지속 중인 스크롤을 다시 클릭하면 오히려 꺼버리게
+    // 되는 문제가 실전에서 확인됨. 그래서 이미 활성인 항목은 건드리지 않고
+    // 새로 켜야 하는 것만 클릭한다.
+    let newlySelected = 0;
+    for (const name of names) {
+      const label = `스크롤:${name}`;
+      const el = await M.waitFor(() => M.findLeafByExactText(label), 5000);
+      if (!el) throw new Error('스크롤 옵션 못찾음: ' + label);
+      const alreadyActive = el.parentElement && el.parentElement.textContent.includes('활성');
+      if (alreadyActive) continue;
+      el.click();
+      await M.sleep(M.rand(150, 300));
+      newlySelected++;
+    }
+    if (newlySelected === 0) {
+      // 원하는 스크롤이 전부 이미 활성 상태 - 새로 쓸 필요 없으니 취소로 닫음
+      const cancelBtn = M.findConfirmInOpenDialog(['취소']);
+      if (cancelBtn) cancelBtn.click();
+      return;
+    }
+    const confirmPattern = /^\d+개 스크롤 사용$/;
+    const confirmBtn = await M.waitFor(() => M.findConfirmByPatternInOpenDialog(confirmPattern));
+    if (!confirmBtn) throw new Error('스크롤 확정 버튼(모달 내) 못찾음');
+    await M.sleep(M.rand(100, 300));
+    const freshConfirm = M.findConfirmByPatternInOpenDialog(confirmPattern) || confirmBtn;
+    freshConfirm.click();
+    await M.sleep(800);
+  };
+
+  // --- 상태 읽기 (HP/MP, 봉인된 어빌리티) --------------------------------------
+  M.getHpMpNumbers = () => {
+    const hpLabels = M.queryAll('*').filter(
+      (el) => el.children.length === 0 && el.textContent.trim() === 'HP'
+    );
+    const mpLabels = M.queryAll('*').filter(
+      (el) => el.children.length === 0 && el.textContent.trim() === 'MP'
+    );
+    // React가 다시 그리는 찰나에 라벨이 아직 없거나 숫자 파싱이 실패하는
+    // 경우가 있음(실전에서 확인 가능성 지적됨). 예외를 던지는 대신 null을
+    // 반환해서, 호출부가 M.waitForValidState 같은 걸로 정상값이 나올 때까지
+    // 기다릴 수 있게 한다. NaN이 섞이면 "보스가 죽었다"고 오판할 수 있어
+    // 반드시 걸러야 함.
+    const parse = (el) => {
+      if (!el || !el.parentElement) return null;
+      const t = el.parentElement.textContent.replace(/^HP|^MP/, '').trim();
+      const nums = t.split('/').map((s) => parseInt(s.replace(/,/g, ''), 10));
+      if (nums.length < 2 || Number.isNaN(nums[0]) || Number.isNaN(nums[1])) return null;
+      return { cur: nums[0], max: nums[1] };
+    };
+    const playerHp = parse(hpLabels[0]);
+    const playerMp = parse(mpLabels[0]);
+    const bossHp = parse(hpLabels[1]);
+    const bossMp = parse(mpLabels[1]);
+    if (!playerHp || !playerMp || !bossHp || !bossMp) return null;
+    return {
+      player: { hp: playerHp, mp: playerMp },
+      boss: { hp: bossHp, mp: bossMp },
+    };
+  };
+
+  // getHpMpNumbers()가 null을 반환하는(화면이 막 다시 그려지는) 짧은 순간을
+  // 넘겨서, 실제 유효한 값이 나올 때까지 기다린 뒤 반환한다. 모든 보스
+  // 로직은 이 함수를 통해 상태를 읽어야 안전하다.
+  M.getValidHpMpNumbers = async (timeoutMs = 8000) => {
+    const state = await M.waitFor(() => M.getHpMpNumbers(), timeoutMs, 200);
+    if (!state) throw new Error('HP/MP 값을 정상적으로 읽지 못함(화면 상태 이상)');
+    return state;
+  };
+
+  // 전투 기록 로그 컨테이너 (문서 전체로 범위가 새지 않도록 상한을 둠)
+  M.getLogContainer = () => {
+    const marker = M.queryAll('*').find(
+      (el) => el.children.length === 0 && el.textContent.trim().startsWith('전투 기록 (')
+    );
+    if (!marker) return null;
+    let container = marker.parentElement;
+    let steps = 0;
+    while (container && container.textContent.length < 300 && steps < 6) {
+      container = container.parentElement;
+      steps++;
+    }
+    return container;
+  };
+
+  // 🔒 로그에서 특정 어빌리티들이 봉인되었는지 확인.
+  // 쉼표로 쪼개 파싱하면 "나: 공속↓150", "보스: 적중↓200" 같은 뒤따르는
+  // 상태이상 문구가 델리미터 없이 바로 붙어 나올 때 경계를 잘못 잘라내는
+  // 문제가 있었음(실전 테스트에서 확인됨). 그래서 쪼개 파싱하는 대신, 한
+  // 로그 항목(타임스탬프로 경계 구분) 안에서 🔒 표시 뒤 텍스트에 candidates로
+  // 준 어빌리티 이름이 "포함되어 있는지"만 substring으로 검사한다.
+  M.parseSealedAbilities = (candidates) => {
+    const set = new Set();
+    const logContainer = M.getLogContainer();
+    if (!logContainer) return set;
+    const tsLeaves = [...logContainer.querySelectorAll('*')].filter(
+      (el) => el.children.length === 0 && /^\d+(초|분)\s*전$/.test(el.textContent.trim())
+    );
+    for (const leaf of tsLeaves) {
+      const entryText = leaf.parentElement.textContent;
+      const lockIdx = entryText.indexOf('🔒');
+      if (lockIdx === -1) continue;
+      const lockPart = entryText.slice(lockIdx);
+      for (const name of candidates) {
+        if (lockPart.includes(name)) set.add(name);
+      }
+    }
+    return set;
+  };
+
+  // 클리어 팝업의 "확인" 버튼을 닫아준다 (모달 스코프)
+  M.closeClearPopupIfAny = async () => {
+    await M.sleep(500);
+    const btn = M.findConfirmInOpenDialog(['확인']);
+    if (btn) btn.click();
+  };
+
+  // 보스 자세(공격태세/수비태세) 판정: 지하의 망령 전용 기믹.
+  // 화면에 보스 이름이 여러 번 나올 수 있어(리스트 페이지의 "이번 주 보상
+  // 보스" 배지 등) 마지막(가장 안쪽) 일치 항목을 실제 보스 카드로 본다.
+  // 그 다음에 오는 숫자 2개(공격력, 방어력)를 비교해서 자세를 판정한다.
+  M.getBossStance = (bossLabel) => {
+    const heads = M.findAllLeavesByExactText(bossLabel);
+    if (!heads.length) return null;
+    const heading = heads[heads.length - 1];
+    const all = M.queryAll('*');
+    const idx = all.indexOf(heading);
+    const nums = [];
+    for (let i = idx + 1; i < all.length && nums.length < 2; i++) {
+      const el = all[i];
+      if (el.children.length === 0) {
+        const t = el.textContent.trim();
+        if (/^\d+$/.test(t)) nums.push(parseInt(t, 10));
+      }
+    }
+    if (nums.length < 2) return null;
+    const [atk, def] = nums;
+    return { atk, def, stance: atk > def ? '공격태세' : (def > atk ? '수비태세' : '동일') };
+  };
+
+  // getBossStance가 null을 반환하는 짧은 순간(화면이 막 다시 그려지는 때)을
+  // 넘겨서 실제 값이 나올 때까지 기다린다. 망령은 1턴씩 수십 번 반복하므로
+  // 이 null 안전성이 특히 중요함(실전에서 위험 지적됨).
+  M.getValidBossStance = async (bossLabel, timeoutMs = 8000) => {
+    const stance = await M.waitFor(() => M.getBossStance(bossLabel), timeoutMs, 200);
+    if (!stance) throw new Error('보스 자세(공격력/방어력)를 정상적으로 읽지 못함(화면 상태 이상)');
+    return stance;
+  };
+
+  // 보스 속성별로 사용해야 할 딜 스킬 (사용자 확정). 딜 턴 진입 전, /skill-management
+  // 페이지에서 활성 스킬셋의 "항상" 슬롯 스킬을 이걸로 바꿔줘야 함 (아직 자동화 코드
+  // 미완성 - 사이트 내 메뉴 클릭(캐릭>스킬)으로 이동은 SPA라 새로고침 없이 왕복 가능함을
+  // 확인함. history.back()으로 원래 전투 화면 복귀 가능).
+  M.ELEMENT_TO_SKILL = {
+    '불': '뇌제일섬',
+    '물': '뇌제일섬',
+    '번개': '뇌제일섬',
+    '바람': '황염참',
+    '별': '차원검',
+    '빛': '멸영환',
+    '어둠': '뇌제일섬',
+  };
+
+  // 전투 화면에서 보스의 오늘 속성을 읽음 (보스 이름 heading 다음에 나오는
+  // 스탯 3개 뒤의 속성 텍스트를 찾음). ELEMENT_TO_SKILL과 조합해서 오늘
+  // 써야 할 스킬을 결정하는 데 씀.
+  M.getBossElementInBattle = (bossLabel) => {
+    const ELEMENTS = ['불', '물', '번개', '별', '바람', '빛', '어둠'];
+    const heads = M.findAllLeavesByExactText(bossLabel);
+    if (!heads.length) return null;
+    const heading = heads[heads.length - 1];
+    const all = M.queryAll('*');
+    const idx = all.indexOf(heading);
+    for (let i = idx + 1; i < all.length; i++) {
+      const el = all[i];
+      if (el.children.length === 0) {
+        const t = el.textContent.trim();
+        if (t === 'HP') break;
+        if (ELEMENTS.includes(t)) return t;
+      }
+    }
+    return null;
+  };
+
+  // 전투 화면에서, 오늘 보스 속성에 맞는 스킬로 현재 활성 스킬셋의 "항상"
+  // 슬롯을 자동으로 바꿔줌. /skill-management 로 갔다가 다시 전투로 돌아옴.
+  // 이 왕복은 사이트 내 메뉴 클릭(캐릭>스킬, 뒤로가기)으로만 하는 SPA 전환이라
+  // 새로고침이 없고 전투 상태가 유지됨을 실전 확인함.
+  M.setDealSkillForBossElement = async (bossLabel) => {
+    const element = M.getBossElementInBattle(bossLabel);
+    if (!element) return { changed: false, reason: '보스 속성 확인 실패' };
+    const targetSkill = M.ELEMENT_TO_SKILL[element];
+    if (!targetSkill) return { changed: false, reason: `속성-스킬 매핑 없음: ${element}` };
+
+    // history.back() 후 실제로 전투화면에 정상 복귀했는지 확인 없이 바로
+    // 다음 동작으로 넘어가면, 뒤로가기가 실패하거나 엉뚱한 화면으로 가도
+    // 모른 채 진행하게 됨(실전 검증 전 반드시 고칠 항목으로 지적됨).
+    const goBackAndConfirmBattle = async () => {
+      history.back();
+      const ok = await M.waitFor(() => M.isInBattleScreen(bossLabel), 6000, 200);
+      if (!ok) throw new Error('스킬관리 화면에서 전투화면으로 복귀 확인 실패');
+    };
+
+    const charBtn = M.findButtonByText('캐릭');
+    if (!charBtn) return { changed: false, reason: '"캐릭" 메뉴 못찾음' };
+    charBtn.click();
+    // 드롭다운 메뉴 항목은 <button>이 아니라 <li role="menuitem">로 렌더링됨
+    // (실전 테스트에서 확인). 태그 제한 없이 텍스트로 찾는다.
+    const skillItem = await M.waitFor(() => M.queryAll('*').find((el) => el.children.length === 0 && el.textContent.trim() === '스킬'));
+    if (!skillItem) return { changed: false, reason: '"스킬" 메뉴 못찾음' };
+    skillItem.click();
+    await M.waitFor(() => M.queryAll('*').some((el) => el.children.length === 0 && el.textContent.trim() === '항상'), 5000);
+
+    // "항상" 조건 슬롯 바로 다음에 나오는 첫 input을 그 슬롯의 스킬칸으로 본다
+    const findAlwaysSkillInput = () => {
+      const alwaysLeaf = M.queryAll('*').find((el) => el.children.length === 0 && el.textContent.trim() === '항상');
+      if (!alwaysLeaf) return null;
+      const all = M.queryAll('*');
+      const idx = all.indexOf(alwaysLeaf);
+      for (let i = idx + 1; i < all.length; i++) {
+        if (all[i].tagName === 'INPUT') return all[i];
+      }
+      return null;
+    };
+
+    const input = await M.waitFor(findAlwaysSkillInput, 5000);
+    if (!input) {
+      await goBackAndConfirmBattle();
+      return { changed: false, reason: '"항상" 스킬 입력칸 못찾음' };
+    }
+
+    if (input.value === targetSkill) {
+      await goBackAndConfirmBattle();
+      return { changed: false, reason: '이미 설정되어 있음', skill: targetSkill, element };
+    }
+
+    input.click();
+    // "사용 가능한 스킬" 목록의 스킬명도 <button>이 아니라 <p> 텍스트라서
+    // (실전 테스트에서 확인) 태그 제한 없이 텍스트로 찾아 클릭한다.
+    const skillBtn = await M.waitFor(() => M.queryAll('*').find((el) => el.children.length === 0 && el.textContent.trim() === targetSkill));
+    if (!skillBtn) {
+      await goBackAndConfirmBattle();
+      return { changed: false, reason: `스킬 목록에서 "${targetSkill}" 못찾음` };
+    }
+    skillBtn.click();
+    await M.sleep(500);
+
+    await goBackAndConfirmBattle();
+    return { changed: true, skill: targetSkill, element };
+  };
+
+  // ==========================================================================
+  // 길찾기 로직: GUI에서 어떤 화면에 있든 버튼만 누르면
+  // 전투 화면인지 확인 -> 아니면 개인 보스 목록으로 이동 -> 해당 보스 카드의
+  // 도전하기/계속하기/재도전 버튼을 찾아 클릭 -> 전투 진입 -> 로직 실행
+  // 까지 자동으로 이어지게 함.
+  // 목록 페이지로 가기 위해 풀 새로고침이 필요한 경우, localStorage에 어떤
+  // 보스를 진행 중이었는지 남겨두고, 스크립트가 다시 로드되면 이어서 진행함.
+  // ==========================================================================
+  const BOSS_REGISTRY = {
+    fallenGuardian: { label: '타락한 수호자' },
+    voidEmperor: { label: '공허의 황제' },
+    vineEnt: { label: '지하를 휘감은 엔트' },
+    vineWraith: { label: '지하의 망령' },
+  };
+  // 임시 실전 테스트 옵션. true인 동안에는 카드에 "클리어"가 표시되어도
+  // 자동 완료 처리하지 않고 도전/재도전 버튼을 계속 탐색한다.
+  // 검증 완료 후 통합할 때 false로 되돌릴 것.
+  const ALLOW_CLEARED_BOSS_TEST = false;
+  // 보스 기믹(자세전환/봉인 조건 등)은 직업과 무관하게 똑같지만, 그걸
+  // 공략하는 방식(프리셋 전환, 스크롤 사용 여부, 목표 수치 등)은 직업마다
+  // 다름. 수호자/황제는 검술과 인술이 동일해서 함수를 공유하고, 엔트/망령은
+  // 직업별로 별도 함수를 둔다. 여기 없는 직업은 아직 구현 전이라 검술
+  // 함수로 폴백한다(동작 보장은 없음 - GUI에서 "준비 중"으로 안내해야 함).
+  const BOSS_RUN_BY_JOB = {
+    검술: {
+      fallenGuardian: 'runFallenGuardian',
+      voidEmperor: 'runVoidEmperor',
+      vineEnt: 'runVineEntSword',
+      vineWraith: 'runVineWraithSword',
+    },
+    인술: {
+      fallenGuardian: 'runFallenGuardian',
+      voidEmperor: 'runVoidEmperor',
+      vineEnt: 'runVineEntNinja',
+      vineWraith: 'runVineWraithNinja',
+    },
+    궁술: {
+      fallenGuardian: 'runFallenGuardianArchery',
+      voidEmperor: 'runVoidEmperorArchery',
+      vineEnt: 'runVineEntArchery',
+      vineWraith: 'runVineWraithArchery',
+    },
+    체술: {
+      fallenGuardian: 'runFallenGuardianMartial',
+      voidEmperor: 'runVoidEmperorMartial',
+      vineEnt: 'runVineEntMartial',
+      vineWraith: 'runVineWraithMartial',
+    },
+    마술: {
+      fallenGuardian: 'runFallenGuardianMagic',
+      voidEmperor: 'runVoidEmperorMagic',
+      vineEnt: 'runVineEntMagic',
+      vineWraith: 'runVineWraithMagic',
+    },
+  };
+  M.getSelectedJob = () => {
+    const sel = document.getElementById('lrm-boss-ref-job');
+    const value = sel ? sel.value : loadSelectedJob();
+    return ['검술', '인술', '궁술', '체술', '마술'].includes(value) ? value : '궁술';
+  };
+  M.getRunFunctionName = (key, jobOverride = null) => {
+    const job = jobOverride || M.getSelectedJob();
+    const table = BOSS_RUN_BY_JOB[job] || BOSS_RUN_BY_JOB['검술'];
+    return table[key] || BOSS_RUN_BY_JOB['검술'][key];
+  };
+  const PENDING_KEY = 'lrm-boss-ref-pending';
+  const QUEUE_KEY = 'lrm-boss-ref-queue';
+
+  M.isInBattleScreen = (bossLabel) => {
+    const heading = M.findLeafByExactText(bossLabel);
+    const turnBtn = M.findButtonByText('턴 진행5턴');
+    return !!(heading && turnBtn);
+  };
+
+  // 개인 보스 목록 페이지 상단의 "이번 주 보상 보스" 배지에도 보스 이름이
+  // 뜨기 때문에, 페이지에 같은 이름 텍스트가 2번 이상 나올 수 있다(배지 1번 +
+  // 실제 카드 제목 1번). findLeafByExactText는 첫 번째 일치만 반환하므로
+  // 이름이 겹치는 보스(예: 지하를 휘감은 엔트)에서는 배지를 잘못 집어
+  // 엉뚱한 카드/버튼으로 이어지는 문제가 실전에서 확인됨. 그래서 아래는
+  // 이름이 일치하는 모든 후보를 문서 순서대로 순회하며, 실제로 도전 버튼을
+  // 찾을 수 있는 후보를 사용한다.
+  M.findAllLeavesByExactText = (text) =>
+    M.queryAll('*').filter((el) => el.children.length === 0 && el.textContent.trim() === text);
+
+  const BOSS_CARD_BOUNDARY_NAMES = [
+    '타락한 수호자', '공허의 황제', '지하를 휘감은 엔트', '지하의 망령',
+    '타락한 정화자', '허무의 황제', '지하 분쇄자 엔트',
+  ];
+
+  M.findBossCardActionButton = (bossLabel) => {
+    const headings = M.findAllLeavesByExactText(bossLabel);
+    const all = M.queryAll('*');
+    for (const heading of headings) {
+      const headingIdx = all.indexOf(heading);
+      if (headingIdx === -1) continue;
+      for (let i = headingIdx + 1; i < all.length; i++) {
+        const el = all[i];
+        if (el.tagName === 'BUTTON' && ['도전하기', '계속하기', '재도전'].includes(el.textContent.trim())) {
+          return el;
+        }
+        if (el.children.length === 0) {
+          const t = el.textContent.trim();
+          // 다음 보스 카드(다른 이름)로 넘어가면 이 후보는 포기하고 다음 후보로
+          if (t && t !== bossLabel && BOSS_CARD_BOUNDARY_NAMES.includes(t)) break;
+        }
+      }
+    }
+    return null;
+  };
+
+  M.isBossAlreadyCleared = (bossLabel) => {
+    const headings = M.findAllLeavesByExactText(bossLabel);
+    const all = M.queryAll('*');
+    for (const heading of headings) {
+      const headingIdx = all.indexOf(heading);
+      if (headingIdx === -1) continue;
+      for (let i = headingIdx + 1; i < all.length; i++) {
+        const el = all[i];
+        if (el.children.length !== 0) continue;
+        const text = el.textContent.trim();
+        if (text && text !== bossLabel && BOSS_CARD_BOUNDARY_NAMES.includes(text)) break;
+        if (text === '클리어' || text === '도전 완료') return true;
+        // 다른 보스의 실제 도전 버튼까지 갔다면 현재 후보 카드에는 클리어
+        // 표시가 없다는 뜻이므로 다음 동명 후보를 확인한다.
+        if (['도전하기', '계속하기', '재도전'].includes(text)) break;
+      }
+    }
+    return false;
+  };
+
+  M.getBossElementFromList = (bossLabel) => {
+    const elements = ['불', '물', '번개', '별', '바람', '빛', '어둠'];
+    const headings = M.findAllLeavesByExactText(bossLabel);
+    const all = M.queryAll('*');
+    for (const heading of headings) {
+      const start = all.indexOf(heading);
+      if (start < 0) continue;
+      for (let i = start + 1; i < all.length; i++) {
+        const el = all[i];
+        if (el.children.length !== 0) continue;
+        const text = el.textContent.trim();
+        if (text !== bossLabel && BOSS_CARD_BOUNDARY_NAMES.includes(text)) break;
+        if (elements.includes(text)) return text;
+      }
+    }
+    return null;
+  };
+
+  M.openCharacterMenuItem = async (itemText) => {
+    const findVisibleItem = () => M.queryAll('[role="menuitem"], [role="option"], li, button, a')
+      .find((el) => el.textContent.trim() === itemText && M.isVisible(el));
+
+    // 직전 탐색 실패나 페이지 전환 직후에는 캐릭 메뉴가 이미 열려 있을 수
+    // 있다. 이때 캐릭 버튼을 다시 누르면 메뉴를 닫아버려 "내 정보"를 못
+    // 찾는 문제가 실전 진단에서 확인됐다. 열린 메뉴 항목을 먼저 사용하고,
+    // 없을 때만 캐릭 버튼을 눌러 메뉴를 연다.
+    let item = findVisibleItem();
+    if (!item) {
+      const charBtn = await M.waitFor(() => M.findButtonByText('캐릭'), 5000);
+      if (!charBtn) throw new Error('"캐릭" 메뉴 버튼 못찾음');
+      await M.humanPause(500, 900);
+      charBtn.click();
+      await M.humanPause(650, 1100);
+      item = await M.waitFor(findVisibleItem, 5000);
+    }
+    if (!item) throw new Error(`캐릭 메뉴에서 "${itemText}" 못찾음`);
+    await M.humanPause(550, 1000);
+    item.click();
+
+    // SPA 이동이 실제로 시작되기 전에 다음 단계가 현재 화면 DOM을 읽으면
+    // 이전 페이지를 새 페이지로 오인할 수 있으므로 대상 경로를 확인한다.
+    const expectedPath = itemText === '내 정보' ? '/status'
+      : itemText === '인벤토리' ? '/inventory'
+      : null;
+    if (expectedPath) {
+      const arrived = await M.waitFor(
+        () => location.pathname.replace(/\/$/, '') === expectedPath,
+        8000,
+        200
+      );
+      if (!arrived) throw new Error(`캐릭 메뉴 "${itemText}" 이동 확인 실패`);
+      await M.humanPause(700, 1300);
+    }
+  };
+
+  M.getCharacterElementOnStatus = () => {
+    const leaf = M.queryAll('*').find((el) =>
+      el.children.length === 0 && /^속성\s*:\s*(불|물|번개|별|바람|빛|어둠)$/.test(el.textContent.trim())
+    );
+    if (!leaf) return null;
+    const match = leaf.textContent.trim().match(/^속성\s*:\s*(.+)$/);
+    return match ? match[1].trim() : null;
+  };
+
+  M.goToBossListViaMenu = async () => {
+    const battleBtn = await M.waitFor(() => M.findButtonByText('전투'), 5000);
+    if (!battleBtn) throw new Error('"전투" 메뉴 버튼 못찾음');
+    battleBtn.click();
+    const bossItem = await M.waitFor(
+      () => M.queryAll('*').find((el) => el.children.length === 0 && el.textContent.trim() === '보스'),
+      5000
+    );
+    if (!bossItem) throw new Error('전투 메뉴에서 "보스" 못찾음');
+    bossItem.click();
+    const arrived = await M.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/personal-boss',
+      8000,
+      200
+    );
+    if (!arrived) throw new Error('개인 보스 목록 복귀 실패');
+  };
+
+  M.useElementStone = async (element) => {
+    await M.openCharacterMenuItem('인벤토리');
+    const consumableTab = await M.waitFor(
+      () => M.queryAll('[role="tab"], button')
+        .find((el) => el.textContent.trim() === '소모품' && M.isVisible(el)),
+      8000
+    );
+    if (!consumableTab) throw new Error('인벤토리 소모품 탭 못찾음');
+    await M.humanPause(600, 1100);
+    consumableTab.click();
+    await M.humanPause(750, 1300);
+
+    const stoneName = `${element}의 돌`;
+    let useButton = null;
+    // 돌 이름에는 수량이 붙어 렌더링되고(예: "빛의 돌x14"), 소모품은
+    // 여러 페이지로 나뉜다. 정확한 leaf 텍스트 검색 대신 행 단위로 찾고
+    // 발견될 때까지 다음 페이지를 순회한다.
+    for (let page = 1; page <= 20 && !useButton; page++) {
+      const row = M.queryAll('tr').find((tr) =>
+        tr.textContent.includes(stoneName) && M.isVisible(tr)
+      );
+      if (row) {
+        useButton = [...row.querySelectorAll('button')].find((button) =>
+          ['사용', '사용하기'].includes(button.textContent.trim()) && M.isVisible(button)
+        ) || null;
+        break;
+      }
+      const next = M.queryAll('button').find((button) =>
+        button.getAttribute('aria-label') === 'Go to next page' &&
+        !button.disabled &&
+        M.isVisible(button)
+      );
+      if (!next) break;
+      await M.humanPause(500, 900);
+      next.click();
+      await M.humanPause(650, 1100);
+    }
+    if (!useButton) throw new Error(`"${stoneName}" 사용 버튼 못찾음`);
+    // 돌 이름과 수량을 확인한 뒤 사용하는 시간.
+    await M.humanPause(900, 1600);
+    useButton.click();
+
+    const confirm = await M.waitFor(
+      () => M.findConfirmInOpenDialog(['확인']),
+      5000
+    );
+    if (!confirm) throw new Error(`"${stoneName}" 사용 확인 모달 못찾음`);
+    await M.humanPause(700, 1200);
+    confirm.click();
+    await M.humanPause(1200, 1800);
+  };
+
+  // 모든 직업 공통 전처리: 보스 목록의 오늘 속성과 내 정보의 캐릭터 속성을
+  // 비교하고, 다르면 인벤토리에서 해당 속성의 돌을 한 개 사용한 뒤 재검증한다.
+  M.ensureElementForBoss = async (bossLabel) => {
+    const startHistoryLength = history.length;
+    const targetElement = M.getBossElementFromList(bossLabel);
+    if (!targetElement) throw new Error(`"${bossLabel}"의 오늘 속성을 읽지 못함`);
+
+    await M.openCharacterMenuItem('내 정보');
+    let currentElement = await M.waitFor(() => M.getCharacterElementOnStatus(), 8000);
+    if (!currentElement) throw new Error('내 정보에서 캐릭터 속성을 읽지 못함');
+    await M.humanPause(800, 1400);
+
+    if (currentElement !== targetElement) {
+      if (M.uiLog) M.uiLog(`속성 불일치: 캐릭터=${currentElement}, 보스=${targetElement} → ${targetElement}의 돌 사용`);
+      await M.useElementStone(targetElement);
+      await M.openCharacterMenuItem('내 정보');
+      currentElement = await M.waitFor(() => M.getCharacterElementOnStatus(), 8000);
+      if (currentElement !== targetElement) {
+        throw new Error(`속성 돌 사용 후 검증 실패: 캐릭터=${currentElement}, 목표=${targetElement}`);
+      }
+      await M.humanPause(900, 1500);
+    } else if (M.uiLog) {
+      M.uiLog(`속성 일치 확인: ${targetElement}`);
+    }
+
+    // 속성 확인을 시작한 보스 목록의 이력 위치로 정확히 돌아간다.
+    // 상단 전투 메뉴는 페이지에 따라 메뉴 항목의 DOM 구조가 달라져 "보스"
+    // 항목을 못 찾는 경우가 있었으므로, 같은 SPA 안에서 쌓인 history 길이를
+    // 기준으로 우선 복귀하고 실패할 때만 메뉴 방식을 폴백으로 사용한다.
+    const historyDelta = startHistoryLength - history.length;
+    if (historyDelta < 0) {
+      history.go(historyDelta);
+      const returnedByHistory = await M.waitFor(
+        () => location.pathname.replace(/\/$/, '') === '/personal-boss',
+        8000,
+        200
+      );
+      if (!returnedByHistory) await M.goToBossListViaMenu();
+    } else {
+      await M.goToBossListViaMenu();
+    }
+    await M.waitFor(() => M.findBossCardActionButton(bossLabel), 8000, 200);
+    return { targetElement, currentElement };
+  };
+
+  M.enterBossBattle = async (bossLabel) => {
+    // 일반/HARD 탭이 있으면 일반 탭 보장 (지금 다루는 보스는 모두 일반 모드)
+    const normalTab = M.findButtonByText('일반');
+    if (normalTab) {
+      normalTab.click();
+      await M.sleep(300);
+    }
+    let btn = M.findBossCardActionButton(bossLabel);
+    if (!btn) throw new Error(`"${bossLabel}" 카드에서 도전 버튼을 못찾음 (목록 페이지가 맞는지 확인 필요)`);
+    let btnText = btn.textContent.trim();
+    btn.click();
+    await M.sleep(500);
+
+    // 다른 보스 도전이 진행 중이면 새 보스를 누른 직후 "도전 포기" 확인창이
+    // 먼저 뜬다. 이 창을 대상 보스의 재도전 확인창으로 오인하면 목록에 남은
+    // 채 진입 실패를 반복한다. 큐에서 명시적으로 선택한 다음 보스로 넘어가기
+    // 위해 기존 도전을 포기하고, 목록 렌더링 후 대상 카드 버튼을 다시 누른다.
+    const abandonConfirm = M.findConfirmInOpenDialog(['포기', '포기하기']);
+    if (abandonConfirm) {
+      abandonConfirm.click();
+      const returned = await M.waitFor(
+        () => location.pathname.replace(/\/$/, '') === '/personal-boss',
+        8000,
+        200
+      );
+      if (!returned) throw new Error('기존 보스 포기 후 목록 복귀 실패');
+      btn = await M.waitFor(() => M.findBossCardActionButton(bossLabel), 8000, 200);
+      if (!btn) throw new Error(`기존 도전 포기 후 "${bossLabel}" 도전 버튼을 못찾음`);
+      btnText = btn.textContent.trim();
+      btn.click();
+      await M.sleep(500);
+    }
+
+    if (btnText === '도전하기') {
+      const confirmBtn = M.findConfirmInOpenDialog(['도전', '확인']);
+      if (confirmBtn) {
+        confirmBtn.click();
+        await M.sleep(1200);
+      }
+    } else if (btnText === '재도전') {
+      const confirmBtn = M.findConfirmInOpenDialog(['재도전', '도전', '확인']);
+      if (confirmBtn) {
+        confirmBtn.click();
+        await M.sleep(1200);
+      }
+    } else {
+      await M.sleep(800); // 계속하기는 보통 바로 진입
+    }
+  };
+
+  M.abandonCurrentBossAttempt = async () => {
+    const candidates = ['도전 포기', '전투 포기', '포기하기', '포기'];
+    const button = await M.waitFor(
+      () => candidates.map((text) => M.findButtonByText(text)).find(Boolean),
+      5000
+    );
+    if (!button) throw new Error('현재 보스 도전의 포기 버튼을 못찾음');
+    button.click();
+    const confirm = await M.waitFor(
+      () => M.findConfirmInOpenDialog(['포기', '포기하기', '확인']),
+      5000
+    );
+    if (!confirm) throw new Error('도전 포기 확인 모달의 "포기" 버튼을 못찾음');
+    confirm.click();
+    const returned = await M.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/personal-boss',
+      8000,
+      200
+    );
+    if (!returned) throw new Error('보스 포기 후 목록 복귀 실패');
+    return true;
+  };
+
+  M.isRunning = false;
+
+  // 반환값: 'redirecting' | { entered: boolean, cleared: boolean }
+  //   - entered=false: 카드를 못 찾는 등 애초에 전투 진입 자체를 못함
+  //   - entered=true, cleared=true: 실제로 보스 HP 0을 확인하고 처치 완료
+  //   - entered=true, cleared=false: 진입은 했지만 실제 처치 실패(최대 시도
+  //     횟수 도달 등) - 순수히 "전투화면을 벗어났는지"만으로 성공을 판단하면
+  //     스킬화면 오류·페이지 이동 등으로 어쩌다 전투화면을 벗어난 것도
+  //     성공으로 오판할 수 있어(실전 지적됨), 반드시 보스 함수 자신이 보고한
+  //     cleared 값을 근거로 삼는다.
+  M.driveToBossAndRun = async (key, jobOverride = null) => {
+    const entry = BOSS_REGISTRY[key];
+    if (!entry) return { entered: false, cleared: false };
+    const runName = M.getRunFunctionName(key, jobOverride);
+
+    if (M.isRunning) {
+      if (M.uiLog) M.uiLog(`⛔ 이미 다른 작업이 실행 중이라 "${entry.label}" 요청을 무시함`);
+      localStorage.removeItem(PENDING_KEY);
+      return { entered: false, cleared: false };
+    }
+    M.isRunning = true;
+
+    const runAndReport = async () => {
+      try {
+        const result = await M[runName]();
+        return {
+          entered: true,
+          cleared: !!(result && result.cleared),
+          retryRequired: !!(result && result.retryRequired),
+        };
+      } catch (e) {
+        // 전투 로직 실행 도중 에러(모달 타이밍 등)가 나도 여기서 삼켜서
+        // 큐 전체가 중단되지 않게 한다.
+        if (M.uiLog) M.uiLog(`⚠ "${entry.label}" 전투 중 오류: ${e.message}`);
+        return { entered: true, cleared: false };
+      }
+    };
+
+    try {
+      if (M.isInBattleScreen(entry.label)) {
+        localStorage.removeItem(PENDING_KEY);
+        if (M.uiLog) M.uiLog(`✅ 이미 "${entry.label}" 전투 화면, 바로 시작 (${jobOverride || M.getSelectedJob()})`);
+        return await runAndReport();
+      }
+
+      // "목록 페이지에 있다"는 판정은 .includes()가 아니라 정확한 경로 일치로
+      // 해야 함 - /personal-boss/<battleId> 같은 개별 전투 화면 URL도
+      // .includes('/personal-boss')가 true라서, 큐로 여러 보스를 연속 처리할 때
+      // 방금 클리어한 보스의 전투 URL에 그대로 남아있는 상태를 "목록 페이지"로
+      // 착각해 다음 보스 카드를 못 찾는 버그가 실전에서 확인됨(황제 클리어 후
+      // 엔트 진입 실패). 정확히 목록 경로일 때만 카드 탐색을 시도한다.
+      const path = location.pathname.replace(/\/$/, '');
+      if (path === '/personal-boss') {
+        // 직전에 다른 보스를 막 클리어하고 목록으로 돌아온 직후일 수 있어
+        // SPA가 목록을 완전히 다시 그릴 시간을 살짝 준다 (실전에서, 클리어
+        // 직후 바로 다음 카드를 찾으면 못 찾는 경우가 확인됨).
+        await M.sleep(800);
+        try {
+          if (M.uiLog) M.uiLog(`🔎 "${entry.label}" 속성 확인 중...`);
+          await M.ensureElementForBoss(entry.label);
+          if (!ALLOW_CLEARED_BOSS_TEST && M.isBossAlreadyCleared(entry.label)) {
+            localStorage.removeItem(PENDING_KEY);
+            if (M.uiLog) M.uiLog(`⏭ "${entry.label}"은(는) 이미 클리어됨 - 완료 처리`);
+            return { entered: true, cleared: true, alreadyCleared: true };
+          }
+          if (M.uiLog) M.uiLog(`🧭 "${entry.label}" 카드 찾는 중...`);
+          await M.enterBossBattle(entry.label);
+          await M.sleep(500);
+          if (M.isInBattleScreen(entry.label)) {
+            localStorage.removeItem(PENDING_KEY);
+            return await runAndReport();
+          }
+          if (M.uiLog) M.uiLog('⚠ 전투 화면 진입 확인 실패. 버튼을 다시 눌러줘.');
+        } catch (e) {
+          if (M.uiLog) M.uiLog('⚠ ' + e.message);
+        }
+        return { entered: false, cleared: false };
+      }
+
+      // 개인 보스 목록 페이지가 아니면 이동 (풀 새로고침 발생 가능 - pending 값으로 재개됨)
+      if (M.uiLog) M.uiLog('➡ 개인 보스 목록으로 이동 중...');
+      location.href = 'https://lanis.me/personal-boss';
+      // location.href 대입은 "즉시" 페이지를 끊지 않는다 - 실제 브라우저가
+      // 이동을 처리하기까지 짧은 시차가 있어서, 이 대입 직후 바로 false를
+      // 반환하면 continueBossQueue가 "아직도 전투화면 아니네 → 실패"로
+      // 착각해 3연속 실패를 순식간에(새로고침도 되기 전에) 만들어버리는
+      // 버그가 실전에서 확인됨(캐릭터 요약 페이지에서 도전 눌렀을 때 재현).
+      // 그래서 실패와 구분되는 별도 값('redirecting')을 반환하고, 실제
+      // 이동이 일어날 시간을 좀 더 기다린다(안 넘어가도 아래에서 그냥
+      // redirecting을 반환하고 끝 - 다음 재개 때 이어짐).
+      await M.sleep(3000);
+      return 'redirecting';
+    } finally {
+      M.isRunning = false;
+    }
+  };
+
+  // ==========================================================================
+  // 백그라운드(포커스 없는) 탭 타이머 스로틀링 방지.
+  // 크롬은 화면에 안 보이는 탭의 setTimeout을 강제로 느리게 만드는데,
+  // 실전에서 매크로 실행 중 탭이 백그라운드로 가면 턴 진행이 눈에 띄게
+  // 느려지거나 멈춘 것처럼 보이는 문제가 확인됨. 오디오를 재생 중인 탭은
+  // 크롬이 스로틀링을 덜 하므로, 거의 무음(거의 0 볼륨)인 오디오를 매크로
+  // 실행 동안 계속 틀어둬서 우회한다. 버튼 클릭(사용자 제스처) 직후에
+  // 호출해야 오디오 자동재생 정책에 안 걸림.
+  // ==========================================================================
+  M.antiThrottle = {
+    ctx: null,
+    osc: null,
+    start() {
+      if (this.ctx) return;
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        const ctx = new Ctx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.002; // 완전 무음은 크롬 스로틀링 면제 대상이 아님(공식 확인)
+        // 사용자 청취 테스트: 0.002는 안 들리고 0.003부터 미세하게 들림.
+        // 거슬리지 않는 걸 우선해 0.002로 설정(사용자 요청) - 사람 귀엔 안
+        // 들려도 신호 자체는 0이 아니라서 크롬이 "재생 중"으로 인식할 수도
+        // 있지만, 인식 못 할 위험도 0.01보다 커짐. 실전에서 스로틀링 방지
+        // 효과가 없는 것 같으면 이 값을 다시 올려야 함.
+        osc.connect(gain).connect(ctx.destination);
+        osc.start();
+        this.ctx = ctx;
+        this.osc = osc;
+      } catch (e) {
+        // 오디오 컨텍스트 생성 실패해도 매크로 자체는 계속 진행되게 조용히 무시
+      }
+    },
+    stop() {
+      try { if (this.osc) this.osc.stop(); } catch (e) {}
+      try { if (this.ctx) this.ctx.close(); } catch (e) {}
+      this.ctx = null;
+      this.osc = null;
+    },
+  };
+
+  // 백그라운드 실행 자가진단.
+  // 게임 버튼이나 전투 상태는 전혀 건드리지 않고, 매크로가 실제로 사용하는
+  // Worker 기반 M.sleep과 브라우저 기본 setTimeout의 60초 지연만 비교한다.
+  // 진단 중 다른 탭으로 전환했다가 돌아오면 visibilitychange 기록도 함께 남아
+  // 실제로 백그라운드 상태였는지 확인할 수 있다.
+  M.runBackgroundDiagnostic = async (durationMs = 60000) => {
+    if (M.backgroundDiagnosticRunning) {
+      if (M.uiLog) M.uiLog('⚠ 백그라운드 진단이 이미 실행 중');
+      return null;
+    }
+
+    M.backgroundDiagnosticRunning = true;
+    const startedAt = Date.now();
+    const visibilityEvents = [{
+      elapsed: 0,
+      state: document.visibilityState,
+    }];
+    let nativeElapsed = null;
+    let workerElapsed = null;
+
+    const onVisibilityChange = () => {
+      const elapsed = Date.now() - startedAt;
+      visibilityEvents.push({ elapsed, state: document.visibilityState });
+      if (M.uiLog) {
+        M.uiLog(`[백그라운드 진단] ${Math.round(elapsed / 1000)}초: 탭 상태=${document.visibilityState}`);
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    if (M.uiLog) {
+      M.uiLog(`=== 백그라운드 진단 시작 (${Math.round(durationMs / 1000)}초) ===`);
+      M.uiLog('지금 다른 탭으로 전환하고, 60초 이상 지난 뒤 돌아오세요.');
+    }
+
+    const nativeTimer = new Promise((resolve) => {
+      setTimeout(() => {
+        nativeElapsed = Date.now() - startedAt;
+        resolve();
+      }, durationMs);
+    });
+
+    try {
+      await M.sleep(durationMs);
+      workerElapsed = Date.now() - startedAt;
+
+      // Worker 타이머가 끝났는데 일반 타이머 콜백이 아직 실행되지 않았다면
+      // 최대 30초만 더 기다린다. 이 추가 대기도 Worker 기반이라 기본 타이머가
+      // 얼마나 심하게 밀렸는지 안전하게 판정할 수 있다.
+      if (nativeElapsed === null) {
+        await Promise.race([nativeTimer, M.sleep(30000)]);
+      }
+
+      const hiddenObserved = visibilityEvents.some((event) => event.state === 'hidden');
+      const result = {
+        durationMs,
+        workerElapsed,
+        nativeElapsed,
+        workerDelay: workerElapsed - durationMs,
+        nativeDelay: nativeElapsed === null ? null : nativeElapsed - durationMs,
+        hiddenObserved,
+        visibilityEvents,
+        workerDead: !!M._workerDead,
+      };
+
+      if (M.uiLog) {
+        M.uiLog(`[백그라운드 진단] Worker: ${workerElapsed}ms (지연 ${result.workerDelay}ms)`);
+        M.uiLog(
+          nativeElapsed === null
+            ? '[백그라운드 진단] 기본 타이머: Worker 완료 후 30초 안에도 실행되지 않음'
+            : `[백그라운드 진단] 기본 타이머: ${nativeElapsed}ms (지연 ${result.nativeDelay}ms)`
+        );
+        M.uiLog(`[백그라운드 진단] hidden 감지=${hiddenObserved ? '예' : '아니오'}, Worker 오류=${result.workerDead ? '예' : '아니오'}`);
+        M.uiLog(hiddenObserved && !result.workerDead && result.workerDelay < 5000
+          ? '✅ 백그라운드 Worker 타이머 정상'
+          : '⚠ 백그라운드 실행 조건을 충족하지 못했거나 지연이 큼');
+        M.uiLog('=== 백그라운드 진단 종료 ===');
+      }
+      return result;
+    } finally {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      M.backgroundDiagnosticRunning = false;
+    }
+  };
+
+  M.startBossRun = async (key) => {
+    if (M.isRunning) {
+      if (M.uiLog) M.uiLog('⛔ 이미 실행 중이라 새 요청을 무시함');
+      return;
+    }
+    M.antiThrottle.start();
+    localStorage.setItem(PENDING_KEY, key);
+    try {
+      await M.driveToBossAndRun(key);
+    } finally {
+      M.antiThrottle.stop();
+    }
+  };
+
+  // 약한 순서 (BOSS_REGISTRY 등록 순서와 동일)
+  const BOSS_ORDER = ['fallenGuardian', 'voidEmperor', 'vineEnt', 'vineWraith'];
+
+  // 선택한 보스들을 약한 순서대로 정렬해 큐에 저장하고 시작
+  M.startBossQueue = async (selectedKeys) => {
+    if (M.isRunning) {
+      if (M.uiLog) M.uiLog('⛔ 이미 실행 중이라 새 요청을 무시함');
+      return;
+    }
+    M.antiThrottle.start();
+    const remaining = BOSS_ORDER.filter((k) => selectedKeys.includes(k));
+    const q = {
+      remaining,
+      attempts: 0,
+      entryFailStreak: 0,
+      failedLabels: [],
+      job: M.getSelectedJob(),
+    };
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
+    try {
+      await M.continueBossQueue();
+    } finally {
+      M.antiThrottle.stop();
+    }
+  };
+
+  // 큐를 이어서 진행. 새로고침이 일어나도(예: 목록 페이지 이동) localStorage에
+  // 남은 큐가 있으면 resumePendingIfAny가 이 함수를 다시 호출해 이어감.
+  M.continueBossQueue = async () => {
+    let raw = localStorage.getItem(QUEUE_KEY);
+    if (!raw) return;
+
+    while (true) {
+      raw = localStorage.getItem(QUEUE_KEY);
+      if (!raw) return;
+      const q = JSON.parse(raw);
+      if (q.attempts === undefined) q.attempts = 0;
+      if (q.entryFailStreak === undefined) q.entryFailStreak = 0;
+      if (M.stopRequested || q.remaining.length === 0) break;
+
+      const key = q.remaining[0];
+      const entry = BOSS_REGISTRY[key];
+      if (M.uiLog) M.uiLog(`▶▶ [큐] "${entry.label}" 도전 시작 (남은 ${q.remaining.length}개)`);
+
+      const result = await M.driveToBossAndRun(key, q.job || M.getSelectedJob());
+
+      // 페이지 이동이 예약된 경우: 실패로 세지 않고, 큐도 그대로 둔 채
+      // 조용히 종료한다 (실제 새로고침이 일어나면 resumePendingIfAny가
+      // 이어서 처리하고, 혹시 이동이 안 일어났어도 다음에 다시 시도할 수
+      // 있게 remaining을 그대로 남겨둔다). 이걸 실패로 세면, 새로고침이
+      // 채 일어나기도 전에 3연속 실패로 오판되는 버그가 있었음.
+      if (result === 'redirecting') {
+        if (M.uiLog) M.uiLog('⏸ 페이지 이동 대기 중 (새로고침 후 자동으로 이어짐)');
+        return;
+      }
+
+      const raw2 = localStorage.getItem(QUEUE_KEY);
+      if (!raw2) return; // 그 사이 정지 등으로 큐가 지워졌으면 종료
+      const q2 = JSON.parse(raw2);
+      if (q2.attempts === undefined) q2.attempts = 0;
+      if (q2.entryFailStreak === undefined) q2.entryFailStreak = 0;
+
+      if (result.retryRequired) {
+        q2.attempts++;
+        if (q2.attempts >= 3) {
+          localStorage.removeItem(QUEUE_KEY);
+          if (M.uiLog) M.uiLog(`🛑 "${entry.label}" 첫 사이클 전환 3회 실패 - 큐 중단`);
+          return;
+        }
+        try {
+          if (M.uiLog) M.uiLog(`↻ "${entry.label}" 도전 포기 후 재진입 (${q2.attempts}/3)`);
+          await M.abandonCurrentBossAttempt();
+          localStorage.setItem(QUEUE_KEY, JSON.stringify(q2));
+          continue;
+        } catch (e) {
+          localStorage.removeItem(QUEUE_KEY);
+          if (M.uiLog) M.uiLog('🛑 자동 재도전 준비 실패: ' + e.message);
+          return;
+        }
+      }
+
+      // "진입 자체를 못한 것"과 "진입해서 공략했지만 실패한 것"은 서로
+      // 다른 문제라서 구분해야 한다는 지적에 따라 분리함:
+      //   - 진입 자체 실패(카드/버튼을 못 찾는 등 구조적 문제) → 별도
+      //     카운터로 세고, 반복되면 "진입 자체가 안 된다"는 걸 명확히
+      //     알리고 즉시 중단한다.
+      //   - 진입은 했지만 실제 공략에 실패(최대 시도 도달 등) → "같은
+      //     보스"를 최대 3번까지 재시도하고, 그래도 안 되면 설정/전략을
+      //     점검하라는 의미로 알리고 중단한다. (사용자가 원래 의도한 "3회
+      //     연속 실패"는 이 경우를 말한 것)
+      if (!result.entered) {
+        q2.entryFailStreak++;
+        if (M.uiLog) M.uiLog(`⚠ [큐] "${entry.label}" 전투 진입 자체 실패 (${q2.entryFailStreak}/3) - 시도조차 못 함`);
+        if (q2.entryFailStreak >= 3) {
+          localStorage.removeItem(QUEUE_KEY);
+          if (M.uiLog) M.uiLog('🛑 진입 자체가 계속 실패 - 큐 중단');
+          alert(`⚠ "${entry.label}" 전투 화면 진입에 3회 연속 실패했습니다(카드/버튼을 못 찾음).\n공략 시도조차 못 한 상태입니다. 페이지 상태나 보스 목록을 확인해주세요.`);
+          return;
+        }
+        localStorage.setItem(QUEUE_KEY, JSON.stringify(q2));
+        await M.sleep(1500);
+        continue; // 같은 보스로 재시도 (remaining은 그대로)
+      }
+
+      // 여기부터는 진입은 확실히 함 (entryFailStreak 리셋)
+      q2.entryFailStreak = 0;
+
+      if (result.cleared) {
+        if (M.uiLog) M.uiLog(`✅ [큐] "${entry.label}" 완료`);
+        q2.attempts = 0;
+        q2.remaining.shift();
+        localStorage.setItem(QUEUE_KEY, JSON.stringify(q2));
+        continue;
+      }
+
+      // 진입해서 실제로 공략까지 했는데 처치 실패 (최대 시도 도달 등)
+      q2.attempts++;
+      if (!q2.failedLabels.includes(entry.label)) q2.failedLabels.push(entry.label);
+      if (M.uiLog) M.uiLog(`⛔ [큐] "${entry.label}" 공략 실패 (같은 보스 연속 ${q2.attempts}/3회)`);
+      if (q2.attempts >= 3) {
+        localStorage.removeItem(QUEUE_KEY);
+        if (M.uiLog) M.uiLog(`🛑 "${entry.label}" 3회 연속 공략 실패 - 큐 중단`);
+        alert(`⚠ "${entry.label}" 공략에 3회 연속 실패했습니다.\n설정(프리셋/스킬 등)이나 공략 로직을 점검해주세요. 큐를 중단합니다.`);
+        return;
+      }
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(q2));
+      // remaining은 그대로 둬서 같은 보스를 다시 시도함
+    }
+
+    const finalRaw = localStorage.getItem(QUEUE_KEY);
+    const failedLabels = finalRaw ? JSON.parse(finalRaw).failedLabels : [];
+    localStorage.removeItem(QUEUE_KEY);
+    if (M.uiLog) M.uiLog('=== 보스 큐 종료 ===');
+    if (failedLabels.length > 0) {
+      // 실패가 하나라도 있었으면 팝업으로 알림 (사용자 요청)
+      alert(`일부 보스는 재시도 끝에 처치했지만 중간에 실패가 있었습니다: ${failedLabels.join(', ')}\n로그를 확인해주세요.`);
+    } else if (!M.stopRequested) {
+      // 전부 성공은 alert()로 방해하지 않고 로그에만 남김
+      // (alert는 브라우저 네이티브 모달이라 다음 자동화까지 막아버릴 수 있음)
+      if (M.uiLog) M.uiLog('🎉 선택한 보스를 모두 처치했습니다!');
+    }
+  };
+
+  // ==========================================================================
+  // 간이 GUI 패널 (참고용 - 기존 "🎯 라니스 통합 매크로" 패널과는 완전히 별개)
+  // 오른쪽 위에 작은 창으로 떠서 시작/정지 버튼과 로그를 보여줌.
+  // "항상 위로" 핀 옵션으로 다른 요소에 가려지지 않게 z-index를 최상단으로 고정.
+  // ==========================================================================
+  M.stopRequested = false;
+
+  const POS_KEY = 'lrm-boss-ref-pos';
+  const PIN_KEY = 'lrm-boss-ref-pinned';
+  const JOB_KEY = 'lrm-boss-ref-job';
+  const BOSS_SELECTION_KEY = 'lrm-boss-ref-selected-bosses';
+
+  function loadPos() {
+    try { return JSON.parse(localStorage.getItem(POS_KEY) || 'null'); } catch (e) { return null; }
+  }
+  function savePos(pos) {
+    try { localStorage.setItem(POS_KEY, JSON.stringify(pos)); } catch (e) {}
+  }
+  function loadPinned() {
+    const v = localStorage.getItem(PIN_KEY);
+    return v === null ? true : v === '1'; // 기본값: 항상 위로 켜짐
+  }
+  function savePinned(v) {
+    try { localStorage.setItem(PIN_KEY, v ? '1' : '0'); } catch (e) {}
+  }
+  function loadSelectedJob() {
+    try {
+      const value = localStorage.getItem(JOB_KEY);
+      return ['검술', '인술', '궁술', '체술', '마술'].includes(value) ? value : '궁술';
+    } catch (e) {
+      return '궁술';
+    }
+  }
+  function saveSelectedJob(value) {
+    try { localStorage.setItem(JOB_KEY, value); } catch (e) {}
+  }
+  function loadSelectedBosses() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(BOSS_SELECTION_KEY) || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      return [];
+    }
+  }
+  function saveSelectedBosses(values) {
+    try { localStorage.setItem(BOSS_SELECTION_KEY, JSON.stringify(values)); } catch (e) {}
+  }
+
+  function buildPanel() {
+    if (document.getElementById('lrm-boss-ref-panel')) return; // 중복 생성 방지
+
+    let pinned = loadPinned();
+    const savedPos = loadPos();
+
+    const panel = document.createElement('div');
+    panel.id = 'lrm-boss-ref-panel';
+    panel.style.cssText = `
+      position: fixed; top: ${savedPos ? savedPos.top : 80}px;
+      ${savedPos ? `left: ${savedPos.left}px;` : 'right: 20px;'}
+      width: 280px;
+      background: #1a1a1a; color: #eee; border: 1px solid #555;
+      border-radius: 8px; font-size: 13px;
+      z-index: ${pinned ? 2147483647 : 999999};
+      font-family: sans-serif; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    `;
+    panel.innerHTML = `
+      <div id="lrm-boss-ref-header" style="padding:8px 10px; background:#2a2a2a; border-radius:8px 8px 0 0; cursor:move; font-weight:bold; display:flex; align-items:center; justify-content:space-between;">
+        <span>🗡 보스 자동화 (참고용)</span>
+        <label style="font-weight:normal; font-size:11px; display:flex; align-items:center; gap:4px; cursor:pointer;">
+          <input type="checkbox" id="lrm-boss-ref-pin" ${pinned ? 'checked' : ''} style="cursor:pointer;">
+          📌 항상 위로
+        </label>
+      </div>
+      <div style="padding:10px;">
+        <div style="font-size:11px; color:#999; margin-bottom:2px;">직업 (검술·인술·궁술·체술·마술 지원)</div>
+        <select id="lrm-boss-ref-job" style="width:100%; margin-bottom:10px; padding:5px; background:#111; color:#eee; border:1px solid #555; border-radius:4px; cursor:pointer;">
+          <option value="검술">검술</option>
+          <option value="인술">인술</option>
+          <option value="궁술">궁술</option>
+          <option value="체술">체술</option>
+          <option value="마술">마술</option>
+        </select>
+
+        <div style="font-size:11px; color:#999; margin-bottom:4px;">보스 선택 (약한 순으로 자동 정렬해서 도전)</div>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:4px; cursor:pointer;">
+          <input type="checkbox" class="lrm-boss-check" value="fallenGuardian" style="width:16px; height:16px; cursor:pointer;"> 타락한 수호자
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:4px; cursor:pointer;">
+          <input type="checkbox" class="lrm-boss-check" value="voidEmperor" style="width:16px; height:16px; cursor:pointer;"> 공허의 황제
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:4px; cursor:pointer;">
+          <input type="checkbox" class="lrm-boss-check" value="vineEnt" style="width:16px; height:16px; cursor:pointer;"> 지하를 휘감은 엔트
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer;">
+          <input type="checkbox" class="lrm-boss-check" value="vineWraith" style="width:16px; height:16px; cursor:pointer;"> 지하의 망령
+        </label>
+
+        <button id="lrm-boss-ref-run-queue" style="width:100%; margin-bottom:6px; padding:6px; background:#2e7d32; color:#fff; border:none; border-radius:4px; cursor:pointer;">보스 도전</button>
+        <button id="lrm-boss-ref-bg-test" style="width:100%; margin-bottom:6px; padding:6px; background:#1565c0; color:#fff; border:none; border-radius:4px; cursor:pointer;">백그라운드 진단 (60초)</button>
+        <button id="lrm-boss-ref-stop" style="width:100%; margin-bottom:6px; padding:6px; background:#c62828; color:#fff; border:none; border-radius:4px; cursor:pointer;">정지</button>
+        <div style="font-size:11px; color:#999; margin-bottom:4px;">로그</div>
+        <div id="lrm-boss-ref-log" style="height:160px; overflow-y:auto; background:#000; padding:6px; border-radius:4px; white-space:pre-wrap; font-size:11px; line-height:1.4;"></div>
+      </div>
+    `;
+    document.body.appendChild(panel);
+
+    // 마지막으로 선택한 직업과 보스 체크 상태는 실행 큐와 별도로 영구 저장한다.
+    // 새로고침이나 보스 화면 이동으로 스크립트가 다시 로드돼도 그대로 복원됨.
+    const jobSelect = panel.querySelector('#lrm-boss-ref-job');
+    jobSelect.value = loadSelectedJob();
+    jobSelect.addEventListener('change', (e) => saveSelectedJob(e.target.value));
+
+    const savedBosses = new Set(loadSelectedBosses());
+    panel.querySelectorAll('.lrm-boss-check').forEach((checkbox) => {
+      checkbox.checked = savedBosses.has(checkbox.value);
+      checkbox.addEventListener('change', () => {
+        const checkedValues = [...panel.querySelectorAll('.lrm-boss-check:checked')]
+          .map((item) => item.value);
+        saveSelectedBosses(checkedValues);
+      });
+    });
+
+    // 항상 위로(핀) 토글: 켜져 있으면 z-index를 최대값으로 고정해 다른 요소에 가려지지 않게 함
+    panel.querySelector('#lrm-boss-ref-pin').addEventListener('change', (e) => {
+      pinned = e.target.checked;
+      panel.style.zIndex = pinned ? '2147483647' : '999999';
+      savePinned(pinned);
+    });
+
+    // 드래그 이동 (위치는 localStorage에 저장해 새로고침/재접속해도 유지)
+    const header = panel.querySelector('#lrm-boss-ref-header');
+    let dragging = false, offsetX = 0, offsetY = 0;
+    header.addEventListener('mousedown', (e) => {
+      if (e.target.closest('label')) return; // 체크박스 클릭은 드래그로 취급 안 함
+      dragging = true;
+      offsetX = e.clientX - panel.offsetLeft;
+      offsetY = e.clientY - panel.offsetTop;
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const left = e.clientX - offsetX;
+      const top = e.clientY - offsetY;
+      panel.style.left = left + 'px';
+      panel.style.top = top + 'px';
+      panel.style.right = 'auto';
+    });
+    document.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      savePos({ left: panel.offsetLeft, top: panel.offsetTop });
+    });
+
+    const logEl = panel.querySelector('#lrm-boss-ref-log');
+    M.uiLog = (line) => {
+      const div = document.createElement('div');
+      div.textContent = line;
+      logEl.appendChild(div);
+      logEl.scrollTop = logEl.scrollHeight;
+    };
+
+    const setRunningState = (running) => {
+      panel.querySelector('#lrm-boss-ref-run-queue').disabled = running;
+      panel.querySelectorAll('.lrm-boss-check').forEach((c) => { c.disabled = running; });
+    };
+
+    panel.querySelector('#lrm-boss-ref-run-queue').addEventListener('click', async () => {
+      const checked = [...panel.querySelectorAll('.lrm-boss-check:checked')].map((c) => c.value);
+      if (checked.length === 0) {
+        M.uiLog('⚠ 선택된 보스가 없음');
+        return;
+      }
+      M.stopRequested = false;
+      setRunningState(true);
+      M.uiLog(`▶ 보스 도전 시작 (선택: ${checked.length}개)`);
+      try {
+        await M.startBossQueue(checked);
+      } catch (e) {
+        M.uiLog('⚠ 오류: ' + e.message);
+      }
+      setRunningState(false);
+    });
+
+    panel.querySelector('#lrm-boss-ref-bg-test').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        await M.runBackgroundDiagnostic(60000);
+      } catch (err) {
+        M.uiLog('⚠ 백그라운드 진단 오류: ' + err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    panel.querySelector('#lrm-boss-ref-stop').addEventListener('click', () => {
+      M.stopRequested = true;
+      localStorage.removeItem(PENDING_KEY);
+      localStorage.removeItem(QUEUE_KEY);
+      M.antiThrottle.stop();
+      M.uiLog('■ 정지 요청됨 (다음 턴 진행 전에 멈춤, 큐/재개 예약도 취소)');
+    });
+  }
+
+  buildPanel();
+
+  // 새로고침/재접속으로 스크립트가 다시 로드된 경우, 진행 중이던 요청이 있으면 자동으로 이어감
+  (function resumePendingIfAny() {
+    const queueRaw = localStorage.getItem(QUEUE_KEY);
+    if (queueRaw) {
+      setTimeout(() => {
+        if (M.uiLog) M.uiLog('⏳ 보스 큐 이어서 진행');
+        // 새로고침 직후라 사용자 제스처가 없어 오디오 자동재생이 막힐 수도
+        // 있지만(브라우저 정책), 안 되면 조용히 무시되고 매크로는 계속 진행됨.
+        M.antiThrottle.start();
+        M.continueBossQueue()
+          .catch((e) => { if (M.uiLog) M.uiLog('⚠ ' + e.message); })
+          .finally(() => M.antiThrottle.stop());
+      }, 1200);
+      return;
+    }
+    const pending = localStorage.getItem(PENDING_KEY);
+    if (pending && BOSS_REGISTRY[pending]) {
+      setTimeout(() => {
+        if (M.uiLog) M.uiLog(`⏳ 이전 요청 이어서 진행: ${BOSS_REGISTRY[pending].label}`);
+        M.antiThrottle.start();
+        M.driveToBossAndRun(pending)
+          .catch((e) => { if (M.uiLog) M.uiLog('⚠ ' + e.message); })
+          .finally(() => M.antiThrottle.stop());
+      }, 1200); // 페이지가 완전히 로드될 시간을 조금 줌
+    }
+  })();
+
+  // ==========================================================================
+  // 보스별 공략 로직
+  // ==========================================================================
+
+  // --- 타락한 수호자 (검술 잡, 일반) -------------------------------------------
+  // 1) 봉인 프리셋으로 "불굴"+"엔드 블로킹" 봉인될 때까지 5턴씩 반복
+  // 2) 마나 프리셋으로 보스 마나 0 될 때까지 10턴씩 반복
+  // 3) 딜 프리셋 + 공격/집중 스크롤로 5턴씩 반복해 처치
+  M.runFallenGuardian = async ({
+    requiredSeals = ['불굴', '엔드 블로킹'],
+    maxSealRounds = 15,
+    maxManaRounds = 20, // 10턴씩이라 실제 최대 200턴
+    maxDealRounds = 30,
+    hpThreshold = 0.5,
+  } = {}) => {
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+    const stopped = () => {
+      if (M.stopRequested) { push('■ 사용자 요청으로 정지'); return true; }
+      return false;
+    };
+    const recoverUntilSafe = async () => {
+      for (let i = 0; i < 10; i++) {
+        const state = await M.getValidHpMpNumbers();
+        const ratio = state.player.hp.cur / state.player.hp.max;
+        if (ratio > hpThreshold) return;
+        await M.clickRecover();
+        push(`내HP ${Math.round(ratio * 100)}% -> 회복`);
+      }
+      throw new Error('수호자: 10회 회복 후에도 HP 50% 초과 실패');
+    };
+
+    await M.applyBossPreset('봉인');
+    push('[1단계] 봉인 프리셋 적용');
+    let sealed = M.parseSealedAbilities(requiredSeals);
+    let r = 0;
+    while (!requiredSeals.every((a) => sealed.has(a)) && r < maxSealRounds) {
+      if (stopped()) return { log, cleared: false };
+      await recoverUntilSafe();
+      await M.clickTurn(5);
+      r++;
+      for (const s of M.parseSealedAbilities(requiredSeals)) sealed.add(s); // 화면에 최근 로그만 남아 예전 정보를 잊지 않도록 누적
+      push(`[1단계 ${r}회차] sealed=${[...sealed].join(',')}`);
+    }
+    if (!requiredSeals.every((a) => sealed.has(a))) {
+      push('[1단계] 경고: 최대 시도 내 목표 봉인 미완료, 다음 단계로 진행');
+    }
+    if (stopped()) return { log, cleared: false };
+
+    // 2단계: 마나 (10턴씩)
+    await M.applyBossPreset('마나');
+    push('[2단계] 마나 프리셋 적용');
+    let state = (await M.getValidHpMpNumbers());
+    r = 0;
+    while (state.boss.mp.cur > 0 && r < maxManaRounds) {
+      if (stopped()) return { log, cleared: false };
+      await recoverUntilSafe();
+      await M.clickTurn(10);
+      r++;
+      state = (await M.getValidHpMpNumbers());
+      push(`[2단계 ${r}회차/10턴] bossMp=${state.boss.mp.cur}/${state.boss.mp.max} bossHp=${state.boss.hp.cur}`);
+    }
+    if (state.boss.mp.cur > 0) push('[2단계] 경고: 최대 시도 내 마나 0 미도달, 다음 단계로 진행');
+    if (stopped()) return { log, cleared: false };
+
+    await M.applyBossPreset('딜');
+    push('[3단계] 딜 프리셋 적용');
+    state = (await M.getValidHpMpNumbers());
+    r = 0;
+    let scrollRoundsUsed = 0;
+    while (state.boss.hp.cur > 0 && r < maxDealRounds) {
+      if (stopped()) return { log, cleared: false };
+      await recoverUntilSafe();
+      // 공격+집중은 합계 2장, 전투당 스크롤 한도 10장이므로 최대 5회.
+      // 각 사용 직후 5턴을 공격하고, 모두 소진되면 스크롤 없이 계속 공격한다.
+      if (scrollRoundsUsed < 5) {
+        await M.useScrolls(['공격', '집중']);
+        scrollRoundsUsed++;
+        push(`[3단계] 공격/집중 스크롤 사용 (${scrollRoundsUsed}/5)`);
+      }
+      await M.clickTurn(5);
+      r++;
+      state = (await M.getValidHpMpNumbers());
+      push(`[3단계 ${r}회차] bossHp=${state.boss.hp.cur}`);
+      if (state.boss.hp.cur <= 0) break;
+    }
+
+    const finalCleared = state.boss.hp.cur <= 0;
+    if (finalCleared) {
+      push('✅ 처치 완료');
+    } else {
+      push(`⛔ 최대 시도 횟수 도달, 보스 HP ${state.boss.hp.cur} 남음 (미처치)`);
+    }
+    if (finalCleared) await M.closeClearPopupIfAny();
+    return { log, cleared: finalCleared };
+  };
+
+  // --- 공허의 황제 (검술 잡, 일반) ---------------------------------------------
+  // 1) 봉인 프리셋으로 "차원왜곡" 봉인될 때까지 5턴씩 반복
+  // 2) 마나 프리셋으로 보스 마나 0 될 때까지 "10턴"씩 반복  ← 5턴에서 변경됨
+  // 3) 딜 프리셋 전환 + 스크롤 패턴:
+  //      1회차: 공격+집중
+  //      2회차: 공격+집중
+  //      3회차: 공격+집중+재생
+  //      4회차부터: 스크롤 없이 5턴씩만 반복
+  //    내 HP가 30% 이하로 떨어지면 그 턴은 공격 대신 회복(2턴) 사용
+  M.runVoidEmperor = async ({
+    requiredSeal = '차원왜곡',
+    maxSealRounds = 15,
+    maxManaRounds = 20, // 10턴씩이라 실제 최대 200턴
+    maxDealRounds = 30,
+    lowHpThreshold = 0.3,
+  } = {}) => {
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+    const stopped = () => {
+      if (M.stopRequested) { push('■ 사용자 요청으로 정지'); return true; }
+      return false;
+    };
+
+    // 1단계: 봉인
+    await M.applyBossPreset('봉인');
+    push('[1단계] 봉인 프리셋 적용');
+    let sealed = M.parseSealedAbilities([requiredSeal]);
+    let r = 0;
+    while (!sealed.has(requiredSeal) && r < maxSealRounds) {
+      if (stopped()) return { log, cleared: false };
+      await M.clickTurn(5);
+      r++;
+      for (const s of M.parseSealedAbilities([requiredSeal])) sealed.add(s); // 화면에 최근 로그만 남아 예전 정보를 잊지 않도록 누적
+      push(`[1단계 ${r}회차] sealed=${[...sealed].join(',')}`);
+    }
+    if (!sealed.has(requiredSeal)) {
+      push(`[1단계] 경고: 최대 시도 내 "${requiredSeal}" 미봉인, 다음 단계로 진행`);
+    }
+    if (stopped()) return { log, cleared: false };
+
+    // 2단계: 마나. 모든 직업 공통으로 MP가 300을 초과하면 5턴,
+    // 300 이하면 1턴씩 진행해 0을 넘겨 낭비하지 않는다.
+    await M.applyBossPreset('마나');
+    push('[2단계] 마나 프리셋 적용');
+    let state = (await M.getValidHpMpNumbers());
+    r = 0;
+    while (state.boss.mp.cur > 0 && r < maxManaRounds) {
+      if (stopped()) return { log, cleared: false };
+      const turns = state.boss.mp.cur > 300 ? 5 : 1;
+      await M.clickTurn(turns);
+      r++;
+      state = (await M.getValidHpMpNumbers());
+      push(`[2단계 ${r}회차/${turns}턴] bossMp=${state.boss.mp.cur}/${state.boss.mp.max} bossHp=${state.boss.hp.cur}`);
+    }
+    if (state.boss.mp.cur > 0) push('[2단계] 경고: 최대 시도 내 마나 0 미도달, 다음 단계로 진행');
+    if (stopped()) return { log, cleared: false };
+
+    // 3단계: 딜 (스크롤 패턴 + 회복 개입)
+    await M.applyBossPreset('딜');
+    push('[3단계] 딜 프리셋 적용');
+
+    state = (await M.getValidHpMpNumbers());
+    let round = 0;
+    let attackRound = 0;
+    while (state.boss.hp.cur > 0 && round < maxDealRounds) {
+      if (stopped()) return { log, cleared: false };
+      round++;
+      const myHpRatio = state.player.hp.cur / state.player.hp.max;
+      if (myHpRatio < lowHpThreshold) {
+        await M.clickRecover();
+        push(`[3단계 ${round}회차] 내HP ${Math.round(myHpRatio * 100)}% -> 회복`);
+      } else {
+        // 스크롤 패턴은 "실제 공격한 턴" 기준이어야 함 - round를 그대로
+        // 쓰면 회복이 끼어들 때 스크롤을 공격 안 하는 회복턴에 낭비하거나
+        // 패턴이 밀리는 문제가 있었음(같은 종류 버그가 인술 망령에서도
+        // 지적됨).
+        attackRound++;
+        if (attackRound === 1 || attackRound === 2) {
+          await M.useScrolls(['공격', '집중']);
+          push(`[3단계 스크롤 공격${attackRound}회차] 공격+집중`);
+        } else if (attackRound === 3) {
+          await M.useScrolls(['공격', '집중', '재생']);
+          push(`[3단계 스크롤 공격${attackRound}회차] 공격+집중+재생`);
+        }
+        await M.clickTurn(5);
+      }
+      state = (await M.getValidHpMpNumbers());
+      push(`[3단계 ${round}회차] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
+    }
+
+    const finalCleared = state.boss.hp.cur <= 0;
+    if (finalCleared) {
+      push('✅ 처치 완료');
+    } else {
+      push(`⛔ 최대 시도 횟수 도달, 보스 HP ${state.boss.hp.cur} 남음 (미처치)`);
+    }
+    if (finalCleared) await M.closeClearPopupIfAny();
+    return { log, cleared: finalCleared };
+  };
+
+  // --- 지하를 휘감은 엔트 (검술 잡, 일반) ---------------------------------------
+  // 1) 항상: 내 HP 30% 이하면 공격 대신 회복
+  // 2) 봉인 프리셋으로 "노 컨디션" 봉인될 때까지 5턴씩 반복
+  //    - 단, 이 도중에 "휘감은 뿌리"가 (노 컨디션보다 먼저) 봉인되면 화상 단계를
+  //      건너뛰고 바로 정신일도 단계로 진행
+  // 3) 노 컨디션이 먼저 봉인된 정상 경로라면: 화상 프리셋으로 전환해
+  //    "휘감은 뿌리" 봉인될 때까지 5턴씩 반복
+  // 4) 정신일도 프리셋으로 5턴 공격 (1회)
+  // 5) 딜 프리셋 + 공격/집중 스크롤로 5턴씩 반복 처치. 매 라운드마다 스크롤을
+  //    다시 사용하되, 스크롤 사용 전 내 HP가 50% 이하면 그 라운드는 회복만 함
+  M.runVineEntSword = async ({
+    requiredSeals = ['노 컨디션', '휘감은 뿌리'],
+    maxSealRounds = 8, // 150턴 예산 안에서 딜 단계 턴을 확보하기 위해 축소
+    maxBurnRounds = 8,
+    maxDealRounds = 40,
+    globalLowHpThreshold = 0.3,
+    dealLowHpThreshold = 0.5,
+  } = {}) => {
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+    const stopped = () => {
+      if (M.stopRequested) { push('■ 사용자 요청으로 정지'); return true; }
+      return false;
+    };
+    let mechanicTurns = 0;
+    // 공통: HP 낮으면 회복, 아니면 5턴 공격. 회복했으면 true 반환
+    const attackOrRecover = async (threshold) => {
+      const s = (await M.getValidHpMpNumbers());
+      const ratio = s.player.hp.cur / s.player.hp.max;
+      if (ratio <= threshold) {
+        await M.clickRecover();
+        mechanicTurns += 2;
+        push(`내HP ${Math.round(ratio * 100)}% -> 회복`);
+        return true;
+      }
+      await M.clickTurn(5);
+      mechanicTurns += 5;
+      return false;
+    };
+
+    // 2단계: 봉인 (노 컨디션 목표, 휘감은 뿌리 먼저 봉인되면 화상 단계 스킵)
+    await M.applyBossPreset('봉인');
+    push('[1단계] 봉인 프리셋 적용');
+    let sealed = M.parseSealedAbilities(requiredSeals);
+    let skipBurnPhase = sealed.has('휘감은 뿌리');
+    let r = 0;
+    while (!sealed.has('노 컨디션') && !sealed.has('휘감은 뿌리') && r < maxSealRounds) {
+      if (stopped()) return { log, cleared: false };
+      await attackOrRecover(globalLowHpThreshold);
+      r++;
+      for (const s of M.parseSealedAbilities(requiredSeals)) sealed.add(s);
+      push(`[1단계 ${r}회차] sealed=${[...sealed].join(',')}`);
+      if (mechanicTurns > 45 && !sealed.has('노 컨디션') && !sealed.has('휘감은 뿌리')) {
+        push('⛔ 엔트 기믹 45턴 초과 - 포기 후 재도전');
+        return { log, cleared: false, retryRequired: true };
+      }
+    }
+    if (sealed.has('휘감은 뿌리')) {
+      skipBurnPhase = true;
+      push('[1단계] "휘감은 뿌리"가 먼저 봉인됨 -> 화상 단계 생략');
+    } else if (!sealed.has('노 컨디션')) {
+      push('[1단계] 경고: 최대 시도 내 "노 컨디션" 미봉인, 다음 단계로 진행');
+    }
+    if (stopped()) return { log, cleared: false };
+
+    // 3단계: 화상 (휘감은 뿌리 목표) - 이미 봉인됐으면 생략
+    if (!skipBurnPhase) {
+      await M.applyBossPreset('화상');
+      push('[2단계] 화상 프리셋 적용');
+      r = 0;
+      while (!sealed.has('휘감은 뿌리') && r < maxBurnRounds) {
+        if (stopped()) return { log, cleared: false };
+        await attackOrRecover(globalLowHpThreshold);
+        r++;
+        for (const s of M.parseSealedAbilities(requiredSeals)) sealed.add(s);
+        push(`[2단계 ${r}회차] sealed=${[...sealed].join(',')}`);
+        if (mechanicTurns > 45 && !sealed.has('휘감은 뿌리')) {
+          push('⛔ 엔트 기믹 45턴 초과 - 포기 후 재도전');
+          return { log, cleared: false, retryRequired: true };
+        }
+      }
+      if (!sealed.has('휘감은 뿌리')) {
+        push('[2단계] 경고: 최대 시도 내 "휘감은 뿌리" 미봉인, 다음 단계로 진행');
+      }
+    } else {
+      push('[2단계] 생략됨 (이미 봉인)');
+    }
+    if (stopped()) return { log, cleared: false };
+
+    // 4단계: 정신일도 (5턴 1회 시도 - 회복이 개입했으면 그렇게 로그에 남김)
+    await M.applyBossPreset('정신일도');
+    push('[3단계] 정신일도 프리셋 적용');
+    if (stopped()) return { log, cleared: false };
+    let recoveryCount = 0;
+    while (await attackOrRecover(globalLowHpThreshold)) {
+      recoveryCount++;
+      if (stopped()) return { log, cleared: false };
+      if (recoveryCount >= 10) throw new Error('정신일도 전 10회 회복 후에도 안전 HP 미도달');
+    }
+    push(`[3단계] 정신일도 5턴 공격 완료 (사전 회복 ${recoveryCount}회)`);
+    if (stopped()) return { log, cleared: false };
+
+    // 5단계: 딜 (매 라운드 스크롤 재사용, 스크롤 전 HP<=50%면 회복)
+    await M.applyBossPreset('딜');
+    push('[4단계] 딜 프리셋 적용');
+    let state = (await M.getValidHpMpNumbers());
+    r = 0;
+    let dealAttackRound = 0;
+    while (state.boss.hp.cur > 0 && r < maxDealRounds) {
+      if (stopped()) return { log, cleared: false };
+      r++;
+      const ratio = state.player.hp.cur / state.player.hp.max;
+      if (ratio <= dealLowHpThreshold) {
+        await M.clickRecover();
+        push(`[4단계 ${r}회차] 내HP ${Math.round(ratio * 100)}% -> 회복 (스크롤 생략)`);
+      } else {
+        dealAttackRound++;
+        if (dealAttackRound <= 5) {
+          await M.useScrolls(['공격', '집중']);
+          push(`[4단계 공격${dealAttackRound}회차] 공격+집중 스크롤 (${dealAttackRound}/5)`);
+        } else {
+          push(`[4단계 공격${dealAttackRound}회차] 스크롤 소진 후 무스크롤 공격`);
+        }
+        await M.clickTurn(5);
+        push(`[4단계 ${r}회차] 5턴 공격`);
+      }
+      state = (await M.getValidHpMpNumbers());
+      push(`[4단계 ${r}회차] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
+    }
+
+    const finalCleared = state.boss.hp.cur <= 0;
+    if (finalCleared) {
+      push('✅ 처치 완료');
+    } else {
+      push(`⛔ 최대 시도 횟수 도달, 보스 HP ${state.boss.hp.cur} 남음 (미처치)`);
+    }
+    if (finalCleared) await M.closeClearPopupIfAny();
+    return { log, cleared: finalCleared };
+  };
+
+  // --- 지하의 망령 (검술 잡, 일반) ---------------------------------------------
+  // 기믹: 망령은 공격태세/수비태세를 오가며, 한 자세를 오래 유지할수록 더
+  // 잡기 어려워짐(공격태세는 시간이 지날수록 공격력·적중 상승, 수비태세는
+  // 방어력 상승). 자세가 "깨질" 때마다(공격<->수비 전환 1왕복 = 1사이클)
+  // 방어력이 -100씩 누적됨. 이를 이용해 방어력을 충분히 낮춘 뒤 스킬딜로 마무리.
+  //
+  // 자세 전환 조건 (사용자 확인):
+  //   - 공격태세 -> 수비태세: 내가 "받는" 피해(💔)가 5턴 누적 100 이하일 때
+  //   - 수비태세 -> 공격태세: 내가 "주는" 피해(⚔️)가 3턴 누적 100 이하일 때
+  //   (버프가 쌓이면 데미지가 올라가 조건을 계속 못 채울 수 있음 - 버프는
+  //    지속시간이 있어 결국 빠지므로, 그냥 1턴씩 계속 시도하면 됨)
+  //
+  // 자세 판정은 화면에 뜨는 보스의 "공격력 vs 방어력" 숫자 비교로 함
+  // (M.getBossStance) - 로그에 "자세가 깨졌다!"라는 문구도 뜨지만 어느
+  // 방향인지는 텍스트만으론 구분이 안 돼서 판정에 안 씀.
+  //
+  // ⚠️ 매우 중요: 전투 스크롤은 "전투당 총 10개" 한도가 있음. 사이클마다
+  // 회피 스크롤을 딱 1번만 써야 함 (공격 페이즈 시작할 때만). 수비 페이즈로
+  // 넘어갈 때 스크롤을 또 쓰면 절대 안 됨 - 실전에서 이 실수로 5사이클
+  // 만에 스크롤 10개를 다 써버려 딜 단계에서 못 쓰는 사고가 있었음.
+  // 0단계(첫 전환)는 스크롤 없이 진행, 이후 1~5단계에서만 사이클당 1개씩
+  // 사용 -> 총 5개 소비, 딜 단계에 5개가 남음.
+  //
+  // 딜 단계: 딜 프리셋 + 공격 스크롤(단일, 5공격턴마다 재사용) + 1턴씩 공격.
+  //   - 내 HP 65% 이하 -> 회복
+  //   - 내 MP 60% 이하 -> 회복
+  //   (1턴 공격하고 1턴 회복하는 패턴이 자주 나오는 게 정상)
+  //
+  // ⚠️ 딜 스킬은 보스의 그날 속성에 맞춰 미리 바꿔둬야 함 (M.ELEMENT_TO_SKILL
+  // 참고). 스킬 변경은 /skill-management 페이지에서 하며, 이 페이지 왕복은
+  // SPA 전환이라 새로고침 없이 전투 상태를 유지한 채 다녀올 수 있음
+  // (캐릭>스킬 메뉴 클릭 후, 볼일 다 보면 history.back()으로 복귀).
+  // 이 스킬 자동 전환 로직은 아직 이 함수에 통합되지 않음 - 전투 시작 전에
+  // 미리 손으로 맞춰두거나, 추후 자동화 필요.
+  M.runVineWraithSword = async ({
+    firstAttackMaxTurns = 8,
+    laterAttackMaxTurns = 25,
+    maxDefendTurns = 25,
+    maxDealRounds = 80,
+    hpThreshold = 0.7,
+    mpThreshold = 0.6,
+  } = {}) => {
+    const bossLabel = '지하의 망령';
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+    const stopped = () => { if (M.stopRequested) { push('■ 사용자 요청으로 정지'); return true; } return false; };
+    const getStance = async () => (await M.getValidBossStance(bossLabel)).stance;
+    const recoverUntilSafe = async () => {
+      for (let i = 0; i < 10; i++) {
+        const state = await M.getValidHpMpNumbers();
+        const ratio = state.player.hp.cur / state.player.hp.max;
+        if (ratio > hpThreshold) return;
+        await M.clickRecover();
+        push(`HP ${Math.round(ratio * 100)}% -> 회복`);
+      }
+      throw new Error('망령: 10회 회복 후에도 HP 70% 초과 실패');
+    };
+    const safeTurn = async (turns) => {
+      await recoverUntilSafe();
+      await M.clickTurn(turns);
+    };
+
+    // 공격 페이즈: 5턴 시도 후, 안 바뀌면 1턴씩 추가 시도 (버프 소멸 대기)
+    const attackUntilFlip = async (label, maxTurns) => {
+      let stance = await getStance();
+      await safeTurn(5);
+      let n = 5;
+      while ((await getStance()) === stance && n < maxTurns) {
+        if (stopped()) return false;
+        await safeTurn(1);
+        n++;
+      }
+      const ok = (await getStance()) !== stance;
+      push(`[${label}] ${n}턴만에 ${ok ? '전환 성공' : '전환 실패'}: ` + JSON.stringify(await M.getValidBossStance(bossLabel)));
+      return ok;
+    };
+    // 수비 페이즈: 1턴씩 시도 (스크롤 재사용 없음)
+    const defendUntilFlip = async (label) => {
+      let stance = await getStance();
+      let n = 0;
+      while ((await getStance()) === stance && n < maxDefendTurns) {
+        if (stopped()) return false;
+        await safeTurn(1);
+        n++;
+      }
+      const ok = (await getStance()) !== stance;
+      push(`[${label}] ${n}턴만에 ${ok ? '전환 성공' : '전환 실패'}: ` + JSON.stringify(await M.getValidBossStance(bossLabel)));
+      return ok;
+    };
+
+    // 0단계: 기본 사이클 (스크롤 없음)
+    await M.applyBossPreset('공격'); push('[0단계] 공격 프리셋 적용');
+    if (!(await attackUntilFlip('0단계-공격', firstAttackMaxTurns))) {
+      push('[0단계] 8턴 내 전환 실패 - 포기 후 재도전 필요');
+      return { log, cleared: false, retryRequired: true };
+    }
+    await M.applyBossPreset('수비'); push('[0단계] 수비 프리셋 적용');
+    if (!(await defendUntilFlip('0단계-수비'))) { push('[0단계] 실패 - 리셋 필요'); return { log, cleared: false }; }
+
+    // 1~5단계: 회피 스크롤 사이클 (사이클당 딱 1번만 사용!)
+    for (let cycle = 1; cycle <= 5; cycle++) {
+      if (stopped()) return { log, cleared: false };
+      await M.applyBossPreset('공격');
+      await recoverUntilSafe();
+      await M.useScrolls(['회피']); // 이번 사이클의 유일한 스크롤 사용
+      push(`[${cycle}단계] 공격 프리셋 + 회피 스크롤(1회) 적용`);
+      if (!(await attackUntilFlip(`${cycle}단계-공격`, laterAttackMaxTurns))) {
+        push(`[${cycle}단계] 실패 - 리셋 필요`);
+        return { log, cleared: false };
+      }
+
+      await M.applyBossPreset('수비'); // 스크롤 재사용 절대 금지
+      push(`[${cycle}단계] 수비 프리셋 적용 (스크롤 없음)`);
+      if (!(await defendUntilFlip(`${cycle}단계-수비`))) { push(`[${cycle}단계] 실패 - 리셋 필요`); return { log, cleared: false }; }
+    }
+
+    push('[전환완료] ' + JSON.stringify(await M.getValidBossStance(bossLabel)));
+
+    // 딜 단계
+    await M.applyBossPreset('딜'); push('[딜단계] 딜 프리셋 적용');
+    const skillResult = await M.setDealSkillForBossElement(bossLabel);
+    push('[딜단계] 속성별 스킬 세팅: ' + JSON.stringify(skillResult));
+    let attackCounter = 0;
+    let state = (await M.getValidHpMpNumbers());
+    let round = 0;
+    while (state.boss.hp.cur > 0 && round < maxDealRounds) {
+      if (stopped()) return { log, cleared: false };
+      round++;
+      const hpRatio = state.player.hp.cur / state.player.hp.max;
+      const mpRatio = state.player.mp.cur / state.player.mp.max;
+      if (hpRatio <= hpThreshold) {
+        await M.clickRecover();
+        push(`[딜 ${round}] HP ${Math.round(hpRatio * 100)}% -> 회복`);
+      } else if (mpRatio <= mpThreshold) {
+        await M.clickRecover();
+        push(`[딜 ${round}] MP ${Math.round(mpRatio * 100)}% -> 회복`);
+      } else {
+        if (attackCounter % 5 === 0) {
+          try { await M.useScrolls(['공격']); push(`[딜 ${round}] 공격 스크롤 사용`); }
+          catch (e) { push(`[딜 ${round}] 스크롤 실패(잔여 소진 추정): ` + e.message); }
+        }
+        await M.clickTurn(1);
+        attackCounter++;
+        push(`[딜 ${round}] 1턴 공격 (누적 공격턴=${attackCounter})`);
+      }
+      state = (await M.getValidHpMpNumbers());
+      push(`   bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max} myMp=${state.player.mp.cur}/${state.player.mp.max}`);
+    }
+
+    const finalCleared = state.boss.hp.cur <= 0;
+    if (finalCleared) {
+      push('✅ 처치 완료');
+    } else {
+      push(`⛔ 최대 시도 횟수 도달, 보스 HP ${state.boss.hp.cur} 남음 (미처치)`);
+    }
+    if (finalCleared) await M.closeClearPopupIfAny();
+    return { log, cleared: finalCleared };
+  };
+
+  // --- 지하를 휘감은 엔트 (인술 잡) --------------------------------------------
+  // 검술과 달리 정신일도 단계가 없음. 노 컨디션->휘감은 뿌리 순으로 봉인
+  // (휘감은 뿌리가 먼저 되면 화상 단계 생략) 후 바로 딜. 회복 기준은
+  // HP 50% 이하 하나뿐(MP 신경 안 씀).
+  M.runVineEntNinja = async ({
+    requiredSeals = ['노 컨디션', '휘감은 뿌리'],
+    maxSealRounds = 8,
+    maxBurnRounds = 8,
+    maxDealRounds = 40,
+    hpThreshold = 0.7,
+  } = {}) => {
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+    const stopped = () => { if (M.stopRequested) { push('■ 사용자 요청으로 정지'); return true; } return false; };
+    let mechanicTurns = 0;
+    const attackOrRecover = async () => {
+      const s = (await M.getValidHpMpNumbers()); const ratio = s.player.hp.cur / s.player.hp.max;
+      if (ratio <= hpThreshold) {
+        await M.clickRecover();
+        mechanicTurns += 2;
+        push(`내HP ${Math.round(ratio * 100)}% -> 회복`);
+        return true;
+      }
+      await M.clickTurn(5);
+      mechanicTurns += 5;
+      return false;
+    };
+
+    await M.applyBossPreset('봉인'); push('[1단계] 봉인 프리셋 적용');
+    let sealed = M.parseSealedAbilities(requiredSeals);
+    let skipBurnPhase = sealed.has('휘감은 뿌리');
+    let r = 0;
+    while (!sealed.has('노 컨디션') && !sealed.has('휘감은 뿌리') && r < maxSealRounds) {
+      if (stopped()) return { log, cleared: false }; await attackOrRecover(); r++;
+      for (const s of M.parseSealedAbilities(requiredSeals)) sealed.add(s);
+      push(`[1단계 ${r}회차] sealed=${[...sealed].join(',')}`);
+      if (mechanicTurns > 45 && !sealed.has('노 컨디션') && !sealed.has('휘감은 뿌리')) {
+        push('⛔ 엔트 기믹 45턴 초과 - 포기 후 재도전');
+        return { log, cleared: false, retryRequired: true };
+      }
+    }
+    if (sealed.has('휘감은 뿌리')) { skipBurnPhase = true; push('[1단계] "휘감은 뿌리"가 먼저 봉인됨 -> 화상 단계 생략'); }
+    else if (!sealed.has('노 컨디션')) { push('[1단계] 경고: 최대 시도 내 "노 컨디션" 미봉인, 다음 단계로 진행'); }
+    if (stopped()) return { log, cleared: false };
+
+    if (!skipBurnPhase) {
+      await M.applyBossPreset('화상'); push('[2단계] 화상 프리셋 적용');
+      r = 0;
+      while (!sealed.has('휘감은 뿌리') && r < maxBurnRounds) {
+        if (stopped()) return { log, cleared: false }; await attackOrRecover(); r++;
+        for (const s of M.parseSealedAbilities(requiredSeals)) sealed.add(s);
+        push(`[2단계 ${r}회차] sealed=${[...sealed].join(',')}`);
+        if (mechanicTurns > 45 && !sealed.has('휘감은 뿌리')) {
+          push('⛔ 엔트 기믹 45턴 초과 - 포기 후 재도전');
+          return { log, cleared: false, retryRequired: true };
+        }
+      }
+      if (!sealed.has('휘감은 뿌리')) push('[2단계] 경고: 최대 시도 내 "휘감은 뿌리" 미봉인, 다음 단계로 진행');
+    } else { push('[2단계] 생략됨 (이미 봉인)'); }
+    if (stopped()) return { log, cleared: false };
+
+    await M.applyBossPreset('딜'); push('[3단계] 딜 프리셋 적용');
+    let state = (await M.getValidHpMpNumbers()); r = 0;
+    while (state.boss.hp.cur > 0 && r < maxDealRounds) {
+      if (stopped()) return { log, cleared: false }; r++;
+      const ratio = state.player.hp.cur / state.player.hp.max;
+      if (ratio <= hpThreshold) {
+        await M.clickRecover();
+        push(`[3단계 ${r}회차] 내HP ${Math.round(ratio * 100)}% -> 회복 (스크롤 생략)`);
+      } else {
+        await M.useScrolls(['공격', '집중']);
+        await M.clickTurn(5);
+        push(`[3단계 ${r}회차] 공격+집중 스크롤 후 5턴 공격`);
+      }
+      state = (await M.getValidHpMpNumbers());
+      push(`[3단계 ${r}회차] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
+    }
+
+    const finalCleared = state.boss.hp.cur <= 0;
+    if (finalCleared) {
+      push('✅ 처치 완료');
+    } else {
+      push(`⛔ 최대 시도 횟수 도달, 보스 HP ${state.boss.hp.cur} 남음 (미처치)`);
+    }
+    if (finalCleared) await M.closeClearPopupIfAny();
+    return { log, cleared: finalCleared };
+  };
+
+  // --- 지하의 망령 (인술 잡) ----------------------------------------------------
+  // 검술과 기믹은 동일(자세전환으로 방어력 깎기)하지만 인술은 기본 스킬
+  // "연막"이 회피기라서 회피 스크롤을 아예 쓰지 않음. 목표 방어력도 340이
+  // 아니라 140. 딜 단계 스크롤 패턴도 다름(1·2회차 공격+집중, 3·4회차
+  // 공격+집중+방어로 스크롤 10개를 전부 소모한 뒤 이후엔 스크롤 없이 진행).
+  // 회복은 HP 50% 이하 하나뿐(딜 세팅이 마나 안 쓰는 평타 위주라 MP 안 봄).
+  M.runVineWraithNinja = async ({
+    firstAttackMaxTurns = 8,
+    laterAttackMaxTurns = 25,
+    maxDefendTurns = 25,
+    maxDealRounds = 80,
+    hpThreshold = 0.5,
+    targetDef = 140,
+  } = {}) => {
+    const bossLabel = '지하의 망령';
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+    const stopped = () => { if (M.stopRequested) { push('■ 사용자 요청으로 정지'); return true; } return false; };
+    const getStance = async () => (await M.getValidBossStance(bossLabel)).stance;
+    const getDef = async () => (await M.getValidBossStance(bossLabel)).def;
+    const recoverUntilSafe = async () => {
+      for (let i = 0; i < 10; i++) {
+        const state = await M.getValidHpMpNumbers();
+        const ratio = state.player.hp.cur / state.player.hp.max;
+        if (ratio > hpThreshold) return;
+        await M.clickRecover();
+        push(`HP ${Math.round(ratio * 100)}% -> 회복`);
+      }
+      throw new Error('망령: 10회 회복 후에도 HP 70% 초과 실패');
+    };
+    const safeTurn = async (turns) => {
+      await recoverUntilSafe();
+      await M.clickTurn(turns);
+    };
+
+    // 공격 페이즈: 5턴 시도 후, 안 바뀌면 1턴씩 추가 시도 (스크롤 없음)
+    const attackUntilFlip = async (label, maxTurns) => {
+      let stance = await getStance();
+      await safeTurn(5);
+      let n = 5;
+      while ((await getStance()) === stance && n < maxTurns) {
+        if (stopped()) return false;
+        await safeTurn(1);
+        n++;
+      }
+      const ok = (await getStance()) !== stance;
+      push(`[${label}] ${n}턴만에 ${ok ? '전환 성공' : '전환 실패'}: ` + JSON.stringify(await M.getValidBossStance(bossLabel)));
+      return ok;
+    };
+    const defendUntilFlip = async (label) => {
+      let stance = await getStance();
+      let n = 0;
+      while ((await getStance()) === stance && n < maxDefendTurns) {
+        if (stopped()) return false;
+        await safeTurn(1);
+        n++;
+      }
+      const ok = (await getStance()) !== stance;
+      push(`[${label}] ${n}턴만에 ${ok ? '전환 성공' : '전환 실패'}: ` + JSON.stringify(await M.getValidBossStance(bossLabel)));
+      return ok;
+    };
+
+    // 사이클 상한: 자세 전환마다 방어력이 정확히 고정 수치(-100)씩 깎이는
+    // 게임 규칙이라, 전환 로직 자체만 정확하면 무한 반복될 일은 없다고
+    // 판단함(사용자 확인). 그래도 혹시 모를 상황을 대비해 안전판으로 넉넉한
+    // 상한(20사이클)만 둔다.
+    let cycle = 0;
+    const maxCycles = 20;
+    while ((await getDef()) > targetDef && cycle < maxCycles) {
+      if (stopped()) return { log, cleared: false };
+      cycle++;
+      await M.applyBossPreset('공격');
+      push(`[사이클${cycle}] 공격 프리셋 적용`);
+      const attackMaxTurns = cycle === 1 ? firstAttackMaxTurns : laterAttackMaxTurns;
+      if (!(await attackUntilFlip(`사이클${cycle}-공격`, attackMaxTurns))) {
+        push(`[사이클${cycle}] 실패 - 리셋 필요`);
+        return { log, cleared: false, retryRequired: cycle === 1 };
+      }
+      await M.applyBossPreset('수비');
+      push(`[사이클${cycle}] 수비 프리셋 적용`);
+      if (!(await defendUntilFlip(`사이클${cycle}-수비`))) { push(`[사이클${cycle}] 실패 - 리셋 필요`); return { log, cleared: false }; }
+    }
+    push(`[전환완료] 방어력=${await getDef()}`);
+
+    await M.applyBossPreset('딜'); push('[딜단계] 딜 프리셋 적용');
+    // 인술은 딜 스킬이 전부 평타(기본공격)로 구성되어 있어서, 검술과 달리
+    // 속성 상성 스킬로 바꿔줄 필요가 없음(사용자 확인) - 스킬 교체 호출 생략.
+
+    let state = (await M.getValidHpMpNumbers()); let round = 0; let attackRound = 0;
+    while (state.boss.hp.cur > 0 && round < maxDealRounds) {
+      if (stopped()) return { log, cleared: false };
+      round++;
+      const hpRatio = state.player.hp.cur / state.player.hp.max;
+      if (hpRatio <= hpThreshold) {
+        await M.clickRecover();
+        push(`[딜 ${round}] HP ${Math.round(hpRatio * 100)}% -> 회복`);
+      } else {
+        // 스크롤 패턴(1·2회차 공격+집중, 3·4회차 +방어)은 "실제 공격한
+        // 턴" 기준이어야 함 - round를 그대로 쓰면 회복이 끼어들 때마다
+        // 카운트가 밀려서 스크롤 패턴이 엉키는 문제가 있었음(실전 지적됨).
+        attackRound++;
+        if (attackRound === 1 || attackRound === 2) {
+          await M.useScrolls(['공격', '집중']);
+          push(`[딜 스크롤 공격${attackRound}회차] 공격+집중`);
+        } else if (attackRound === 3 || attackRound === 4) {
+          await M.useScrolls(['공격', '집중', '방어']);
+          push(`[딜 스크롤 공격${attackRound}회차] 공격+집중+방어`);
+        }
+        await M.clickTurn(5);
+      }
+      state = (await M.getValidHpMpNumbers());
+      push(`[딜 ${round}회차] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
+    }
+
+    const finalCleared = state.boss.hp.cur <= 0;
+    if (finalCleared) {
+      push('✅ 처치 완료');
+    } else {
+      push(`⛔ 최대 시도 횟수 도달, 보스 HP ${state.boss.hp.cur} 남음 (미처치)`);
+    }
+    if (finalCleared) await M.closeClearPopupIfAny();
+    return { log, cleared: finalCleared };
+  };
+
+  // ==========================================================================
+  // 궁술 공략
+  // ==========================================================================
+  M.archeryRecoverUntilAbove = async (hpThreshold, mpThreshold = null, push = null) => {
+    for (let i = 0; i < 10; i++) {
+      const state = await M.getValidHpMpNumbers();
+      const hpRatio = state.player.hp.cur / state.player.hp.max;
+      const mpRatio = state.player.mp.cur / state.player.mp.max;
+      const needsHp = hpRatio <= hpThreshold;
+      const needsMp = mpThreshold !== null && mpRatio <= mpThreshold;
+      if (!needsHp && !needsMp) return state;
+      await M.clickRecover();
+      if (push) push(`회복: HP ${Math.round(hpRatio * 100)}%, MP ${Math.round(mpRatio * 100)}%`);
+    }
+    throw new Error('10회 회복 후에도 궁술 안전 기준을 충족하지 못함');
+  };
+
+  M.runFallenGuardianArchery = async ({
+    maxSealRounds = 15,
+    maxDealRounds = 40,
+    hpThreshold = 0.5,
+  } = {}) => {
+    const requiredSeals = ['불굴', '엔드 블로킹'];
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+
+    await M.applyBossPreset('봉인');
+    let sealed = M.parseSealedAbilities(requiredSeals);
+    for (let r = 1; !requiredSeals.every((name) => sealed.has(name)) && r <= maxSealRounds; r++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+      await M.clickTurn(5);
+      for (const name of M.parseSealedAbilities(requiredSeals)) sealed.add(name);
+      push(`[봉인 ${r}] ${[...sealed].join(',') || '미봉인'}`);
+    }
+    if (!requiredSeals.every((name) => sealed.has(name))) {
+      push('⛔ 필수 봉인 실패');
+      return { log, cleared: false };
+    }
+
+    await M.applyBossPreset('딜');
+    let state = await M.getValidHpMpNumbers();
+    let attackRound = 0;
+    for (let round = 1; state.boss.hp.cur > 0 && round <= maxDealRounds; round++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+      attackRound++;
+      if (attackRound === 1 || attackRound === 2) {
+        await M.useScrolls(['공격', '집중']);
+      } else if (attackRound === 3) {
+        await M.useScrolls(['공격', '집중', '재생']);
+      }
+      await M.clickTurn(5);
+      state = await M.getValidHpMpNumbers();
+      push(`[딜 ${attackRound}] bossHp=${state.boss.hp.cur}`);
+    }
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  M.runVoidEmperorArchery = async ({
+    maxSealRounds = 15,
+    maxManaRounds = 80,
+    maxDealRounds = 50,
+    hpThreshold = 0.7,
+  } = {}) => {
+    const requiredSeal = '차원왜곡';
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+
+    await M.applyBossPreset('봉인');
+    let sealed = M.parseSealedAbilities([requiredSeal]);
+    for (let r = 1; !sealed.has(requiredSeal) && r <= maxSealRounds; r++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+      await M.clickTurn(5);
+      for (const name of M.parseSealedAbilities([requiredSeal])) sealed.add(name);
+    }
+    if (!sealed.has(requiredSeal)) return { log, cleared: false };
+
+    await M.applyBossPreset('마나');
+    let state = await M.getValidHpMpNumbers();
+    for (let r = 1; state.boss.mp.cur > 0 && r <= maxManaRounds; r++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+      const turns = state.boss.mp.cur > 300 ? 5 : 1;
+      await M.clickTurn(turns);
+      state = await M.getValidHpMpNumbers();
+      push(`[마나 ${r}] ${turns}턴, bossMp=${state.boss.mp.cur}`);
+    }
+    if (state.boss.mp.cur > 0) return { log, cleared: false };
+
+    await M.applyBossPreset('딜');
+    await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+    await M.clickTurn(5); // 속도 감소 디버프 해소
+    state = await M.getValidHpMpNumbers();
+
+    let attackRound = 0;
+    for (let round = 1; state.boss.hp.cur > 0 && round <= maxDealRounds; round++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+      attackRound++;
+      if (attackRound === 1 || attackRound === 2) {
+        await M.useScrolls(['공격', '집중']);
+      } else if (attackRound === 3) {
+        await M.useScrolls(['공격', '집중', '재생']);
+      }
+      await M.clickTurn(5);
+      state = await M.getValidHpMpNumbers();
+      push(`[딜 ${attackRound}] bossHp=${state.boss.hp.cur}`);
+    }
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  M.runVineEntArchery = async ({
+    maxSealRounds = 15,
+    maxBurnRounds = 15,
+    maxDealRounds = 50,
+    hpThreshold = 0.7,
+  } = {}) => {
+    const requiredSeals = ['노 컨디션', '휘감은 뿌리'];
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+
+    await M.applyBossPreset('봉인');
+    let sealed = M.parseSealedAbilities(requiredSeals);
+    for (let r = 1; !sealed.has('노 컨디션') && !sealed.has('휘감은 뿌리') && r <= maxSealRounds; r++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+      await M.clickTurn(5);
+      for (const name of M.parseSealedAbilities(requiredSeals)) sealed.add(name);
+    }
+
+    if (!sealed.has('휘감은 뿌리')) {
+      if (!sealed.has('노 컨디션')) return { log, cleared: false };
+      await M.applyBossPreset('화상');
+      for (let r = 1; !sealed.has('휘감은 뿌리') && r <= maxBurnRounds; r++) {
+        if (M.stopRequested) return { log, cleared: false };
+        await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+        await M.clickTurn(5);
+        for (const name of M.parseSealedAbilities(requiredSeals)) sealed.add(name);
+      }
+    }
+    if (!sealed.has('휘감은 뿌리')) return { log, cleared: false };
+
+    await M.applyBossPreset('딜');
+    let state = await M.getValidHpMpNumbers();
+    let attackRound = 0;
+    for (let round = 1; state.boss.hp.cur > 0 && round <= maxDealRounds; round++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+      attackRound++;
+      if (attackRound <= 4) {
+        const scrolls = attackRound % 2 === 1
+          ? ['공격', '집중']
+          : ['공격', '집중', '재생'];
+        await M.useScrolls(scrolls);
+      }
+      await M.clickTurn(5);
+      state = await M.getValidHpMpNumbers();
+      push(`[딜 ${attackRound}] bossHp=${state.boss.hp.cur}`);
+    }
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  M.runVineWraithArchery = async ({
+    maxDefendTurns = 25,
+    maxDealRounds = 160,
+    hpThreshold = 0.7,
+    mpThreshold = 0.5,
+    targetDef = 340,
+  } = {}) => {
+    const bossLabel = '지하의 망령';
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+    const stance = async () => (await M.getValidBossStance(bossLabel)).stance;
+
+    const safeTurn = async (turns, checkMp = false) => {
+      await M.archeryRecoverUntilAbove(hpThreshold, checkMp ? mpThreshold : null, push);
+      await M.clickTurn(turns);
+    };
+    const attackToDefense = async (firstCycle) => {
+      const before = await stance();
+      await safeTurn(5);
+      let used = 5;
+      while ((await stance()) === before && used < 8) {
+        await safeTurn(1);
+        used++;
+      }
+      const ok = (await stance()) !== before;
+      push(`[공격→수비] ${used}턴, ${ok ? '성공' : '실패'}`);
+      return ok;
+    };
+    const defenseToAttack = async () => {
+      const before = await stance();
+      let used = 0;
+      while ((await stance()) === before && used < maxDefendTurns) {
+        await safeTurn(1);
+        used++;
+      }
+      const ok = (await stance()) !== before;
+      push(`[수비→공격] ${used}턴, ${ok ? '성공' : '실패'}`);
+      return ok;
+    };
+
+    await M.applyBossPreset('공격');
+    if (!(await attackToDefense(true))) {
+      push('⛔ 첫 사이클 8턴 내 자세 전환 실패 - 재도전 필요');
+      return { log, cleared: false, retryRequired: true };
+    }
+    await M.applyBossPreset('수비');
+    if (!(await defenseToAttack())) return { log, cleared: false };
+
+    for (let cycle = 1; cycle <= 5; cycle++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.applyBossPreset('공격');
+      await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+      await M.useScrolls(['회피']);
+      if (!(await attackToDefense(false))) return { log, cleared: false };
+      await M.applyBossPreset('수비');
+      if (!(await defenseToAttack())) return { log, cleared: false };
+    }
+
+    const bossStats = await M.getValidBossStance(bossLabel);
+    if (bossStats.def > targetDef) {
+      push(`⛔ 목표 방어력 미도달: ${bossStats.def}`);
+      return { log, cleared: false };
+    }
+
+    // 궁술은 암흑 디버프가 필요하므로 딜 스킬을 속성별로 바꾸지 않는다.
+    await M.applyBossPreset('딜');
+    let state = await M.getValidHpMpNumbers();
+    let attacks = 0;
+    let attackScrollsUsed = 0;
+    for (let round = 1; state.boss.hp.cur > 0 && round <= maxDealRounds; round++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.archeryRecoverUntilAbove(hpThreshold, mpThreshold, push);
+      if (attacks % 5 === 0 && attackScrollsUsed < 5) {
+        await M.useScrolls(['공격']);
+        attackScrollsUsed++;
+      }
+      await M.clickTurn(1);
+      attacks++;
+      state = await M.getValidHpMpNumbers();
+      push(`[딜 ${attacks}] bossHp=${state.boss.hp.cur}, 공격스크롤=${attackScrollsUsed}/5`);
+    }
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  // --- 체술 공통 -------------------------------------------------------------
+  // 실전 검증값:
+  // 수호자 70%, 황제 60%, 엔트 50%, 망령 기믹 25%/75%, 최종 딜 70%.
+  M.martialRecover = async (threshold, push = null, inclusive = true) => {
+    for (let i = 0; i < 10; i++) {
+      const state = await M.getValidHpMpNumbers();
+      const ratio = state.player.hp.cur / state.player.hp.max;
+      const unsafe = inclusive ? ratio <= threshold : ratio < threshold;
+      if (!unsafe) return state;
+      await M.clickRecover();
+      if (push) push(`내HP ${Math.round(ratio * 100)}% -> 회복`);
+    }
+    throw new Error(`체술: HP ${Math.round(threshold * 100)}% 안전선 회복 실패`);
+  };
+
+  M.runFallenGuardianMartial = async ({
+    maxSealRounds = 15,
+    maxDealRounds = 30,
+    hpThreshold = 0.7,
+  } = {}) => {
+    const log = [];
+    const push = (s) => { log.push(s); if (M.uiLog) M.uiLog(s); };
+    const required = ['불굴', '엔드 블로킹'];
+    await M.applyBossPreset('봉인');
+    let sealed = M.parseSealedAbilities(required);
+    for (let r = 1; !required.every((x) => sealed.has(x)) && r <= maxSealRounds; r++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.martialRecover(hpThreshold, push);
+      await M.clickTurn(5);
+      for (const x of M.parseSealedAbilities(required)) sealed.add(x);
+      push(`[봉인 ${r}] ${[...sealed].join(',')}`);
+    }
+    if (!required.every((x) => sealed.has(x))) return { log, cleared: false };
+
+    await M.applyBossPreset('딜');
+    let state = await M.getValidHpMpNumbers();
+    const pattern = [
+      ['공격', '집중'],
+      ['공격', '집중'],
+      ['공격', '집중', '재생'],
+    ];
+    for (let r = 0; state.boss.hp.cur > 0 && r < maxDealRounds; r++) {
+      await M.martialRecover(hpThreshold, push);
+      if (r < pattern.length) await M.useScrolls(pattern[r]);
+      await M.clickTurn(5);
+      state = await M.getValidHpMpNumbers();
+      push(`[딜 ${r + 1}] bossHp=${state.boss.hp.cur}`);
+    }
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  M.runVoidEmperorMartial = async ({
+    maxSealRounds = 15,
+    maxManaRounds = 40,
+    maxDealRounds = 40,
+    hpThreshold = 0.6,
+  } = {}) => {
+    const log = [];
+    const push = (s) => { log.push(s); if (M.uiLog) M.uiLog(s); };
+    await M.applyBossPreset('봉인');
+    let sealed = M.parseSealedAbilities(['차원왜곡']);
+    for (let r = 1; !sealed.has('차원왜곡') && r <= maxSealRounds; r++) {
+      await M.martialRecover(hpThreshold, push);
+      await M.clickTurn(5);
+      for (const x of M.parseSealedAbilities(['차원왜곡'])) sealed.add(x);
+    }
+    if (!sealed.has('차원왜곡')) return { log, cleared: false };
+
+    await M.applyBossPreset('마나');
+    let state = await M.getValidHpMpNumbers();
+    for (let r = 1; state.boss.mp.cur > 0 && r <= maxManaRounds; r++) {
+      await M.martialRecover(hpThreshold, push);
+      await M.clickTurn(state.boss.mp.cur > 300 ? 5 : 1);
+      state = await M.getValidHpMpNumbers();
+      push(`[마나 ${r}] bossMp=${state.boss.mp.cur}`);
+    }
+    if (state.boss.mp.cur > 0) return { log, cleared: false };
+
+    await M.applyBossPreset('딜');
+    await M.martialRecover(hpThreshold, push);
+    await M.clickTurn(5); // 공속 저하 디버프 해소
+    state = await M.getValidHpMpNumbers();
+    const pattern = [
+      ['공격', '집중'],
+      ['공격', '집중'],
+      ['공격', '집중', '재생'],
+    ];
+    for (let r = 0; state.boss.hp.cur > 0 && r < maxDealRounds; r++) {
+      await M.martialRecover(hpThreshold, push);
+      if (r < pattern.length) await M.useScrolls(pattern[r]);
+      await M.clickTurn(5);
+      state = await M.getValidHpMpNumbers();
+      push(`[딜 ${r + 1}] bossHp=${state.boss.hp.cur}`);
+    }
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  M.runVineEntMartial = async ({
+    maxDealRounds = 50,
+    hpThreshold = 0.5,
+  } = {}) => {
+    const log = [];
+    const push = (s) => { log.push(s); if (M.uiLog) M.uiLog(s); };
+    const candidates = ['노 컨디션', '휘감은 뿌리'];
+    let sealed = M.parseSealedAbilities(candidates);
+    let burn = false;
+    await M.applyBossPreset('봉인');
+    // 45턴까지 휘감은 뿌리가 안 잠기면 재도전한다. 노 컨디션은 선택 사항.
+    for (let used = 0; !sealed.has('휘감은 뿌리') && used < 45; used += 5) {
+      await M.martialRecover(hpThreshold, push);
+      await M.clickTurn(5);
+      for (const x of M.parseSealedAbilities(candidates)) sealed.add(x);
+      if (sealed.has('노 컨디션') && !sealed.has('휘감은 뿌리') && !burn) {
+        await M.applyBossPreset('화상');
+        burn = true;
+      }
+    }
+    if (!sealed.has('휘감은 뿌리')) {
+      push('⛔ 45턴 내 휘감은 뿌리 미봉인 - 재도전');
+      return { log, cleared: false, retryRequired: true };
+    }
+
+    await M.applyBossPreset('방깎');
+    await M.martialRecover(hpThreshold, push);
+    await M.clickTurn(10);
+    await M.applyBossPreset('딜');
+    let state = await M.getValidHpMpNumbers();
+    let scrollPairs = 0;
+    for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
+      await M.martialRecover(hpThreshold, push);
+      if (scrollPairs < 7) {
+        try {
+          await M.useScrolls(['공격', '집중']);
+          scrollPairs++;
+        } catch (e) {
+          push(`스크롤 소진 확인: ${e.message}`);
+          scrollPairs = 7;
+        }
+      }
+      await M.clickTurn(5);
+      state = await M.getValidHpMpNumbers();
+      push(`[딜 ${r}] bossHp=${state.boss.hp.cur}`);
+    }
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  M.runVineWraithMartial = async ({
+    maxDefenseTurns = 30,
+    maxDealRounds = 20,
+  } = {}) => {
+    const bossLabel = '지하의 망령';
+    const log = [];
+    const push = (s) => { log.push(s); if (M.uiLog) M.uiLog(s); };
+    const stance = async () => (await M.getValidBossStance(bossLabel)).stance;
+
+    const defenseToAttack = async () => {
+      await M.applyBossPreset('수비');
+      await M.martialRecover(0.25, push);
+      const before = await stance();
+      for (let n = 1; n <= maxDefenseTurns; n++) {
+        await M.clickTurn(1);
+        if ((await stance()) !== before) return true;
+      }
+      return false;
+    };
+
+    const attackToDefense = async () => {
+      await M.applyBossPreset('공격');
+      await M.martialRecover(0.25, push);
+      await M.useScrolls(['방어']);
+      const before = await stance();
+      await M.clickTurn(5);
+      let used = 5;
+      while ((await stance()) === before && used < 8) {
+        await M.clickTurn(1);
+        used++;
+      }
+      push(`[공격→수비] ${used}턴`);
+      return (await stance()) !== before;
+    };
+
+    // 첫 사이클: 기력발산 10턴 -> 극딜 5턴 -> 공격+방어스크롤.
+    await M.applyBossPreset('기력발산');
+    await M.clickTurn(10);
+    await M.applyBossPreset('극딜');
+    await M.clickTurn(5);
+    if (!(await attackToDefense())) return { log, cleared: false, retryRequired: true };
+    if (!(await defenseToAttack())) return { log, cleared: false };
+
+    // 공격+집중 3회와 방어 3회를 교대로 사용하면, 첫 방어를 포함해 총 10장.
+    for (let cycle = 1; cycle <= 3; cycle++) {
+      await M.applyBossPreset('기력발산');
+      await M.clickTurn(10);
+      await M.martialRecover(0.75, push);
+      await M.useScrolls(['공격', '집중']);
+      await M.applyBossPreset('극딜');
+      await M.clickTurn(5);
+      if (!(await attackToDefense())) return { log, cleared: false, retryRequired: true };
+      if (!(await defenseToAttack())) return { log, cleared: false };
+    }
+
+    await M.applyBossPreset('스크롤 이후');
+    let state = await M.getValidHpMpNumbers();
+    for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
+      await M.martialRecover(0.7, push, false);
+      await M.clickTurn(5);
+      state = await M.getValidHpMpNumbers();
+      push(`[최종 딜 ${r}] bossHp=${state.boss.hp.cur}`);
+    }
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  // --- 마술 공통 -------------------------------------------------------------
+  M.magicRecover = async (threshold, push = null) => {
+    for (let i = 0; i < 10; i++) {
+      const state = await M.getValidHpMpNumbers();
+      const ratio = state.player.hp.cur / state.player.hp.max;
+      if (ratio > threshold) return state;
+      await M.clickRecover();
+      if (push) push(`내HP ${Math.round(ratio * 100)}% -> 회복`);
+    }
+    throw new Error(`마술: HP ${Math.round(threshold * 100)}% 안전선 회복 실패`);
+  };
+
+  M.runFallenGuardianMagic = async ({
+    maxSealRounds = 15,
+    maxDealRounds = 30,
+    hpThreshold = 0.7,
+  } = {}) => {
+    const log = [];
+    const push = (s) => { log.push(s); if (M.uiLog) M.uiLog(s); };
+    const required = ['불굴', '엔드 블로킹'];
+    await M.applyBossPreset('봉인');
+    let sealed = M.parseSealedAbilities(required);
+    for (let r = 1; !required.every((x) => sealed.has(x)) && r <= maxSealRounds; r++) {
+      if (M.stopRequested) return { log, cleared: false };
+      await M.magicRecover(hpThreshold, push);
+      await M.clickTurn(5);
+      for (const x of M.parseSealedAbilities(required)) sealed.add(x);
+      push(`[봉인 ${r}] ${[...sealed].join(',')}`);
+    }
+    if (!required.every((x) => sealed.has(x))) return { log, cleared: false };
+
+    await M.applyBossPreset('딜');
+    let state = await M.getValidHpMpNumbers();
+    let scrollsUsed = 0;
+    for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
+      await M.magicRecover(hpThreshold, push);
+      if (scrollsUsed < 7) {
+        await M.useScrolls(['공격']);
+        scrollsUsed++;
+      }
+      await M.clickTurn(5);
+      state = await M.getValidHpMpNumbers();
+      push(`[딜 ${r}] bossHp=${state.boss.hp.cur}, 공격스크롤=${scrollsUsed}/7`);
+    }
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  M.runVoidEmperorMagic = async ({
+    maxSealRounds = 15,
+    maxManaRounds = 50,
+    maxDealRounds = 50,
+    hpThreshold = 0.6,
+    drainedManaThreshold = 50,
+  } = {}) => {
+    const log = [];
+    const push = (s) => { log.push(s); if (M.uiLog) M.uiLog(s); };
+    await M.applyBossPreset('봉인');
+    let sealed = M.parseSealedAbilities(['차원왜곡']);
+    for (let r = 1; !sealed.has('차원왜곡') && r <= maxSealRounds; r++) {
+      await M.magicRecover(hpThreshold, push);
+      await M.clickTurn(5);
+      for (const x of M.parseSealedAbilities(['차원왜곡'])) sealed.add(x);
+    }
+    if (!sealed.has('차원왜곡')) return { log, cleared: false };
+
+    await M.applyBossPreset('마나');
+    let state = await M.getValidHpMpNumbers();
+    for (let r = 1; state.boss.mp.cur > drainedManaThreshold && r <= maxManaRounds; r++) {
+      await M.magicRecover(hpThreshold, push);
+      await M.clickTurn(state.boss.mp.cur > 300 ? 5 : 1);
+      state = await M.getValidHpMpNumbers();
+      push(`[마나 ${r}] bossMp=${state.boss.mp.cur}`);
+    }
+    if (state.boss.mp.cur > drainedManaThreshold) return { log, cleared: false };
+
+    await M.applyBossPreset('딜');
+    await M.magicRecover(hpThreshold, push);
+    await M.clickTurn(5); // 공속 저하 디버프 해소
+    state = await M.getValidHpMpNumbers();
+    let scrollsUsed = 0;
+    for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
+      await M.magicRecover(hpThreshold, push);
+      if (scrollsUsed < 7) {
+        await M.useScrolls(['공격']);
+        scrollsUsed++;
+      }
+      await M.clickTurn(5);
+      state = await M.getValidHpMpNumbers();
+      push(`[딜 ${r}] bossHp=${state.boss.hp.cur}, 공격스크롤=${scrollsUsed}/7`);
+    }
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  M.runVineEntMagic = async ({
+    maxManaRecoveryRounds = 30,
+    maxFinalCycles = 30,
+    finalHpThreshold = 0.6,
+  } = {}) => {
+    const log = [];
+    const push = (s) => { log.push(s); if (M.uiLog) M.uiLog(s); };
+    const candidates = ['노 컨디션', '휘감은 뿌리'];
+    let sealed = M.parseSealedAbilities(candidates);
+    let burn = false;
+    await M.applyBossPreset('봉인');
+    for (let used = 0; !sealed.has('휘감은 뿌리') && used < 45; used += 5) {
+      await M.clickTurn(5);
+      for (const x of M.parseSealedAbilities(candidates)) sealed.add(x);
+      if (sealed.has('노 컨디션') && !sealed.has('휘감은 뿌리') && !burn) {
+        await M.applyBossPreset('화상');
+        burn = true;
+      }
+    }
+    if (!sealed.has('휘감은 뿌리')) {
+      push('⛔ 45턴 내 휘감은 뿌리 미봉인 - 재도전');
+      return { log, cleared: false, retryRequired: true };
+    }
+
+    const recoverMana = async (targetRatio, turnCount) => {
+      await M.applyBossPreset('마나회복');
+      let state = await M.getValidHpMpNumbers();
+      for (let r = 1;
+        state.boss.hp.cur > 0 &&
+        state.player.mp.cur / state.player.mp.max < targetRatio &&
+        r <= maxManaRecoveryRounds;
+        r++) {
+        await M.clickTurn(turnCount);
+        state = await M.getValidHpMpNumbers();
+        push(`[마나회복 ${r}] ${Math.round(state.player.mp.cur / state.player.mp.max * 100)}%`);
+      }
+      return state;
+    };
+
+    let state = await M.getValidHpMpNumbers();
+    let pairCount = 0;
+    while (state.boss.hp.cur > 0 && pairCount < 7) {
+      state = await recoverMana(0.8, 5);
+      if (state.boss.hp.cur <= 0) break;
+      await M.applyBossPreset('딜');
+      await M.useScrolls(['공격', '재생']);
+      pairCount++;
+      await M.clickTurn(5);
+      state = await M.getValidHpMpNumbers();
+      push(`[공격+재생 ${pairCount}/7] bossHp=${state.boss.hp.cur}`);
+    }
+
+    // 7쌍(14장) 뒤 보스가 살아 있으면 마지막 15번째는 공격만 사용한다.
+    if (state.boss.hp.cur > 0) {
+      state = await recoverMana(0.8, 5);
+      if (state.boss.hp.cur > 0) {
+        await M.applyBossPreset('딜');
+        await M.useScrolls(['공격']);
+        await M.clickTurn(5);
+        state = await M.getValidHpMpNumbers();
+        push(`[마지막 공격스크롤] bossHp=${state.boss.hp.cur}`);
+      }
+    }
+
+    // 스크롤 이후: 마나회복 세팅으로 1턴씩 MP 60% 확보 후,
+    // 딜 세팅에서 HP 60% 초과를 보장하며 MP 30% 이하까지 1턴씩 공격.
+    for (let cycle = 1; state.boss.hp.cur > 0 && cycle <= maxFinalCycles; cycle++) {
+      state = await recoverMana(0.6, 1);
+      if (state.boss.hp.cur <= 0) break;
+      await M.applyBossPreset('딜');
+      while (state.boss.hp.cur > 0 && state.player.mp.cur / state.player.mp.max > 0.3) {
+        state = await M.magicRecover(finalHpThreshold, push);
+        await M.clickTurn(1);
+        state = await M.getValidHpMpNumbers();
+      }
+      push(`[후속 ${cycle}] bossHp=${state.boss.hp.cur}, mp=${state.player.mp.cur}`);
+    }
+
+    const cleared = state.boss.hp.cur <= 0;
+    if (cleared) await M.closeClearPopupIfAny();
+    return { log, cleared };
+  };
+
+  M.runVineWraithMagic = async () => {
+    const message = '마술 망령 공략은 아직 실전 검증 전입니다.';
+    if (M.uiLog) M.uiLog(`⛔ ${message}`);
+    throw new Error(message);
+  };
+})();
+
+// ----------------------------------------------------------------------------
+// 사용법: lanis.me 접속 시 오른쪽 위에 "🗡 보스 자동화 (참고용)" 라는 작은
+// 창이 뜸 (헤더를 드래그해서 위치 이동 가능). 보스 도전 화면에 들어간 뒤
+// 원하는 보스 버튼을 누르면 자동으로 진행되고, "정지" 버튼을 누르면 다음
+// 턴 진행 전에 멈춤. 기존 "🎯 라니스 통합 매크로" 패널과는 완전히 별개의
+// 창이며 서로 간섭하지 않음.
+// ----------------------------------------------------------------------------
