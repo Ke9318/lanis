@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.7.9-stable
+// @version      1.8.0-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -4763,6 +4763,12 @@
     isOtherModuleRunning() {
       return !!Core.activeModuleId && Core.activeModuleId !== 'boss';
     },
+    isDailyActive() {
+      return !!Core.dailyActive;
+    },
+    requestDailyStop() {
+      Core.stopDaily();
+    },
     refresh() {
       Core.updateModuleButtons();
     },
@@ -4831,6 +4837,10 @@
 
   // -------------------------- 일일 연속 실행 --------------------------
   const DAILY_STATE_KEY = 'lrm-daily-sequence-state';
+  // localStorage의 오래된 running 값만으로 작업을 자동 시작하지 않는다.
+  // 사용자가 이 탭에서 직접 시작했을 때만 sessionStorage 허가가 생기며,
+  // 정지/탭 종료 시 사라진다.
+  const DAILY_AUTH_KEY = 'lrm-daily-explicit-run-auth';
   const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'boss', 'autohunt', 'deepdungeon'];
   const DAILY_STEP_LABELS = {
     dungeon: '던전',
@@ -5034,6 +5044,10 @@
       reports: [],
       startedAt: Date.now(),
     };
+    sessionStorage.setItem(DAILY_AUTH_KEY, JSON.stringify({
+      startedAt: state.startedAt,
+      issuedAt: Date.now(),
+    }));
     // 사용자가 새 일일 실행을 명시적으로 누른 경우에만 이전 보스 정지
     // 래치를 해제한다.
     if (window.__bossMacro && typeof window.__bossMacro.armBossRun === 'function') {
@@ -5051,6 +5065,7 @@
   Core.stopDaily = function () {
     const mod = Modules.daily;
     mod.stopRequested = true;
+    sessionStorage.removeItem(DAILY_AUTH_KEY);
     const state = mod.loadState();
     if (state) {
       state.running = false;
@@ -6017,6 +6032,22 @@
     setTimeout(() => {
       const dailyState = Modules.daily.loadState();
       if (!dailyState || Modules.daily.running) return;
+      let authorized = false;
+      try {
+        const auth = JSON.parse(sessionStorage.getItem(DAILY_AUTH_KEY) || 'null');
+        authorized = !!auth && auth.startedAt === dailyState.startedAt;
+      } catch (e) {
+        authorized = false;
+      }
+      if (!authorized) {
+        dailyState.running = false;
+        Modules.daily.saveState(dailyState);
+        localStorage.removeItem('lrm-boss-ref-pending');
+        localStorage.removeItem('lrm-boss-ref-queue');
+        localStorage.setItem('lrm-boss-ref-user-stopped', String(Date.now()));
+        Core.log('daily', '저장된 일일 상태에 사용자 실행 허가가 없어 자동 재개를 차단했습니다.');
+        return;
+      }
       Core.log('daily', `페이지 이동 후 일일 작업 재개 (${dailyState.index + 1}/${dailyState.steps.length})`);
       Modules.daily.mainLoop().catch((e) => {
         Core.dailyActive = false;
@@ -6742,6 +6773,7 @@
   };
   const PENDING_KEY = 'lrm-boss-ref-pending';
   const QUEUE_KEY = 'lrm-boss-ref-queue';
+  const RUN_AUTH_KEY = 'lrm-boss-ref-explicit-run-auth';
   // 사용자가 정지를 눌렀다는 사실을 새로고침 뒤에도 유지한다. 큐/pending만
   // 지우면 클릭 직전 저장된 페이지 상태나 다른 일일 실행 경로가 다시 큐를
   // 만들 수 있으므로, 명시적인 다음 시작 전까지 자동 재개를 금지한다.
@@ -6752,6 +6784,7 @@
     localStorage.setItem(STOP_LATCH_KEY, String(Date.now()));
     localStorage.removeItem(PENDING_KEY);
     localStorage.removeItem(QUEUE_KEY);
+    sessionStorage.removeItem(RUN_AUTH_KEY);
   };
 
   M.requestImmediateStop = () => {
@@ -6767,6 +6800,10 @@
 
   M.armBossRun = () => {
     localStorage.removeItem(STOP_LATCH_KEY);
+    sessionStorage.setItem(RUN_AUTH_KEY, JSON.stringify({
+      issuedAt: Date.now(),
+      tabPath: location.pathname,
+    }));
     M.stopRequested = false;
   };
 
@@ -7798,6 +7835,11 @@
     });
 
     panel.querySelector('#lrm-boss-ref-stop').addEventListener('click', () => {
+      const coordinator = window.__lanisBossCoordinator;
+      if (coordinator && coordinator.isDailyActive && coordinator.isDailyActive()) {
+        coordinator.requestDailyStop();
+        return;
+      }
       M.requestImmediateStop();
     });
     if (window.__lanisBossCoordinator) window.__lanisBossCoordinator.refresh();
@@ -7808,6 +7850,15 @@
 
   // 새로고침/재접속으로 스크립트가 다시 로드된 경우, 진행 중이던 요청이 있으면 자동으로 이어감
   (function resumePendingIfAny() {
+    // 큐/pending 값은 과거 실행의 찌꺼기일 수 있다. 사용자가 현재 탭에서
+    // 직접 시작해 발급된 허가가 없으면 어떤 경우에도 자동 실행하지 않는다.
+    if (!sessionStorage.getItem(RUN_AUTH_KEY)) {
+      localStorage.removeItem(PENDING_KEY);
+      localStorage.removeItem(QUEUE_KEY);
+      localStorage.setItem(STOP_LATCH_KEY, String(Date.now()));
+      if (M.uiLog) M.uiLog('■ 사용자 실행 허가 없음 - 저장된 보스 작업 자동 시작 차단');
+      return;
+    }
     if (localStorage.getItem(STOP_LATCH_KEY)) {
       localStorage.removeItem(PENDING_KEY);
       localStorage.removeItem(QUEUE_KEY);
