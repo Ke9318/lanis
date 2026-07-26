@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.8.1-stable
+// @version      1.9.0-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -305,21 +305,46 @@
       if (!preset) {
         throw new Error(`공용 프리셋 "${presetName}"을 찾지 못했습니다. 캐릭 → 프리셋에서 먼저 만들어주세요.`);
       }
-      if (!(await Core.safeClick(() => {
-        const current = findPresetCard();
-        return current ? current.button : null;
-      }, { beforeMin: 650, beforeMax: 1100, afterMin: 100, afterMax: 250 }))) {
-        throw new Error(`공용 프리셋 "${presetName}" 적용 버튼 클릭에 실패했습니다.`);
+      let confirmationMutated = false;
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          const nodes = [record.target, ...record.addedNodes];
+          if (nodes.some((node) => {
+            const text = node && node.textContent ? node.textContent : '';
+            return text.includes(presetName) &&
+              (text.includes('적용했습니다') || text.includes('적용 완료') || text.includes('불러왔습니다'));
+          })) {
+            confirmationMutated = true;
+            break;
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      let clicked = false;
+      try {
+        clicked = await Core.safeClick(() => {
+          const current = findPresetCard();
+          return current ? current.button : null;
+        }, { beforeMin: 650, beforeMax: 1100, afterMin: 100, afterMax: 250 });
+      } finally {
+        if (!clicked) observer.disconnect();
       }
-      const confirmed = await Core.waitFor(
-        () => {
-          const text = Core.bodyText();
-          return text.includes(presetName) &&
-            (text.includes('적용했습니다') || text.includes('적용 완료') || text.includes('불러왔습니다'));
-        },
-        3500,
-        150
-      );
+      if (!clicked) throw new Error(`공용 프리셋 "${presetName}" 적용 버튼 클릭에 실패했습니다.`);
+      let confirmed = null;
+      try {
+        confirmed = await Core.waitFor(
+          () => {
+            const text = Core.bodyText();
+            return confirmationMutated &&
+              text.includes(presetName) &&
+              (text.includes('적용했습니다') || text.includes('적용 완료') || text.includes('불러왔습니다'));
+          },
+          3500,
+          150
+        );
+      } finally {
+        observer.disconnect();
+      }
       if (confirmed) {
         Core.log(moduleId, `공용 프리셋 "${presetName}" 적용 확인`);
         return true;
@@ -4533,7 +4558,7 @@
     await Core.applyCommonPreset('심층던전', 'deepdungeon');
     const deepOriginalElement = mod.config.originalElement;
     if (!Core.ELEMENT_OPTIONS.includes(deepOriginalElement)) {
-      throw new Error('자동사냥 탭에서 원래 속성을 먼저 선택해주세요.');
+      throw new Error('심층던전 탭에서 원래 속성을 먼저 선택해주세요.');
     }
     Core.log('deepdungeon', `시작 전 원래 속성(${deepOriginalElement}) 확인`);
     await Core.ensureCharacterElement(deepOriginalElement, 'deepdungeon');
@@ -4545,10 +4570,10 @@
     // 수동 플레이로 이미 채워둔 경우) 새 런에 진입하지 않고 바로 정지한다.
     if (mod.config.retryIfWeeklyDamageUnder1M) {
       const startDamage = await mod.readWeeklyCumulativeDamage();
-      if (startDamage !== null && startDamage > 1000000) {
+      if (startDamage !== null && startDamage >= 1000000) {
         Core.notifyCompleted(
           'deepdungeon',
-          `이미 주간 누적 데미지 ${startDamage.toLocaleString()} (100만 초과)라 시작하지 않고 정지합니다.`
+          `이미 주간 누적 데미지 ${startDamage.toLocaleString()} (100만 이상)라 시작하지 않고 정지합니다.`
         );
         return;
       }
@@ -6038,54 +6063,21 @@
     if (document.getElementById('lrm-panel')) return;
     buildPanel();
     Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 보스 / 일일)');
-    setTimeout(() => {
-      try {
-        const resume = JSON.parse(localStorage.getItem(ARENA_RESUME_KEY) || 'null');
-        if (!resume || !resume.running || Core.activeModuleId || Modules.arena.running) return;
-        if (resume.date !== Modules.arena.todayKey() || !Modules.arena.isWeekend()) {
-          Modules.arena.clearResume();
-          return;
-        }
-        Modules.arena.config.targetBattles = Math.max(
-          1,
-          Math.min(200, parseInt(resume.targetBattles, 10) || 10)
-        );
-        Core.log('arena', '페이지 이동 후 아레나 자동 전투를 이어서 실행합니다.');
-        Core.startModule('arena');
-      } catch (e) {
-        Modules.arena.clearResume();
-      }
-    }, 1200);
-    setTimeout(() => {
-      const dailyState = Modules.daily.loadState();
-      if (!dailyState || Modules.daily.running) return;
-      let authorized = false;
-      try {
-        const auth = JSON.parse(sessionStorage.getItem(DAILY_AUTH_KEY) || 'null');
-        authorized =
-          !!auth &&
-          auth.schema === DAILY_AUTH_SCHEMA &&
-          auth.startedAt === dailyState.startedAt;
-      } catch (e) {
-        authorized = false;
-      }
-      if (!authorized) {
-        dailyState.running = false;
-        Modules.daily.saveState(dailyState);
-        localStorage.removeItem('lrm-boss-ref-pending');
-        localStorage.removeItem('lrm-boss-ref-queue');
-        localStorage.setItem('lrm-boss-ref-user-stopped', String(Date.now()));
-        Core.log('daily', '저장된 일일 상태에 사용자 실행 허가가 없어 자동 재개를 차단했습니다.');
-        return;
-      }
-      Core.log('daily', `페이지 이동 후 일일 작업 재개 (${dailyState.index + 1}/${dailyState.steps.length})`);
-      Modules.daily.mainLoop().catch((e) => {
-        Core.dailyActive = false;
-        Modules.daily.running = false;
-        Core.showBanner('daily', `일일 실행 재개 오류: ${e.message}`, false);
-        Core.updateModuleButtons();
-      });
-    }, 1800);
+    // 저장값만으로 자동화를 재개하지 않는다. 통합 일일 작업은 SPA 안에서
+    // 연속 실행되며, 실제 새로고침/탭 재실행이 발생했다면 안전하게 중단한다.
+    // 오래된 running 상태를 복구하면 동일 단계(특히 보스)를 처음부터 다시
+    // 실행해 무한 재도전할 수 있으므로 모두 폐기한다.
+    Modules.arena.clearResume();
+    sessionStorage.removeItem(DAILY_AUTH_KEY);
+    const staleDaily = Modules.daily.loadState();
+    if (staleDaily) {
+      staleDaily.running = false;
+      Modules.daily.saveState(staleDaily);
+    }
+    localStorage.removeItem('lrm-boss-ref-pending');
+    localStorage.removeItem('lrm-boss-ref-queue');
+    localStorage.setItem('lrm-boss-ref-user-stopped', String(Date.now()));
+    Core.log('core', '새로고침 후 자동 재개 차단: 저장된 아레나/일일/보스 실행 상태 폐기');
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
@@ -6345,19 +6337,35 @@
     const b = M.findButtonByText('프리셋 패널 닫기');
     if (b) b.click();
   };
-  M.applyBossPreset = async (name, { requireConfirmation = false, attempts = 1 } = {}) => {
+  M.findBossPresetOption = (name) => {
+    const leaves = M.queryAll('*').filter(
+      (el) => el.children.length === 0 && el.textContent.trim() === name && M.isVisible(el)
+    );
+    return leaves.find((leaf) => {
+      let node = leaf.parentElement;
+      for (let depth = 0; node && depth < 9; depth++, node = node.parentElement) {
+        const text = node.textContent || '';
+        if (text.includes('이 보스 전용') && text.includes('프리셋(구)')) return true;
+      }
+      return false;
+    }) || null;
+  };
+  M.applyBossPreset = async (name, { requireConfirmation = true, attempts = 3 } = {}) => {
+    // 새 프리셋 전환을 시작하는 순간 이전 프리셋의 공격 허가를 폐기한다.
+    // 적용 확인이 실패하면 이전 봉인 프리셋 상태로 공격을 이어갈 수 없다.
+    M.currentBossPreset = null;
     let confirmed = false;
     for (let attempt = 1; attempt <= attempts && !confirmed; attempt++) {
       M.throwIfStopped();
       await M.openPresetPanel();
-      const found = await M.waitFor(() => M.findLeafByExactText(name), 5000);
+      const found = await M.waitFor(() => M.findBossPresetOption(name), 5000);
       if (!found) {
         M.closePresetPanel();
         throw new Error('프리셋 이름 못찾음: ' + name);
       }
       await M.sleep(M.rand(300, 650));
       M.throwIfStopped();
-      const fresh = M.findLeafByExactText(name);
+      const fresh = M.findBossPresetOption(name);
       if (!fresh) {
         M.closePresetPanel();
         throw new Error('프리셋 이름 못찾음(재검색 실패): ' + name);
@@ -6366,16 +6374,36 @@
       // 누른다. 특히 "정신일도"는 글자만 클릭되면 토스트도 장비 변경도 없이
       // 다음 단계로 넘어가는 사례가 있었다.
       const clickTarget = fresh.closest('button, [role="button"], [tabindex]') || fresh;
-      clickTarget.click();
-      confirmed = await M.waitFor(
-        () => M.queryAll('*').some((el) =>
-          el.children.length === 0 &&
-          el.textContent.includes(name) &&
-          el.textContent.includes('적용')
-        ),
-        3000,
-        150
-      );
+      let confirmationMutated = false;
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          const nodes = [record.target, ...record.addedNodes];
+          if (nodes.some((node) => {
+            const text = node && node.textContent ? node.textContent : '';
+            return text.includes(name) && text.includes('적용');
+          })) {
+            confirmationMutated = true;
+            break;
+          }
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      try {
+        M.throwIfStopped();
+        clickTarget.click();
+        confirmed = await M.waitFor(
+          () => confirmationMutated && M.queryAll('*').some((el) =>
+            M.isVisible(el) &&
+            el.children.length === 0 &&
+            el.textContent.includes(name) &&
+            el.textContent.includes('적용')
+          ),
+          3000,
+          150
+        );
+      } finally {
+        observer.disconnect();
+      }
       M.closePresetPanel();
       if (!confirmed && attempt < attempts) {
         if (M.uiLog) M.uiLog(`↻ 프리셋 "${name}" 적용 확인 실패 (${attempt}/${attempts}) - 다시 적용`);
@@ -6385,6 +6413,7 @@
     if (!confirmed && requireConfirmation) {
       throw new Error(`프리셋 "${name}" 적용을 ${attempts}회 시도했지만 확인하지 못함`);
     }
+    if (confirmed) M.currentBossPreset = name;
     if (M.uiLog && !confirmed) M.uiLog(`(참고) 프리셋 "${name}" 적용 확인 토스트를 못 봤음 - 계속 진행`);
     return confirmed;
   };
@@ -6392,6 +6421,9 @@
   // --- 턴 진행 / 회복 / 스크롤 --------------------------------------------------
   M.clickTurn = async (n) => {
     M.throwIfStopped();
+    if (!M.currentBossPreset) {
+      throw new Error('적용이 확인된 보스 프리셋이 없어 공격을 차단합니다.');
+    }
     const btn = await M.waitFor(() => M.findButtonByText(`턴 진행${n}턴`));
     if (!btn) throw new Error('턴 진행 버튼 못찾음: ' + n);
     M.throwIfStopped();
@@ -7251,7 +7283,7 @@
 
   M.isRunning = false;
 
-  // 반환값: 'redirecting' | { entered: boolean, cleared: boolean }
+  // 반환값: { entered: boolean, cleared: boolean }
   //   - entered=false: 카드를 못 찾는 등 애초에 전투 진입 자체를 못함
   //   - entered=true, cleared=true: 실제로 보스 HP 0을 확인하고 처치 완료
   //   - entered=true, cleared=false: 진입은 했지만 실제 처치 실패(최대 시도
@@ -7271,6 +7303,7 @@
       return { entered: false, cleared: false };
     }
     M.isRunning = true;
+    M.currentBossPreset = null;
 
     const runAndReport = async () => {
       try {
@@ -7317,7 +7350,13 @@
       // 방금 클리어한 보스의 전투 URL에 그대로 남아있는 상태를 "목록 페이지"로
       // 착각해 다음 보스 카드를 못 찾는 버그가 실전에서 확인됨(황제 클리어 후
       // 엔트 진입 실패). 정확히 목록 경로일 때만 카드 탐색을 시도한다.
-      const path = location.pathname.replace(/\/$/, '');
+      let path = location.pathname.replace(/\/$/, '');
+      if (path !== '/personal-boss') {
+        if (M.uiLog) M.uiLog('➡ 전투 메뉴를 통해 개인 보스 목록으로 이동 중...');
+        await M.goToBossListViaMenu();
+        M.assertBossRunAuthorized();
+        path = location.pathname.replace(/\/$/, '');
+      }
       if (path === '/personal-boss') {
         // 직전에 다른 보스를 막 클리어하고 목록으로 돌아온 직후일 수 있어
         // SPA가 목록을 완전히 다시 그릴 시간을 살짝 준다 (실전에서, 클리어
@@ -7362,20 +7401,7 @@
         return { entered: false, cleared: false };
       }
 
-      // 개인 보스 목록 페이지가 아니면 이동 (풀 새로고침 발생 가능 - pending 값으로 재개됨)
-      if (M.uiLog) M.uiLog('➡ 개인 보스 목록으로 이동 중...');
-      M.assertBossRunAuthorized();
-      location.href = 'https://lanis.me/personal-boss';
-      // location.href 대입은 "즉시" 페이지를 끊지 않는다 - 실제 브라우저가
-      // 이동을 처리하기까지 짧은 시차가 있어서, 이 대입 직후 바로 false를
-      // 반환하면 continueBossQueue가 "아직도 전투화면 아니네 → 실패"로
-      // 착각해 3연속 실패를 순식간에(새로고침도 되기 전에) 만들어버리는
-      // 버그가 실전에서 확인됨(캐릭터 요약 페이지에서 도전 눌렀을 때 재현).
-      // 그래서 실패와 구분되는 별도 값('redirecting')을 반환하고, 실제
-      // 이동이 일어날 시간을 좀 더 기다린다(안 넘어가도 아래에서 그냥
-      // redirecting을 반환하고 끝 - 다음 재개 때 이어짐).
-      await M.sleep(3000);
-      return 'redirecting';
+      return { entered: false, cleared: false };
     } finally {
       M.isRunning = false;
     }
@@ -7610,9 +7636,8 @@
     if (selected.length === 0) throw new Error('선택한 보스가 없습니다.');
 
     if (location.pathname.replace(/\/$/, '') !== '/personal-boss') {
+      await M.goToBossListViaMenu();
       M.assertBossRunAuthorized(auth.id);
-      location.href = 'https://lanis.me/personal-boss';
-      return await new Promise(() => {});
     }
 
     await M.waitFor(() => selected.some((key) => M.findBossCardActionButton(BOSS_REGISTRY[key].label)), 10000, 250);
@@ -7655,9 +7680,8 @@
     }
 
     if (location.pathname.replace(/\/$/, '') !== '/personal-boss') {
+      await M.goToBossListViaMenu();
       M.assertBossRunAuthorized(auth.id);
-      location.href = 'https://lanis.me/personal-boss';
-      return await new Promise(() => {});
     }
     await M.claimBossRewards();
     const failed = remaining.filter((key) => {
@@ -7696,8 +7720,7 @@
     }
   };
 
-  // 큐를 이어서 진행. 새로고침이 일어나도(예: 목록 페이지 이동) localStorage에
-  // 남은 큐가 있으면 resumePendingIfAny가 이 함수를 다시 호출해 이어감.
+  // 현재 실행 안에서 큐를 순서대로 진행한다. 새로고침 뒤 자동 재개는 금지한다.
   M.continueBossQueue = async () => {
     // 일일 복구와 보스 복구가 같은 순간 호출되어도 큐 소비자는 하나만 둔다.
     if (M.queueRunning) return;
@@ -7720,16 +7743,6 @@
 
       const result = await M.driveToBossAndRun(key, q.job || M.getSelectedJob());
       if (!M.isBossRunAuthorized(q.authId)) return;
-
-      // 페이지 이동이 예약된 경우: 실패로 세지 않고, 큐도 그대로 둔 채
-      // 조용히 종료한다 (실제 새로고침이 일어나면 resumePendingIfAny가
-      // 이어서 처리하고, 혹시 이동이 안 일어났어도 다음에 다시 시도할 수
-      // 있게 remaining을 그대로 남겨둔다). 이걸 실패로 세면, 새로고침이
-      // 채 일어나기도 전에 3연속 실패로 오판되는 버그가 있었음.
-      if (result === 'redirecting') {
-        if (M.uiLog) M.uiLog('⏸ 페이지 이동 대기 중 (새로고침 후 자동으로 이어짐)');
-        return;
-      }
 
       const raw2 = localStorage.getItem(QUEUE_KEY);
       if (!raw2) return; // 그 사이 정지 등으로 큐가 지워졌으면 종료
@@ -7768,16 +7781,13 @@
       //     연속 실패"는 이 경우를 말한 것)
       if (!result.entered) {
         q2.entryFailStreak++;
-        if (M.uiLog) M.uiLog(`⚠ [큐] "${entry.label}" 전투 진입 자체 실패 (${q2.entryFailStreak}/3) - 시도조차 못 함`);
-        if (q2.entryFailStreak >= 3) {
-          localStorage.removeItem(QUEUE_KEY);
-          if (M.uiLog) M.uiLog('🛑 진입 자체가 계속 실패 - 큐 중단');
-          M.showBossNotice(`⚠ "${entry.label}" 전투 화면 진입에 3회 연속 실패했습니다(카드/버튼을 못 찾음).\n공략 시도조차 못 한 상태입니다. 페이지 상태나 보스 목록을 확인해주세요.`);
-          return;
-        }
-        localStorage.setItem(QUEUE_KEY, JSON.stringify(q2));
-        await M.sleep(1500);
-        continue; // 같은 보스로 재시도 (remaining은 그대로)
+        localStorage.removeItem(QUEUE_KEY);
+        if (M.uiLog) M.uiLog(`🛑 [큐] "${entry.label}" 전투 진입 확인 실패 - 자동 재클릭 없이 중단`);
+        M.showBossNotice(
+          `⚠ "${entry.label}" 전투 진입을 확인하지 못했습니다.\n` +
+          '중복 도전을 방지하기 위해 카드/도전 버튼을 다시 누르지 않고 큐를 중단합니다.'
+        );
+        return;
       }
 
       // 여기부터는 진입은 확실히 함 (entryFailStreak 리셋)
@@ -7791,18 +7801,19 @@
         continue;
       }
 
-      // 진입해서 실제로 공략까지 했는데 처치 실패 (최대 시도 도달 등)
+      // 일반 공략 실패를 같은 보스 자동 재도전으로 바꾸지 않는다.
+      // 프리셋/봉인/마나/턴 제한 오류를 재입장으로 숨기면 황제 같은 보스를
+      // 계속 처음부터 시작하게 된다. 자동 재도전은 위 retryRequired
+      // (망령 첫 자세 전환 실패 등) 경로에서만 허용한다.
       q2.attempts++;
       if (!q2.failedLabels.includes(entry.label)) q2.failedLabels.push(entry.label);
-      if (M.uiLog) M.uiLog(`⛔ [큐] "${entry.label}" 공략 실패 (같은 보스 연속 ${q2.attempts}/3회)`);
-      if (q2.attempts >= 3) {
-        localStorage.removeItem(QUEUE_KEY);
-        if (M.uiLog) M.uiLog(`🛑 "${entry.label}" 3회 연속 공략 실패 - 큐 중단`);
-        M.showBossNotice(`⚠ "${entry.label}" 공략에 3회 연속 실패했습니다.\n설정(프리셋/스킬 등)이나 공략 로직을 점검해주세요. 큐를 중단합니다.`);
-        return;
-      }
-      localStorage.setItem(QUEUE_KEY, JSON.stringify(q2));
-      // remaining은 그대로 둬서 같은 보스를 다시 시도함
+      localStorage.removeItem(QUEUE_KEY);
+      if (M.uiLog) M.uiLog(`🛑 [큐] "${entry.label}" 공략 실패 - 자동 재도전 없이 중단`);
+      M.showBossNotice(
+        `⚠ "${entry.label}" 공략이 완료되지 않았습니다.\n` +
+        '프리셋·봉인·마나·턴 제한 상태를 확인하기 위해 자동 재도전 없이 큐를 중단합니다.'
+      );
+      return;
     }
 
       const finalRaw = localStorage.getItem(QUEUE_KEY);
@@ -7991,8 +8002,16 @@
   window.__mountLanisBossTool = buildPanel;
   buildPanel();
 
-  // 새로고침/재접속으로 스크립트가 다시 로드된 경우, 진행 중이던 요청이 있으면 자동으로 이어감
+  // 새로고침/재접속 시에는 절대 자동으로 보스를 시작하지 않는다.
   (function resumePendingIfAny() {
+    localStorage.removeItem(PENDING_KEY);
+    localStorage.removeItem(QUEUE_KEY);
+    sessionStorage.removeItem(RUN_AUTH_KEY);
+    localStorage.setItem(STOP_LATCH_KEY, String(Date.now()));
+    M.stopRequested = true;
+    if (M.uiLog) M.uiLog('■ 새로고침 후 보스 자동 재개 차단 - 사용자가 시작을 눌러야 실행');
+    return;
+    /*
     // 큐/pending 값은 과거 실행의 찌꺼기일 수 있다. 사용자가 현재 탭에서
     // 직접 시작해 발급된 허가가 없으면 어떤 경우에도 자동 실행하지 않는다.
     if (!sessionStorage.getItem(RUN_AUTH_KEY)) {
@@ -8082,6 +8101,7 @@
           });
       }, 1200); // 페이지가 완전히 로드될 시간을 조금 줌
     }
+    */
   })();
 
   // ==========================================================================
@@ -8095,7 +8115,6 @@
   M.runFallenGuardian = async ({
     requiredSeals = ['불굴', '엔드 블로킹'],
     maxSealRounds = 15,
-    maxManaRounds = 20, // 10턴씩이라 실제 최대 200턴
     maxDealRounds = 30,
     hpThreshold = 0.5,
   } = {}) => {
@@ -8129,29 +8148,13 @@
       push(`[1단계 ${r}회차] sealed=${[...sealed].join(',')}`);
     }
     if (!requiredSeals.every((a) => sealed.has(a))) {
-      push('[1단계] 경고: 최대 시도 내 목표 봉인 미완료, 다음 단계로 진행');
+      throw new Error('수호자: 필수 봉인 미완료로 공격 단계를 차단합니다.');
     }
-    if (stopped()) return { log, cleared: false };
-
-    // 2단계: 마나 (10턴씩)
-    await M.applyBossPreset('마나');
-    push('[2단계] 마나 프리셋 적용');
-    let state = (await M.getValidHpMpNumbers());
-    r = 0;
-    while (state.boss.mp.cur > 0 && r < maxManaRounds) {
-      if (stopped()) return { log, cleared: false };
-      await recoverUntilSafe();
-      await M.clickTurn(10);
-      r++;
-      state = (await M.getValidHpMpNumbers());
-      push(`[2단계 ${r}회차/10턴] bossMp=${state.boss.mp.cur}/${state.boss.mp.max} bossHp=${state.boss.hp.cur}`);
-    }
-    if (state.boss.mp.cur > 0) push('[2단계] 경고: 최대 시도 내 마나 0 미도달, 다음 단계로 진행');
     if (stopped()) return { log, cleared: false };
 
     await M.applyBossPreset('딜');
-    push('[3단계] 딜 프리셋 적용');
-    state = (await M.getValidHpMpNumbers());
+    push('[2단계] 딜 프리셋 적용');
+    let state = (await M.getValidHpMpNumbers());
     r = 0;
     let scrollRoundsUsed = 0;
     while (state.boss.hp.cur > 0 && r < maxDealRounds) {
@@ -8193,9 +8196,9 @@
   M.runVoidEmperor = async ({
     requiredSeal = '차원왜곡',
     maxSealRounds = 15,
-    maxManaRounds = 20, // 10턴씩이라 실제 최대 200턴
+    maxManaRounds = 80,
     maxDealRounds = 30,
-    lowHpThreshold = 0.3,
+    lowHpThreshold = 0.7,
   } = {}) => {
     const log = [];
     const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
@@ -8211,13 +8214,17 @@
     let r = 0;
     while (!sealed.has(requiredSeal) && r < maxSealRounds) {
       if (stopped()) return { log, cleared: false };
+      const sealState = await M.getValidHpMpNumbers();
+      if (sealState.player.hp.cur / sealState.player.hp.max <= lowHpThreshold) {
+        await M.clickRecover();
+      }
       await M.clickTurn(5);
       r++;
       for (const s of M.parseSealedAbilities([requiredSeal])) sealed.add(s); // 화면에 최근 로그만 남아 예전 정보를 잊지 않도록 누적
       push(`[1단계 ${r}회차] sealed=${[...sealed].join(',')}`);
     }
     if (!sealed.has(requiredSeal)) {
-      push(`[1단계] 경고: 최대 시도 내 "${requiredSeal}" 미봉인, 다음 단계로 진행`);
+      throw new Error(`황제: 필수 봉인 "${requiredSeal}" 미완료로 다음 단계를 차단합니다.`);
     }
     if (stopped()) return { log, cleared: false };
 
@@ -8229,13 +8236,20 @@
     r = 0;
     while (state.boss.mp.cur > 0 && r < maxManaRounds) {
       if (stopped()) return { log, cleared: false };
+      const manaHpRatio = state.player.hp.cur / state.player.hp.max;
+      if (manaHpRatio <= lowHpThreshold) {
+        await M.clickRecover();
+        state = await M.getValidHpMpNumbers();
+      }
       const turns = state.boss.mp.cur > 300 ? 5 : 1;
       await M.clickTurn(turns);
       r++;
       state = (await M.getValidHpMpNumbers());
       push(`[2단계 ${r}회차/${turns}턴] bossMp=${state.boss.mp.cur}/${state.boss.mp.max} bossHp=${state.boss.hp.cur}`);
     }
-    if (state.boss.mp.cur > 0) push('[2단계] 경고: 최대 시도 내 마나 0 미도달, 다음 단계로 진행');
+    if (state.boss.mp.cur > 0) {
+      throw new Error(`황제: 보스 MP가 ${state.boss.mp.cur} 남아 딜 단계를 차단합니다.`);
+    }
     if (stopped()) return { log, cleared: false };
 
     // 3단계: 딜 (스크롤 패턴 + 회복 개입)
@@ -8249,7 +8263,7 @@
       if (stopped()) return { log, cleared: false };
       round++;
       const myHpRatio = state.player.hp.cur / state.player.hp.max;
-      if (myHpRatio < lowHpThreshold) {
+      if (myHpRatio <= lowHpThreshold) {
         await M.clickRecover();
         push(`[3단계 ${round}회차] 내HP ${Math.round(myHpRatio * 100)}% -> 회복`);
       } else {
@@ -8342,7 +8356,8 @@
       skipBurnPhase = true;
       push('[1단계] "휘감은 뿌리"가 먼저 봉인됨 -> 화상 단계 생략');
     } else if (!sealed.has('노 컨디션')) {
-      push('[1단계] 경고: 최대 시도 내 "노 컨디션" 미봉인, 다음 단계로 진행');
+      push('[1단계] "노 컨디션" 미봉인 - 재도전 필요');
+      return { log, cleared: false, retryRequired: true };
     }
     if (stopped()) return { log, cleared: false };
 
@@ -8363,7 +8378,8 @@
         }
       }
       if (!sealed.has('휘감은 뿌리')) {
-        push('[2단계] 경고: 최대 시도 내 "휘감은 뿌리" 미봉인, 다음 단계로 진행');
+        push('[2단계] "휘감은 뿌리" 미봉인 - 재도전 필요');
+        return { log, cleared: false, retryRequired: true };
       }
     } else {
       push('[2단계] 생략됨 (이미 봉인)');
@@ -8624,7 +8640,10 @@
       }
     }
     if (sealed.has('휘감은 뿌리')) { skipBurnPhase = true; push('[1단계] "휘감은 뿌리"가 먼저 봉인됨 -> 화상 단계 생략'); }
-    else if (!sealed.has('노 컨디션')) { push('[1단계] 경고: 최대 시도 내 "노 컨디션" 미봉인, 다음 단계로 진행'); }
+    else if (!sealed.has('노 컨디션')) {
+      push('[1단계] "노 컨디션" 미봉인 - 재도전 필요');
+      return { log, cleared: false, retryRequired: true };
+    }
     if (stopped()) return { log, cleared: false };
 
     if (!skipBurnPhase) {
@@ -8639,7 +8658,10 @@
           return { log, cleared: false, retryRequired: true };
         }
       }
-      if (!sealed.has('휘감은 뿌리')) push('[2단계] 경고: 최대 시도 내 "휘감은 뿌리" 미봉인, 다음 단계로 진행');
+      if (!sealed.has('휘감은 뿌리')) {
+        push('[2단계] "휘감은 뿌리" 미봉인 - 재도전 필요');
+        return { log, cleared: false, retryRequired: true };
+      }
     } else { push('[2단계] 생략됨 (이미 봉인)'); }
     if (stopped()) return { log, cleared: false };
 
@@ -9107,7 +9129,7 @@
     maxSealRounds = 15,
     maxManaRounds = 40,
     maxDealRounds = 40,
-    hpThreshold = 0.6,
+    hpThreshold = 0.7,
   } = {}) => {
     const log = [];
     const push = (s) => { log.push(s); if (M.uiLog) M.uiLog(s); };
@@ -9323,8 +9345,8 @@
     maxSealRounds = 15,
     maxManaRounds = 50,
     maxDealRounds = 50,
-    hpThreshold = 0.6,
-    drainedManaThreshold = 50,
+    hpThreshold = 0.7,
+    drainedManaThreshold = 0,
   } = {}) => {
     const log = [];
     const push = (s) => { log.push(s); if (M.uiLog) M.uiLog(s); };
