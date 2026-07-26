@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.7.1-stable
+// @version      1.7.2-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -760,6 +760,8 @@
   Modules.arena.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
+    const clickIntervalMs = 35000;
+    let lastAttemptAt = 0;
     mod.loadConfig();
     if (!mod.isWeekend()) {
       mod.clearResume();
@@ -786,7 +788,13 @@
         return;
       }
 
-      Core.log('arena', `쿨타임 대기 중: 오늘 ${before}/${target}회`);
+      const remainingInterval = Math.max(0, clickIntervalMs - (Date.now() - lastAttemptAt));
+      if (remainingInterval > 0) {
+        Core.log('arena', `다음 클릭까지 ${Math.ceil(remainingInterval / 1000)}초 대기`);
+        await Core.sleep(remainingInterval);
+        if (mod.stopRequested) return;
+      }
+      Core.log('arena', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}/${target}회`);
       const startButton = await mod.waitForEnabledStart();
       if (!startButton) throw new Error('90초 안에 아레나 "전투 시작" 버튼이 활성화되지 않았습니다.');
       if (mod.stopRequested) return;
@@ -796,13 +804,17 @@
       }, { beforeMin: 700, beforeMax: 1300 }))) {
         throw new Error('아레나 "전투 시작" 버튼 클릭에 실패했습니다.');
       }
+      lastAttemptAt = Date.now();
 
       const resultBack = await Core.waitFor(
         () => Core.findButtonByText('아레나로 돌아가기') || Core.findButtonByText('돌아가기'),
-        90000,
+        15000,
         500
       );
-      if (!resultBack) throw new Error('90초 안에 아레나 전투 결과창을 확인하지 못했습니다.');
+      if (!resultBack) {
+        Core.log('arena', '⚠ 전투 시작 클릭 후 결과 화면이 나타나지 않음 — 클릭 누락으로 판단, 35초 후 재시도');
+        continue;
+      }
       await mod.handleResultIfPresent();
       const incremented = await Core.waitFor(() => {
         const count = mod.readTodayBattleCount();
