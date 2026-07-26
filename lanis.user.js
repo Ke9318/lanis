@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.7.3-stable
+// @version      1.7.4-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -3156,6 +3156,7 @@
     stopRequested: false,
     cycleCount: 0, // 완료한 던전의 주인 도전 횟수
     config: {
+      originalElement: '',
       requiredTier1: ['관통', '집중', '정확한 한 발'],
       requiredLifePair: ['라이프 드레인', '재생'],
       recommendedAbilities: [
@@ -4519,7 +4520,7 @@
     Core.log('deepdungeon', `심층던전 자동클리어 시작 (${mod.config.jobMode})`);
     Core.log('deepdungeon', '시작 전 공용 프리셋 "심층던전" 적용');
     await Core.applyCommonPreset('심층던전', 'deepdungeon');
-    const deepOriginalElement = Modules.autohunt.config.originalElement;
+    const deepOriginalElement = mod.config.originalElement;
     if (!Core.ELEMENT_OPTIONS.includes(deepOriginalElement)) {
       throw new Error('자동사냥 탭에서 원래 속성을 먼저 선택해주세요.');
     }
@@ -4635,9 +4636,7 @@
       return null;
     }
     const requiredElement =
-      moduleId === 'deepdungeon'
-        ? Modules.autohunt.config.originalElement
-        : mod.config && mod.config.originalElement;
+      mod.config && mod.config.originalElement;
     if (
       (moduleId === 'autohunt' || moduleId === 'dungeon' || moduleId === 'deepdungeon') &&
       !Core.ELEMENT_OPTIONS.includes(requiredElement)
@@ -4989,10 +4988,17 @@
       return;
     }
     if (
-      (steps.includes('autohunt') || steps.includes('deepdungeon')) &&
+      steps.includes('autohunt') &&
       !Core.ELEMENT_OPTIONS.includes(Modules.autohunt.config.originalElement)
     ) {
       Core.showBanner('daily', '자동사냥 탭에서 원래 속성을 먼저 선택해주세요.');
+      return;
+    }
+    if (
+      steps.includes('deepdungeon') &&
+      !Core.ELEMENT_OPTIONS.includes(Modules.deepdungeon.config.originalElement)
+    ) {
+      Core.showBanner('daily', '심층던전 탭에서 원래 속성을 먼저 선택해주세요.');
       return;
     }
     if (steps.includes('boss')) {
@@ -5554,6 +5560,7 @@
       localStorage.setItem(
         DEEPDUNGEON_CONFIG_KEY,
         JSON.stringify({
+          originalElement: this.config.originalElement,
           tokenShopThreshold: this.config.tokenShopThreshold,
           emergencyHpPercent: this.config.emergencyHpPercent,
           bossPreFloorHpPercent: this.config.bossPreFloorHpPercent,
@@ -5591,6 +5598,27 @@
     const mod = Modules.deepdungeon;
     const refs = UIRefs.deepdungeon;
     mod.loadConfigIntoSelf();
+
+    container.appendChild(labelEl('원래 속성 (시작 전 자동 확인·변경)'));
+    const elementSelect = document.createElement('select');
+    elementSelect.style.cssText = inputStyle();
+    const elementPlaceholder = document.createElement('option');
+    elementPlaceholder.value = '';
+    elementPlaceholder.textContent = '속성 선택 필요';
+    elementPlaceholder.selected = !Core.ELEMENT_OPTIONS.includes(mod.config.originalElement);
+    elementSelect.appendChild(elementPlaceholder);
+    Core.ELEMENT_OPTIONS.forEach((element) => {
+      const option = document.createElement('option');
+      option.value = element;
+      option.textContent = element;
+      option.selected = element === mod.config.originalElement;
+      elementSelect.appendChild(option);
+    });
+    elementSelect.addEventListener('change', (e) => {
+      mod.config.originalElement = e.target.value;
+      mod.saveConfig();
+    });
+    container.appendChild(elementSelect);
 
     container.appendChild(labelEl('직업 (물리딜/신술 둘 다 지원)'));
     const jobSelect = document.createElement('select');
@@ -5726,7 +5754,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [jobSelect, tokenInput, emergInput, bossPreInput, acInput, defInput, retryCheck];
+    refs.inputs = [elementSelect, jobSelect, tokenInput, emergInput, bossPreInput, acInput, defInput, retryCheck];
   }
 
   function buildBossTab(container) {
