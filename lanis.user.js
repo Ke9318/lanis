@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.5.0-stable
-// @description  재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 자동클리어와 개인 보스 자동화를 제공. 기존 통합 패널과 보스 도구는 서로 독립적으로 동작.
+// @version      1.5.1-stable
+// @description  재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 / 개인 보스 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
 // @grant        none
@@ -570,6 +570,7 @@
     raremap: '레어맵',
     dungeon: '던전',
     deepdungeon: '심층던전',
+    boss: '보스',
   };
 
   const Modules = {};
@@ -4444,6 +4445,37 @@
     Core.updateModuleButtons();
   };
 
+  // 보스 엔진은 별도 네임스페이스에서 동작하지만 실행 잠금만 통합 코어와
+  // 공유한다. 따라서 보스 로직이 던전/심층던전 내부 상태나 함수를 참조하지
+  // 않으면서도 두 자동화가 동시에 클릭하는 사고는 방지한다.
+  window.__lanisBossCoordinator = {
+    acquire() {
+      if (Core.activeModuleId && Core.activeModuleId !== 'boss') {
+        Core.showBanner(
+          'boss',
+          `"${MODULE_LABELS[Core.activeModuleId]}" 모듈이 이미 실행 중입니다. 먼저 그 모듈을 정지한 뒤 시작해주세요.`
+        );
+        return false;
+      }
+      Core.hideBanner();
+      Core.activeModuleId = 'boss';
+      Core.log('boss', '보스 매크로 시작');
+      Core.updateModuleButtons();
+      return true;
+    },
+    release() {
+      if (Core.activeModuleId === 'boss') Core.activeModuleId = null;
+      Core.log('boss', '보스 매크로 종료');
+      Core.updateModuleButtons();
+    },
+    isOtherModuleRunning() {
+      return !!Core.activeModuleId && Core.activeModuleId !== 'boss';
+    },
+    refresh() {
+      Core.updateModuleButtons();
+    },
+  };
+
   // ==========================================================================
   // 패널 UI (탭 구조, 하나의 패널을 다섯 모듈이 공유)
   // ==========================================================================
@@ -4468,6 +4500,19 @@
       refs.statusEl.textContent = mod.running ? `실행중 (${cycleLabel})` : otherRunning ? '다른 모듈 실행중' : '대기중';
       if (refs.inputs) refs.inputs.forEach((inp) => (inp.disabled = mod.running));
     });
+
+    const bossPanel = document.getElementById('lrm-boss-ref-panel');
+    if (bossPanel) {
+      const bossRunning = Core.activeModuleId === 'boss';
+      const anyModuleRunning = !!Core.activeModuleId;
+      const startBtn = bossPanel.querySelector('#lrm-boss-ref-run-queue');
+      const stopBtn = bossPanel.querySelector('#lrm-boss-ref-stop');
+      if (startBtn) startBtn.disabled = anyModuleRunning;
+      if (stopBtn) stopBtn.disabled = !bossRunning;
+      bossPanel.querySelectorAll('#lrm-boss-ref-job, .lrm-boss-check').forEach((input) => {
+        input.disabled = bossRunning;
+      });
+    }
   };
 
   function labelEl(text) {
@@ -5108,6 +5153,13 @@
     refs.inputs = [jobSelect, tokenInput, emergInput, bossPreInput, acInput, defInput, retryCheck];
   }
 
+  function buildBossTab(container) {
+    container.id = 'lrm-boss-tool-host';
+    if (typeof window.__mountLanisBossTool === 'function') {
+      window.__mountLanisBossTool(container);
+    }
+  }
+
   function buildPanel() {
     const panel = document.createElement('div');
     panel.id = 'lrm-panel';
@@ -5152,6 +5204,7 @@
     buildRaremapTab(tabContents.raremap);
     buildDungeonTab(tabContents.dungeon);
     buildDeepDungeonTab(tabContents.deepdungeon);
+    buildBossTab(tabContents.boss);
     panel.appendChild(contentWrap);
 
     function switchTab(id) {
@@ -5226,7 +5279,7 @@
   function init() {
     if (document.getElementById('lrm-panel')) return;
     buildPanel();
-    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전)');
+    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전 / 보스)');
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
@@ -6550,32 +6603,14 @@
     try { localStorage.setItem(BOSS_SELECTION_KEY, JSON.stringify(values)); } catch (e) {}
   }
 
-  function buildPanel() {
-    if (document.getElementById('lrm-boss-ref-panel')) return; // 중복 생성 방지
-
-    let pinned = loadPinned();
-    const savedPos = loadPos();
-
+  function buildPanel(hostOverride = null) {
+    const host = hostOverride || document.getElementById('lrm-boss-tool-host');
+    if (!host || host.querySelector('#lrm-boss-ref-panel')) return;
     const panel = document.createElement('div');
     panel.id = 'lrm-boss-ref-panel';
-    panel.style.cssText = `
-      position: fixed; top: ${savedPos ? savedPos.top : 80}px;
-      ${savedPos ? `left: ${savedPos.left}px;` : 'right: 20px;'}
-      width: 280px;
-      background: #1a1a1a; color: #eee; border: 1px solid #555;
-      border-radius: 8px; font-size: 13px;
-      z-index: ${pinned ? 2147483647 : 999999};
-      font-family: sans-serif; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-    `;
+    panel.style.cssText = 'color:#eee; font-size:12px; font-family:sans-serif;';
     panel.innerHTML = `
-      <div id="lrm-boss-ref-header" style="padding:8px 10px; background:#2a2a2a; border-radius:8px 8px 0 0; cursor:move; font-weight:bold; display:flex; align-items:center; justify-content:space-between;">
-        <span>🗡 보스 자동화 (참고용)</span>
-        <label style="font-weight:normal; font-size:11px; display:flex; align-items:center; gap:4px; cursor:pointer;">
-          <input type="checkbox" id="lrm-boss-ref-pin" ${pinned ? 'checked' : ''} style="cursor:pointer;">
-          📌 항상 위로
-        </label>
-      </div>
-      <div style="padding:10px;">
+      <div>
         <div style="font-size:11px; color:#999; margin-bottom:2px;">직업 (검술·인술·궁술·체술·마술 지원)</div>
         <select id="lrm-boss-ref-job" style="width:100%; margin-bottom:10px; padding:5px; background:#111; color:#eee; border:1px solid #555; border-radius:4px; cursor:pointer;">
           <option value="검술">검술</option>
@@ -6606,7 +6641,7 @@
         <div id="lrm-boss-ref-log" style="height:160px; overflow-y:auto; background:#000; padding:6px; border-radius:4px; white-space:pre-wrap; font-size:11px; line-height:1.4;"></div>
       </div>
     `;
-    document.body.appendChild(panel);
+    host.appendChild(panel);
 
     // 마지막으로 선택한 직업과 보스 체크 상태는 실행 큐와 별도로 영구 저장한다.
     // 새로고침이나 보스 화면 이동으로 스크립트가 다시 로드돼도 그대로 복원됨.
@@ -6622,36 +6657,6 @@
           .map((item) => item.value);
         saveSelectedBosses(checkedValues);
       });
-    });
-
-    // 항상 위로(핀) 토글: 켜져 있으면 z-index를 최대값으로 고정해 다른 요소에 가려지지 않게 함
-    panel.querySelector('#lrm-boss-ref-pin').addEventListener('change', (e) => {
-      pinned = e.target.checked;
-      panel.style.zIndex = pinned ? '2147483647' : '999999';
-      savePinned(pinned);
-    });
-
-    // 드래그 이동 (위치는 localStorage에 저장해 새로고침/재접속해도 유지)
-    const header = panel.querySelector('#lrm-boss-ref-header');
-    let dragging = false, offsetX = 0, offsetY = 0;
-    header.addEventListener('mousedown', (e) => {
-      if (e.target.closest('label')) return; // 체크박스 클릭은 드래그로 취급 안 함
-      dragging = true;
-      offsetX = e.clientX - panel.offsetLeft;
-      offsetY = e.clientY - panel.offsetTop;
-    });
-    document.addEventListener('mousemove', (e) => {
-      if (!dragging) return;
-      const left = e.clientX - offsetX;
-      const top = e.clientY - offsetY;
-      panel.style.left = left + 'px';
-      panel.style.top = top + 'px';
-      panel.style.right = 'auto';
-    });
-    document.addEventListener('mouseup', () => {
-      if (!dragging) return;
-      dragging = false;
-      savePos({ left: panel.offsetLeft, top: panel.offsetTop });
     });
 
     const logEl = panel.querySelector('#lrm-boss-ref-log');
@@ -6673,6 +6678,11 @@
         M.uiLog('⚠ 선택된 보스가 없음');
         return;
       }
+      const coordinator = window.__lanisBossCoordinator;
+      if (coordinator && !coordinator.acquire()) {
+        M.uiLog('⚠ 다른 통합 매크로 모듈이 실행 중이라 보스 시작을 차단했습니다.');
+        return;
+      }
       M.stopRequested = false;
       setRunningState(true);
       M.uiLog(`▶ 보스 도전 시작 (선택: ${checked.length}개)`);
@@ -6680,6 +6690,8 @@
         await M.startBossQueue(checked);
       } catch (e) {
         M.uiLog('⚠ 오류: ' + e.message);
+      } finally {
+        if (coordinator) coordinator.release();
       }
       setRunningState(false);
     });
@@ -6703,8 +6715,10 @@
       M.antiThrottle.stop();
       M.uiLog('■ 정지 요청됨 (다음 턴 진행 전에 멈춤, 큐/재개 예약도 취소)');
     });
+    if (window.__lanisBossCoordinator) window.__lanisBossCoordinator.refresh();
   }
 
+  window.__mountLanisBossTool = buildPanel;
   buildPanel();
 
   // 새로고침/재접속으로 스크립트가 다시 로드된 경우, 진행 중이던 요청이 있으면 자동으로 이어감
@@ -6713,12 +6727,20 @@
     if (queueRaw) {
       setTimeout(() => {
         if (M.uiLog) M.uiLog('⏳ 보스 큐 이어서 진행');
+        const coordinator = window.__lanisBossCoordinator;
+        if (coordinator && !coordinator.acquire()) {
+          if (M.uiLog) M.uiLog('⚠ 다른 모듈 실행 중이라 보스 큐 자동 재개를 보류했습니다.');
+          return;
+        }
         // 새로고침 직후라 사용자 제스처가 없어 오디오 자동재생이 막힐 수도
         // 있지만(브라우저 정책), 안 되면 조용히 무시되고 매크로는 계속 진행됨.
         M.antiThrottle.start();
         M.continueBossQueue()
           .catch((e) => { if (M.uiLog) M.uiLog('⚠ ' + e.message); })
-          .finally(() => M.antiThrottle.stop());
+          .finally(() => {
+            M.antiThrottle.stop();
+            if (coordinator) coordinator.release();
+          });
       }, 1200);
       return;
     }
@@ -6726,10 +6748,18 @@
     if (pending && BOSS_REGISTRY[pending]) {
       setTimeout(() => {
         if (M.uiLog) M.uiLog(`⏳ 이전 요청 이어서 진행: ${BOSS_REGISTRY[pending].label}`);
+        const coordinator = window.__lanisBossCoordinator;
+        if (coordinator && !coordinator.acquire()) {
+          if (M.uiLog) M.uiLog('⚠ 다른 모듈 실행 중이라 이전 보스 요청 자동 재개를 보류했습니다.');
+          return;
+        }
         M.antiThrottle.start();
         M.driveToBossAndRun(pending)
           .catch((e) => { if (M.uiLog) M.uiLog('⚠ ' + e.message); })
-          .finally(() => M.antiThrottle.stop());
+          .finally(() => {
+            M.antiThrottle.stop();
+            if (coordinator) coordinator.release();
+          });
       }, 1200); // 페이지가 완전히 로드될 시간을 조금 줌
     }
   })();
