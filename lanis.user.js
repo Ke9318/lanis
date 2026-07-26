@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.7.7-stable
+// @version      1.7.8-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -6486,6 +6486,22 @@
     return true;
   };
 
+  // 모든 직업/보스 함수의 최종 안전망. 마지막 공격 직후에는 React가
+  // HP=0과 클리어 모달을 서로 다른 프레임에 반영할 수 있으므로 잠깐
+  // 재확인한다. 팝업 또는 실제 보스 HP 0 중 하나가 확인될 때만 성공이다.
+  M.waitForBossClearEvidence = async (bossLabel = '', timeoutMs = 3000) => {
+    const evidence = await M.waitFor(() => {
+      const popup = M.findBossClearPopup(bossLabel);
+      if (popup) return { type: 'popup', popup };
+      const state = M.getHpMpNumbers();
+      if (state && state.boss && state.boss.hp.cur <= 0) return { type: 'hp-zero' };
+      return null;
+    }, timeoutMs, 150);
+    if (!evidence) return false;
+    if (evidence.type === 'popup') await M.consumeBossClearPopup(bossLabel);
+    return true;
+  };
+
   // 클리어 팝업의 "확인" 버튼을 닫아준다 (모달 스코프)
   M.closeClearPopupIfAny = async () => {
     await M.sleep(500);
@@ -7061,16 +7077,21 @@
     const runAndReport = async () => {
       try {
         const result = await M[runName]();
-        const popupCleared = await M.consumeBossClearPopup(entry.label);
+        // 각 직업 함수가 자체 HP 판독으로 성공을 반환하지 못했을 때만
+        // 공통 종료 증거를 재확인한다. 이 경로가 검술/인술/궁술/체술/마술
+        // 전체 보스에 동일하게 적용된다.
+        const commonCleared = result && result.cleared
+          ? true
+          : await M.waitForBossClearEvidence(entry.label);
         return {
           entered: true,
-          cleared: popupCleared || !!(result && result.cleared),
+          cleared: commonCleared,
           retryRequired: !!(result && result.retryRequired),
         };
       } catch (e) {
         // 마지막 공격 직후 클리어 모달 때문에 HP/MP 읽기가 실패한 경우에도
         // 화면에 명백한 처치 결과가 있으면 성공이다.
-        if (await M.consumeBossClearPopup(entry.label)) {
+        if (!e.isUserStop && await M.waitForBossClearEvidence(entry.label)) {
           if (M.uiLog) M.uiLog(`✅ "${entry.label}" 클리어 팝업 확인 - 성공 처리`);
           return { entered: true, cleared: true, retryRequired: false };
         }
