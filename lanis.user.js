@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.9.1-stable
+// @version      1.9.2-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -139,19 +139,24 @@
   };
 
   Core.waitFor = async function (fn, timeoutMs = 15000, intervalMs = 300, shouldCancel = Core.defaultShouldCancel) {
-    let deadline = Date.now() + timeoutMs;
+    const startedAt = Date.now();
+    const maxThrottleAllowance = Math.min(Math.max(timeoutMs, 0), 30000);
+    let throttleAllowance = 0;
     let lastTick = Date.now();
     while (true) {
       const now = Date.now();
       const delayedBy = now - lastTick;
-      // 다른 탭/창에 있을 때 Chrome이 메인 스레드와 렌더링을 늦춘 시간은
-      // 실제 DOM 대기 제한에서 제외한다. 다시 포커스됐다는 이유만으로
-      // 즉시 타임아웃 처리되는 문제를 방지한다.
-      if (document.hidden || delayedBy > Math.max(1200, intervalMs * 4)) {
-        deadline += delayedBy;
+      // 숨은 탭이라는 이유만으로 매 반복마다 전체 지연 시간을 더하면
+      // deadline도 같은 속도로 밀려 조건이 영원히 충족되지 않는 무한 대기가
+      // 된다. 실제 콜백이 비정상적으로 늦게 도착한 초과분만, 최대 30초까지
+      // 제한적으로 보정한다.
+      const throttleThreshold = Math.max(1200, intervalMs * 4);
+      if (delayedBy > throttleThreshold && throttleAllowance < maxThrottleAllowance) {
+        const excessDelay = Math.max(0, delayedBy - intervalMs);
+        throttleAllowance += Math.min(excessDelay, maxThrottleAllowance - throttleAllowance);
       }
       lastTick = now;
-      if (now >= deadline) break;
+      if (now - startedAt >= timeoutMs + throttleAllowance) break;
       if (shouldCancel && shouldCancel()) return null;
       let result = null;
       try {
@@ -333,12 +338,10 @@
       let confirmed = null;
       try {
         confirmed = await Core.waitFor(
-          () => {
-            const text = Core.bodyText();
-            return confirmationMutated &&
-              text.includes(presetName) &&
-              (text.includes('적용했습니다') || text.includes('적용 완료') || text.includes('불러왔습니다'));
-          },
+          // observer는 클릭 전에 설치되며, 프리셋 이름과 적용 문구가 함께
+          // 들어온 새 DOM mutation만 인정한다. 숨은 탭에서 innerText/layout
+          // 갱신이 보류돼도 이 fresh mutation 증거 자체로 확인할 수 있다.
+          () => confirmationMutated,
           3500,
           150
         );
@@ -528,6 +531,47 @@
       Core.audioCtx.resume().catch(() => {});
     }
     return Core.audioCtx;
+  };
+
+  // 실행 모듈이 하나라도 있는 동안 거의 들리지 않는 오디오 신호를 유지해
+  // Chrome의 숨은 탭 타이머 제한을 완화한다. 보스에만 있던 유지 장치를
+  // 던전·아레나·자동사냥·심층던전과 일일 전체 실행에도 공통 적용한다.
+  // 소유자 집합을 사용하므로 일일과 그 하위 모듈이 겹쳐도 먼저 끝난 쪽이
+  // 다른 쪽의 유지 신호를 끄지 않는다.
+  Core.backgroundKeeper = {
+    owners: new Set(),
+    ctx: null,
+    osc: null,
+    acquire(owner) {
+      if (!owner) return;
+      this.owners.add(owner);
+      if (this.ctx) {
+        if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+        return;
+      }
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        const ctx = new Ctx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.002;
+        osc.connect(gain).connect(ctx.destination);
+        osc.start();
+        this.ctx = ctx;
+        this.osc = osc;
+        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      } catch (e) {
+        Core.log('core', `백그라운드 유지 오디오 시작 실패: ${e.message}`);
+      }
+    },
+    release(owner) {
+      if (owner) this.owners.delete(owner);
+      if (this.owners.size > 0) return;
+      try { if (this.osc) this.osc.stop(); } catch (e) {}
+      try { if (this.ctx) this.ctx.close(); } catch (e) {}
+      this.ctx = null;
+      this.osc = null;
+    },
   };
 
   Core.beep = function (freq, durationMs, delayMs = 0, waveType = 'sine', volume = 0.2) {
@@ -4708,6 +4752,8 @@
     Core.activeModuleId = moduleId;
     mod.runId = (mod.runId || 0) + 1;
     const runId = mod.runId;
+    const keeperOwner = `module:${moduleId}:${runId}`;
+    Core.backgroundKeeper.acquire(keeperOwner);
     mod.running = true;
     mod.stopRequested = false;
     Core.moduleResults[moduleId] = { ok: null, message: '실행 중', at: Date.now() };
@@ -4735,6 +4781,7 @@
         }
       })
       .finally(() => {
+        Core.backgroundKeeper.release(keeperOwner);
         if (mod.loopPromise === loopPromise) mod.loopPromise = null;
         if (Core.runContext && Core.runContext.moduleId === moduleId && Core.runContext.runId === runId) {
           Core.runContext = null;
@@ -5027,6 +5074,7 @@
     Core.dailyActive = false;
     this.running = false;
     Core.activeModuleId = null;
+    Core.backgroundKeeper.release('daily');
     Core.updateModuleButtons();
 
     if (stopped) {
@@ -5095,6 +5143,7 @@
       startedAt: Date.now(),
     };
     mod.stopRequested = false;
+    Core.backgroundKeeper.acquire('daily');
     sessionStorage.setItem(DAILY_AUTH_KEY, JSON.stringify({
       schema: DAILY_AUTH_SCHEMA,
       startedAt: state.startedAt,
@@ -5106,17 +5155,20 @@
       window.__bossMacro.armBossRun();
     }
     mod.saveState(state);
-    mod.mainLoop().catch((e) => {
-      Core.dailyActive = false;
-      mod.running = false;
-      Core.showBanner('daily', `일일 실행 자체 오류: ${e.message}`, false);
-      Core.updateModuleButtons();
-    });
+    mod.mainLoop()
+      .catch((e) => {
+        Core.dailyActive = false;
+        mod.running = false;
+        Core.showBanner('daily', `일일 실행 자체 오류: ${e.message}`, false);
+        Core.updateModuleButtons();
+      })
+      .finally(() => Core.backgroundKeeper.release('daily'));
   };
 
   Core.stopDaily = function () {
     const mod = Modules.daily;
     mod.stopRequested = true;
+    Core.backgroundKeeper.release('daily');
     sessionStorage.removeItem(DAILY_AUTH_KEY);
     const state = mod.loadState();
     if (state) {
@@ -6215,18 +6267,23 @@
   // 탭에서 렌더링이 늦어져도, 실제로 준비될 때까지 계속 재확인함.
   // stopRequested가 켜지면 즉시 빠져나오게 해서 "정지" 버튼 반응성을 높인다.
   M.waitFor = async function (fn, timeoutMs = 15000, intervalMs = 300) {
-    let deadline = Date.now() + timeoutMs;
+    const startedAt = Date.now();
+    const maxThrottleAllowance = Math.min(Math.max(timeoutMs, 0), 30000);
+    let throttleAllowance = 0;
     let lastTick = Date.now();
     while (true) {
       const now = Date.now();
       const delayedBy = now - lastTick;
-      // 보스는 짧은 모달/프리셋/턴 결과 대기가 연속된다. 백그라운드
-      // throttling으로 콜백이 늦어진 시간은 타임아웃 예산에서 제외한다.
-      if (document.hidden || delayedBy > Math.max(1200, intervalMs * 4)) {
-        deadline += delayedBy;
+      // Core.waitFor와 같은 유한 보정 규칙을 사용한다. document.hidden인
+      // 동안 제한 시간을 계속 늘리면 보스 프리셋/모달 하나가 누락됐을 때
+      // 포그라운드로 돌아올 때까지 영구 정지한다.
+      const throttleThreshold = Math.max(1200, intervalMs * 4);
+      if (delayedBy > throttleThreshold && throttleAllowance < maxThrottleAllowance) {
+        const excessDelay = Math.max(0, delayedBy - intervalMs);
+        throttleAllowance += Math.min(excessDelay, maxThrottleAllowance - throttleAllowance);
       }
       lastTick = now;
-      if (now >= deadline) break;
+      if (now - startedAt >= timeoutMs + throttleAllowance) break;
       if (M.stopRequested) return null;
       const result = fn();
       if (result) return result;
@@ -6392,12 +6449,10 @@
         M.throwIfStopped();
         clickTarget.click();
         confirmed = await M.waitFor(
-          () => confirmationMutated && M.queryAll('*').some((el) =>
-            M.isVisible(el) &&
-            el.children.length === 0 &&
-            el.textContent.includes(name) &&
-            el.textContent.includes('적용')
-          ),
+          // 클릭 뒤 발생한 새 적용 mutation은 이미 이름까지 검사했다.
+          // getClientRects 기반 visible 검사를 다시 요구하면 숨은 탭에서
+          // 실제 적용 토스트도 보이지 않는 것으로 오판할 수 있다.
+          () => confirmationMutated,
           3000,
           150
         );
@@ -7466,7 +7521,10 @@
     ctx: null,
     osc: null,
     start() {
-      if (this.ctx) return;
+      if (this.ctx) {
+        if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+        return;
+      }
       try {
         const Ctx = window.AudioContext || window.webkitAudioContext;
         const ctx = new Ctx();
@@ -7482,6 +7540,7 @@
         osc.start();
         this.ctx = ctx;
         this.osc = osc;
+        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
       } catch (e) {
         // 오디오 컨텍스트 생성 실패해도 매크로 자체는 계속 진행되게 조용히 무시
       }
