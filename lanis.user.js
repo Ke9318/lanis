@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.9.2-stable
+// @version      1.11.0-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -508,7 +508,7 @@
   // ---------------- 로그 / 배너 / 정지 알림 ----------------
   Core.log = function (moduleId, msg) {
     const time = new Date().toLocaleTimeString('ko-KR', { hour12: false });
-    const tag = MODULE_LABELS[moduleId] || moduleId;
+    const tag = moduleDisplayLabel(moduleId);
     const line = `[${time}][${tag}] ${msg}`;
     console.log('[라니스 통합매크로]', line);
     if (Core.logEl) {
@@ -624,7 +624,7 @@
 
   Core.showBanner = function (moduleId, msg, isSuccess = false) {
     if (!Core.bannerEl) return;
-    Core.bannerEl.querySelector('span').textContent = `${isSuccess ? '✅' : '⚠'} [${MODULE_LABELS[moduleId] || moduleId}] ${msg}`;
+    Core.bannerEl.querySelector('span').textContent = `${isSuccess ? '✅' : '⚠'} [${moduleDisplayLabel(moduleId)}] ${msg}`;
     Core.bannerEl.style.background = isSuccess ? '#2e7d32' : '#b71c1c';
     Core.bannerEl.style.display = 'flex';
     Core.startTitleFlash();
@@ -717,9 +717,12 @@
     raremap: '레어맵',
     dungeon: '던전',
     arena: '아레나',
+    identify: '아이템',
     deepdungeon: '심층던전',
     boss: '보스',
   };
+  const moduleDisplayLabel = (moduleId) =>
+    moduleId === 'dismantle' ? '분해' : (MODULE_LABELS[moduleId] || moduleId);
 
   const Modules = {};
 
@@ -748,6 +751,36 @@
     cycleCount: 0,
     config: {
       targetBattles: 10,
+    },
+  };
+
+  // -------------------------- 미감정 장비 감정 --------------------------
+  Modules.identify = {
+    id: 'identify',
+    running: false,
+    stopRequested: false,
+    runId: 0,
+    loopPromise: null,
+    cycleCount: 0,
+    categoryCounts: {
+      무기: 0,
+      방어구: 0,
+      장신구: 0,
+    },
+  };
+
+  // -------------------------- 봉인 장비 분해 --------------------------
+  Modules.dismantle = {
+    id: 'dismantle',
+    running: false,
+    stopRequested: false,
+    runId: 0,
+    loopPromise: null,
+    cycleCount: 0,
+    categoryCounts: {
+      무기: 0,
+      방어구: 0,
+      장신구: 0,
     },
   };
 
@@ -904,6 +937,384 @@
       mod.cycleCount = incremented;
       Core.log('arena', `아레나 전투 완료: 오늘 ${incremented}/${target}회`);
     }
+  };
+
+  Modules.identify.goToInventory = async function () {
+    if (location.pathname.replace(/\/$/, '') !== '/inventory') {
+      await Core.clickNavMenuExact('캐릭', '인벤토리');
+    }
+    const arrived = await Core.waitFor(
+      () =>
+        location.pathname.replace(/\/$/, '') === '/inventory' &&
+        Core.gameElements('h5, h6').some((el) => el.textContent.trim() === '보유 아이템'),
+      15000,
+      250
+    );
+    if (!arrived) throw new Error('캐릭 인벤토리 화면 진입을 확인하지 못했습니다.');
+  };
+
+  Modules.identify.getOwnedEquipmentTable = function () {
+    const tables = Core.gameElements('table').filter((table) => {
+      const headers = [...table.querySelectorAll('th')].map((th) => th.textContent.trim());
+      return headers.includes('행동') &&
+        headers.some((text) => text.includes('아이템')) &&
+        headers.some((text) => text.includes('위력/무게'));
+    });
+    return tables.length === 1 ? tables[0] : null;
+  };
+
+  Modules.identify.selectCategory = async function (category) {
+    const findTab = () => Core.gameElements('[role="tab"]').find(
+      (tab) => tab.textContent.trim() === category
+    ) || null;
+    const tab = await Core.waitFor(findTab, 8000, 200);
+    if (!tab) throw new Error(`인벤토리 "${category}" 탭을 찾지 못했습니다.`);
+    if (tab.getAttribute('aria-selected') !== 'true') {
+      if (!(await Core.safeClick(findTab, {
+        beforeMin: 550,
+        beforeMax: 950,
+        afterMin: 350,
+        afterMax: 650,
+      }))) {
+        throw new Error(`인벤토리 "${category}" 탭 클릭에 실패했습니다.`);
+      }
+    }
+    const selected = await Core.waitFor(() => {
+      const current = findTab();
+      return current && current.getAttribute('aria-selected') === 'true' ? current : null;
+    }, 5000, 200);
+    if (!selected) throw new Error(`인벤토리 "${category}" 탭 전환을 확인하지 못했습니다.`);
+  };
+
+  Modules.identify.selectBlindOnly = async function () {
+    const getFilters = () => Core.gameElements('[role="group"] button')
+      .filter((button) => /^show(Normal|Sealed|Unsealed|Blind)$/.test(button.getAttribute('aria-label') || ''));
+    const isBlindOnly = () => {
+      const filters = getFilters();
+      if (filters.length !== 4) return false;
+      return filters.every((button) => {
+        const isBlind = button.getAttribute('aria-label') === 'showBlind';
+        return (button.getAttribute('aria-pressed') === 'true') === isBlind;
+      });
+    };
+    if (isBlindOnly()) return;
+    const blindButton = getFilters().find(
+      (button) => button.getAttribute('aria-label') === 'showBlind'
+    );
+    if (!blindButton) throw new Error('인벤토리 미감정 필터를 찾지 못했습니다.');
+    if (!(await Core.safeClick(
+      () => getFilters().find((button) => button.getAttribute('aria-label') === 'showBlind') || null,
+      { beforeMin: 500, beforeMax: 900, afterMin: 350, afterMax: 650 }
+    ))) {
+      throw new Error('인벤토리 미감정 필터 클릭에 실패했습니다.');
+    }
+    const filtered = await Core.waitFor(() => (isBlindOnly() ? true : null), 5000, 200);
+    if (!filtered) throw new Error('미감정 필터만 활성화된 상태를 확인하지 못했습니다.');
+  };
+
+  Modules.identify.getIdentifyTargets = function () {
+    const table = this.getOwnedEquipmentTable();
+    if (!table) return [];
+    return [...table.querySelectorAll('tbody tr')].map((row) => {
+      const cells = [...row.querySelectorAll('td')];
+      const button = [...row.querySelectorAll('button')].find(
+        (candidate) => candidate.textContent.trim() === '감정'
+      ) || null;
+      const isBlindRow = cells.some((cell) => cell.textContent.trim() === '-/-');
+      return button && isBlindRow && button.isConnected ? { row, button } : null;
+    }).filter(Boolean);
+  };
+
+  Modules.identify.findIdentifyDialog = function () {
+    return Core.gameElements('[role="dialog"]').find((dialog) =>
+      [...dialog.querySelectorAll('h1, h2, h3, h4, h5, h6')]
+        .some((heading) => heading.textContent.trim() === '아이템 감정')
+    ) || null;
+  };
+
+  Modules.identify.identifyOne = async function (category) {
+    const targets = this.getIdentifyTargets();
+    if (targets.length === 0) return false;
+    const targetButton = targets[0].button;
+    if (!(await Core.safeClick(
+      () => targetButton.isConnected && targetButton.textContent.trim() === '감정'
+        ? targetButton
+        : null,
+      { beforeMin: 550, beforeMax: 1000, afterMin: 150, afterMax: 300 }
+    ))) {
+      throw new Error(`${category}: 감정 대상 버튼 클릭에 실패했습니다.`);
+    }
+
+    const dialog = await Core.waitFor(() => this.findIdentifyDialog(), 5000, 150);
+    if (!dialog) throw new Error(`${category}: "아이템 감정" 확인창이 나타나지 않았습니다.`);
+    const getConfirm = () => {
+      const currentDialog = this.findIdentifyDialog();
+      if (!currentDialog) return null;
+      const buttons = [...currentDialog.querySelectorAll('button')]
+        .filter((button) => button.textContent.trim() === '확인');
+      return buttons.length === 1 ? buttons[0] : null;
+    };
+    if (!(await Core.safeClick(getConfirm, {
+      beforeMin: 500,
+      beforeMax: 900,
+      afterMin: 300,
+      afterMax: 550,
+    }))) {
+      throw new Error(`${category}: 아이템 감정 확인창의 "확인" 버튼을 정확히 찾지 못했습니다.`);
+    }
+
+    const completed = await Core.waitFor(
+      () =>
+        !this.findIdentifyDialog() &&
+        (!targetButton.isConnected || targetButton.textContent.trim() !== '감정')
+          ? true
+          : null,
+      8000,
+      200
+    );
+    if (!completed) {
+      throw new Error(`${category}: 감정 후 확인창 닫힘과 대상 행 제거를 확인하지 못했습니다.`);
+    }
+    return true;
+  };
+
+  Modules.identify.mainLoop = async function () {
+    const categories = ['무기', '방어구', '장신구'];
+    this.cycleCount = 0;
+    this.categoryCounts = { 무기: 0, 방어구: 0, 장신구: 0 };
+    await this.goToInventory();
+
+    for (const category of categories) {
+      if (!this.running || this.stopRequested) return;
+      await this.selectCategory(category);
+      await this.selectBlindOnly();
+      Core.log('identify', `${category} 미감정 아이템 확인 시작`);
+
+      for (let safety = 0; safety < 1000; safety++) {
+        if (!this.running || this.stopRequested) return;
+        const targets = this.getIdentifyTargets();
+        if (targets.length === 0) break;
+        await this.identifyOne(category);
+        this.categoryCounts[category] += 1;
+        this.cycleCount += 1;
+        Core.log('identify', `${category} 감정 완료: ${this.categoryCounts[category]}개`);
+        Core.updateModuleButtons();
+      }
+      if (this.getIdentifyTargets().length > 0) {
+        throw new Error(`${category}: 안전 제한 1000회에 도달해 감정을 중단했습니다.`);
+      }
+      Core.log('identify', `${category} 미감정 아이템 없음 확인`);
+    }
+
+    const detail = `무기 ${this.categoryCounts.무기}개, 방어구 ${this.categoryCounts.방어구}개, 장신구 ${this.categoryCounts.장신구}개`;
+    Core.moduleResults.identify = { ok: true, message: detail, at: Date.now() };
+    Core.notifyCompleted('identify', `미감정 장비 감정 완료 (${detail})`);
+  };
+
+  Modules.dismantle.goToDismantle = async function () {
+    if (location.pathname.replace(/\/$/, '') !== '/blacksmith') {
+      await Core.clickNavMenuExact('마을', '대장간');
+    }
+    const arrived = await Core.waitFor(
+      () =>
+        location.pathname.replace(/\/$/, '') === '/blacksmith' &&
+        Core.gameElements('[role="tab"]').some((tab) => tab.textContent.trim() === '분해'),
+      15000,
+      250
+    );
+    if (!arrived) throw new Error('마을 대장간 화면 진입을 확인하지 못했습니다.');
+
+    const findDismantleTab = () => Core.gameElements('[role="tab"]').find(
+      (tab) => tab.textContent.trim() === '분해'
+    ) || null;
+    const dismantleTab = findDismantleTab();
+    if (!dismantleTab) throw new Error('대장간의 "분해" 탭을 찾지 못했습니다.');
+    if (dismantleTab.getAttribute('aria-selected') !== 'true') {
+      if (!(await Core.safeClick(findDismantleTab, {
+        beforeMin: 550,
+        beforeMax: 950,
+        afterMin: 400,
+        afterMax: 700,
+      }))) {
+        throw new Error('대장간의 "분해" 탭 클릭에 실패했습니다.');
+      }
+    }
+    const ready = await Core.waitFor(
+      () => Core.gameElements('h1, h2, h3, h4, h5, h6')
+        .some((heading) => heading.textContent.trim() === '장비 분해'),
+      8000,
+      200
+    );
+    if (!ready) throw new Error('"장비 분해" 화면 전환을 확인하지 못했습니다.');
+  };
+
+  Modules.dismantle.getDismantleTable = function () {
+    const tables = Core.gameElements('table').filter((table) => {
+      const headers = [...table.querySelectorAll('th')].map((th) => th.textContent.trim());
+      return headers.length === 4 &&
+        headers[0] === '아이템' &&
+        headers[1] === '위력/무게' &&
+        headers[2] === '속성' &&
+        headers[3] === '분해';
+    });
+    return tables.length === 1 ? tables[0] : null;
+  };
+
+  Modules.dismantle.selectCategory = async function (category) {
+    const findTab = () => Core.gameElements('[role="tab"]').find(
+      (tab) => tab.textContent.trim() === category
+    ) || null;
+    const tab = await Core.waitFor(findTab, 8000, 200);
+    if (!tab) throw new Error(`장비 분해의 "${category}" 탭을 찾지 못했습니다.`);
+    if (tab.getAttribute('aria-selected') !== 'true') {
+      if (!(await Core.safeClick(findTab, {
+        beforeMin: 550,
+        beforeMax: 950,
+        afterMin: 400,
+        afterMax: 700,
+      }))) {
+        throw new Error(`장비 분해의 "${category}" 탭 클릭에 실패했습니다.`);
+      }
+    }
+    const selected = await Core.waitFor(() => {
+      const current = findTab();
+      return current &&
+        current.getAttribute('aria-selected') === 'true' &&
+        this.getDismantleTable()
+        ? current
+        : null;
+    }, 6000, 200);
+    if (!selected) throw new Error(`장비 분해의 "${category}" 탭 전환을 확인하지 못했습니다.`);
+  };
+
+  Modules.dismantle.getDismantleTargets = function () {
+    const table = this.getDismantleTable();
+    if (!table) return [];
+    return [...table.querySelectorAll('tbody tr')].map((row) => {
+      const cells = [...row.querySelectorAll('td')];
+      const buttons = [...row.querySelectorAll('button')]
+        .filter((button) => button.textContent.trim() === '분해');
+      if (cells.length !== 4 || buttons.length !== 1 || !buttons[0].isConnected) return null;
+      return {
+        row,
+        button: buttons[0],
+        itemName: cells[0].textContent.trim(),
+        fingerprint: row.textContent.replace(/\s+/g, ' ').trim(),
+      };
+    }).filter(Boolean);
+  };
+
+  Modules.dismantle.findDismantleDialogs = function () {
+    return Core.gameElements('[role="dialog"]').filter((dialog) =>
+      [...dialog.querySelectorAll('h1, h2, h3, h4, h5, h6')]
+        .some((heading) => heading.textContent.trim() === '장비 분해')
+    );
+  };
+
+  Modules.dismantle.findDialogButton = function (requireFinalWarning) {
+    const dialogs = this.findDismantleDialogs();
+    const dialog = dialogs.find((candidate) => {
+      const isFinal = (candidate.textContent || '').includes('정말 분해하시겠습니까?');
+      return requireFinalWarning ? isFinal : !isFinal;
+    });
+    if (!dialog) return null;
+    const buttons = [...dialog.querySelectorAll('button')]
+      .filter((button) => button.textContent.trim() === '분해');
+    return buttons.length === 1 ? buttons[0] : null;
+  };
+
+  Modules.dismantle.dismantleOne = async function (category) {
+    const targets = this.getDismantleTargets();
+    if (targets.length === 0) return false;
+    const target = targets[0];
+    Core.log('dismantle', `${category} "${target.itemName}" 분해 확인 시작`);
+
+    if (!(await Core.safeClick(
+      () => target.button.isConnected && target.button.textContent.trim() === '분해'
+        ? target.button
+        : null,
+      { beforeMin: 600, beforeMax: 1050, afterMin: 180, afterMax: 320 }
+    ))) {
+      throw new Error(`${category} "${target.itemName}": 목록의 분해 버튼 클릭에 실패했습니다.`);
+    }
+
+    const firstConfirm = await Core.waitFor(
+      () => this.findDialogButton(false),
+      5000,
+      150
+    );
+    if (!firstConfirm) {
+      throw new Error(`${category} "${target.itemName}": 첫 번째 장비 분해 확인창을 찾지 못했습니다.`);
+    }
+    if (!(await Core.safeClick(
+      () => this.findDialogButton(false),
+      { beforeMin: 550, beforeMax: 950, afterMin: 200, afterMax: 350 }
+    ))) {
+      throw new Error(`${category} "${target.itemName}": 첫 번째 확인창의 분해 버튼 클릭에 실패했습니다.`);
+    }
+
+    const finalConfirm = await Core.waitFor(
+      () => this.findDialogButton(true),
+      5000,
+      150
+    );
+    if (!finalConfirm) {
+      throw new Error(`${category} "${target.itemName}": 최종 분해 경고창을 찾지 못했습니다.`);
+    }
+    if (!(await Core.safeClick(
+      () => this.findDialogButton(true),
+      { beforeMin: 650, beforeMax: 1100, afterMin: 350, afterMax: 650 }
+    ))) {
+      throw new Error(`${category} "${target.itemName}": 최종 경고창의 분해 버튼 클릭에 실패했습니다.`);
+    }
+
+    const completed = await Core.waitFor(
+      () =>
+        this.findDismantleDialogs().length === 0 &&
+        !target.button.isConnected
+          ? true
+          : null,
+      8000,
+      200
+    );
+    if (!completed) {
+      throw new Error(
+        `${category} "${target.itemName}": 확인창 닫힘과 원래 분해 행 제거를 확인하지 못했습니다.`
+      );
+    }
+    return true;
+  };
+
+  Modules.dismantle.mainLoop = async function () {
+    const categories = ['무기', '방어구', '장신구'];
+    this.cycleCount = 0;
+    this.categoryCounts = { 무기: 0, 방어구: 0, 장신구: 0 };
+    await this.goToDismantle();
+
+    for (const category of categories) {
+      if (!this.running || this.stopRequested) return;
+      await this.selectCategory(category);
+      Core.log('dismantle', `${category} 봉인 장비 확인 시작`);
+
+      for (let safety = 0; safety < 1000; safety++) {
+        if (!this.running || this.stopRequested) return;
+        const targets = this.getDismantleTargets();
+        if (targets.length === 0) break;
+        await this.dismantleOne(category);
+        this.categoryCounts[category] += 1;
+        this.cycleCount += 1;
+        Core.log('dismantle', `${category} 분해 완료: ${this.categoryCounts[category]}개`);
+        Core.updateModuleButtons();
+      }
+      if (this.getDismantleTargets().length > 0) {
+        throw new Error(`${category}: 안전 제한 1000회에 도달해 분해를 중단했습니다.`);
+      }
+      Core.log('dismantle', `${category} 분해할 봉인 장비 없음 확인`);
+    }
+
+    const detail = `무기 ${this.categoryCounts.무기}개, 방어구 ${this.categoryCounts.방어구}개, 장신구 ${this.categoryCounts.장신구}개`;
+    Core.moduleResults.dismantle = { ok: true, message: detail, at: Date.now() };
+    Core.notifyCompleted('dismantle', `봉인 장비 분해 완료 (${detail})`);
   };
 
   // -------------------------- 모듈 1: 재전직 --------------------------
@@ -4728,7 +5139,7 @@
     if (Core.activeModuleId && Core.activeModuleId !== moduleId) {
       Core.showBanner(
         moduleId,
-        `"${MODULE_LABELS[Core.activeModuleId]}" 모듈이 이미 실행 중입니다. 먼저 그 모듈을 정지한 뒤 시작해주세요.`
+        `"${moduleDisplayLabel(Core.activeModuleId)}" 모듈이 이미 실행 중입니다. 먼저 그 모듈을 정지한 뒤 시작해주세요.`
       );
       return;
     }
@@ -4760,7 +5171,7 @@
     if (moduleId === 'rejob') {
       mod.nextRestAt = mod.cycleCount + Core.rand(mod.config.restEvery[0], mod.config.restEvery[1]);
     }
-    Core.log(moduleId, `${MODULE_LABELS[moduleId]} 매크로 시작`);
+    Core.log(moduleId, `${moduleDisplayLabel(moduleId)} 매크로 시작`);
     Core.updateModuleButtons();
     let loopPromise;
     loopPromise = Promise.resolve()
@@ -4824,7 +5235,7 @@
       if (Core.activeModuleId && Core.activeModuleId !== 'boss') {
         Core.showBanner(
           'boss',
-          `"${MODULE_LABELS[Core.activeModuleId]}" 모듈이 이미 실행 중입니다. 먼저 그 모듈을 정지한 뒤 시작해주세요.`
+          `"${moduleDisplayLabel(Core.activeModuleId)}" 모듈이 이미 실행 중입니다. 먼저 그 모듈을 정지한 뒤 시작해주세요.`
         );
         return false;
       }
@@ -4859,11 +5270,21 @@
   // ==========================================================================
   // 패널 UI (탭 구조, 하나의 패널을 다섯 모듈이 공유)
   // ==========================================================================
-  const UIRefs = { daily: {}, rejob: {}, autohunt: {}, raremap: {}, dungeon: {}, arena: {}, deepdungeon: {} };
+  const UIRefs = {
+    daily: {},
+    rejob: {},
+    autohunt: {},
+    raremap: {},
+    dungeon: {},
+    arena: {},
+    identify: {},
+    dismantle: {},
+    deepdungeon: {},
+  };
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
-    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'deepdungeon'].forEach((id) => {
+    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'identify', 'dismantle', 'deepdungeon'].forEach((id) => {
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
@@ -4878,6 +5299,10 @@
           ? `오늘 클리어 ${mod.cycleCount}개`
           : id === 'arena'
           ? `오늘 전투 ${mod.cycleCount}/${mod.config.targetBattles}회`
+          : id === 'identify'
+          ? `감정 ${mod.cycleCount}개`
+          : id === 'dismantle'
+          ? `분해 ${mod.cycleCount}개`
           : id === 'deepdungeon'
           ? `던전의 주인 도전 ${mod.cycleCount}회`
           : `사이클 ${mod.cycleCount}`;
@@ -5705,6 +6130,100 @@
     refs.inputs = [countInput];
   }
 
+  function buildItemTab(container) {
+    const sectionStyle =
+      'border:1px solid #444; border-radius:5px; padding:8px; margin-bottom:9px; background:#171717;';
+
+    const identifySection = document.createElement('div');
+    identifySection.style.cssText = sectionStyle;
+    const identifyTitle = document.createElement('div');
+    identifyTitle.textContent = '미감정 장비 감정';
+    identifyTitle.style.cssText = 'font-weight:bold; color:#eee; margin-bottom:5px;';
+    identifySection.appendChild(identifyTitle);
+
+    const refs = UIRefs.identify;
+    const description = document.createElement('div');
+    description.textContent =
+      '캐릭 인벤토리에서 미감정 필터만 선택하고 무기 → 방어구 → 장신구 순서로 모든 미감정 장비를 감정합니다.';
+    description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin:5px 0 9px;';
+    identifySection.appendChild(description);
+
+    const safety = document.createElement('div');
+    safety.textContent =
+      '※ 보유 장비 테이블의 -/- 행에 있는 "감정" 버튼과 "아이템 감정" 확인창 내부의 확인 버튼만 누릅니다.';
+    safety.style.cssText = 'font-size:10px; color:#f5a623; line-height:1.45; margin-bottom:8px;';
+    identifySection.appendChild(safety);
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
+    const startBtn = document.createElement('button');
+    startBtn.textContent = '감정 시작';
+    startBtn.style.cssText = btnStyle('#2e7d32');
+    const stopBtn = document.createElement('button');
+    stopBtn.textContent = '정지';
+    stopBtn.style.cssText = btnStyle('#c62828');
+    stopBtn.disabled = true;
+    const statusEl = document.createElement('span');
+    statusEl.textContent = '대기중';
+    statusEl.style.cssText = 'margin-left:4px; font-size:11px;';
+    startBtn.addEventListener('click', () => Core.startModule('identify'));
+    stopBtn.addEventListener('click', () => Core.requestStopModule('identify'));
+    btnRow.append(startBtn, stopBtn);
+    identifySection.append(btnRow, statusEl);
+    container.appendChild(identifySection);
+
+    refs.startBtn = startBtn;
+    refs.stopBtn = stopBtn;
+    refs.statusEl = statusEl;
+    refs.inputs = [];
+
+    const dismantleSection = document.createElement('div');
+    dismantleSection.style.cssText = sectionStyle;
+    const dismantleTitle = document.createElement('div');
+    dismantleTitle.textContent = '봉인 장비 분해';
+    dismantleTitle.style.cssText = 'font-weight:bold; color:#eee; margin-bottom:5px;';
+    dismantleSection.appendChild(dismantleTitle);
+
+    const dismantleDescription = document.createElement('div');
+    dismantleDescription.textContent =
+      '대장간 분해 화면에서 무기 → 방어구 → 장신구 순서로 인벤토리에 남은 봉인 장비를 모두 분해합니다.';
+    dismantleDescription.style.cssText =
+      'font-size:11px; color:#ccc; line-height:1.5; margin:5px 0 7px;';
+    dismantleSection.appendChild(dismantleDescription);
+
+    const dismantleWarning = document.createElement('div');
+    dismantleWarning.textContent =
+      '⚠ 분해한 장비는 되돌릴 수 없습니다. 보관할 장비를 반드시 창고로 옮긴 뒤 실행하세요.';
+    dismantleWarning.style.cssText =
+      'font-size:10px; color:#ff8a80; line-height:1.45; margin-bottom:8px;';
+    dismantleSection.appendChild(dismantleWarning);
+
+    const dismantleRefs = UIRefs.dismantle;
+    const dismantleBtnRow = document.createElement('div');
+    dismantleBtnRow.style.cssText =
+      'display:flex; gap:6px; margin-top:6px; align-items:center;';
+    const dismantleStartBtn = document.createElement('button');
+    dismantleStartBtn.textContent = '분해 시작';
+    dismantleStartBtn.style.cssText = btnStyle('#ef6c00');
+    const dismantleStopBtn = document.createElement('button');
+    dismantleStopBtn.textContent = '정지';
+    dismantleStopBtn.style.cssText = btnStyle('#c62828');
+    dismantleStopBtn.disabled = true;
+    const dismantleStatusEl = document.createElement('span');
+    dismantleStatusEl.textContent = '대기중';
+    dismantleStatusEl.style.cssText = 'margin-left:4px; font-size:11px;';
+    dismantleStartBtn.addEventListener('click', () => Core.startModule('dismantle'));
+    dismantleStopBtn.addEventListener('click', () => Core.requestStopModule('dismantle'));
+    dismantleBtnRow.append(dismantleStartBtn, dismantleStopBtn);
+    dismantleSection.append(dismantleBtnRow, dismantleStatusEl);
+    container.appendChild(dismantleSection);
+
+    dismantleRefs.startBtn = dismantleStartBtn;
+    dismantleRefs.stopBtn = dismantleStopBtn;
+    dismantleRefs.statusEl = dismantleStatusEl;
+    dismantleRefs.inputs = [];
+  }
+
   const DEEPDUNGEON_CONFIG_KEY = 'lrm-deepdungeon-config';
 
   Modules.deepdungeon.saveConfig = function () {
@@ -6033,6 +6552,7 @@
     buildRaremapTab(tabContents.raremap);
     buildDungeonTab(tabContents.dungeon);
     buildArenaTab(tabContents.arena);
+    buildItemTab(tabContents.identify);
     buildDeepDungeonTab(tabContents.deepdungeon);
     buildBossTab(tabContents.boss);
     buildDailyTab(tabContents.daily);
@@ -6114,7 +6634,7 @@
   function init() {
     if (document.getElementById('lrm-panel')) return;
     buildPanel();
-    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 보스 / 일일)');
+    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 아이템 / 심층던전 / 보스 / 일일)');
     // 저장값만으로 자동화를 재개하지 않는다. 통합 일일 작업은 SPA 안에서
     // 연속 실행되며, 실제 새로고침/탭 재실행이 발생했다면 안전하게 중단한다.
     // 오래된 running 상태를 복구하면 동일 단계(특히 보스)를 처음부터 다시
