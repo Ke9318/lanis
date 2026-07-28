@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.11.0-stable
+// @version      1.11.1-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2425,6 +2425,7 @@
     running: false,
     stopRequested: false,
     cycleCount: 0,
+    stopReason: '',
     config: {
       maxCycles: 200,
     },
@@ -2447,19 +2448,38 @@
   };
 
   Modules.raremap.getTopRadio = function (dialog) {
-    const radios = [...dialog.querySelectorAll('.MuiRadio-root')];
-    return (
-      radios.find((radio) => {
-        const input = radio.querySelector('input');
-        const row = radio.closest('label, li, [role="radio"]') || radio.parentElement;
-        const text = row ? row.textContent : '';
-        return !(input && input.disabled) && radio.getAttribute('aria-disabled') !== 'true' && !/[xX×]\s*0\b/.test(text);
-      }) || null
-    );
+    const inputs = [...dialog.querySelectorAll('input[type="radio"]')];
+    for (const input of inputs) {
+      const radio = input.closest('.MuiRadio-root') || input.parentElement;
+      const row = radio ? radio.parentElement : null;
+      const text = row ? row.textContent : '';
+      if (
+        radio &&
+        !input.disabled &&
+        radio.getAttribute('aria-disabled') !== 'true' &&
+        !/[xX×]\s*0\b/.test(text)
+      ) return radio;
+    }
+    return null;
   };
 
   Modules.raremap.getUseButton = function (dialog) {
     return Array.from(dialog.querySelectorAll('button')).find((b) => b.textContent.trim() === '사용하기');
+  };
+
+  Modules.raremap.getCancelButton = function (dialog) {
+    return Array.from(dialog.querySelectorAll('button')).find((b) => b.textContent.trim() === '취소');
+  };
+
+  Modules.raremap.closeMapDialog = async function () {
+    const dialog = this.getMapDialog();
+    if (!dialog) return true;
+    const cancelled = await Core.safeClick(() => {
+      const fresh = this.getMapDialog();
+      return fresh ? this.getCancelButton(fresh) : null;
+    }, { beforeMin: 350, beforeMax: 650 });
+    if (!cancelled) return false;
+    return !!(await Core.waitFor(() => (!this.getMapDialog() ? true : null), 5000, 150));
   };
 
   Modules.raremap.findRareButtonIn = function (container) {
@@ -2498,39 +2518,108 @@
   };
 
   Modules.raremap.useTopMapItem = async function () {
-    const mapIcon = this.getMapIcon();
-    if (!mapIcon) {
+    if (!this.getMapIcon()) {
       Core.log('raremap', '지도 아이콘을 찾지 못했습니다.');
-      return false;
-    }
-    if (!(await Core.safeClick(() => this.getMapIcon(), { beforeMin: 600, beforeMax: 1300 }))) return false;
-
-    const dialog = this.getMapDialog();
-    if (!dialog) {
-      Core.log('raremap', '지도 아이템 모달을 찾지 못했습니다.');
-      return false;
+      return { ok: false, reason: '지도 아이콘 없음' };
     }
 
-    const topRadio = this.getTopRadio(dialog);
-    if (!topRadio) {
-      Core.log('raremap', '모달에서 지도 항목을 찾지 못했습니다.');
-      return false;
-    }
-    if (!(await Core.safeClick(() => {
-      const freshDialog = this.getMapDialog();
-      return freshDialog ? this.getTopRadio(freshDialog) : null;
-    }, { beforeMin: 600, beforeMax: 1300 }))) return false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (!this.running || this.stopRequested) {
+        return { ok: false, reason: '사용자 정지' };
+      }
 
-    const useBtn = this.getUseButton(dialog);
-    if (!useBtn) {
-      Core.log('raremap', '사용하기 버튼을 찾지 못했습니다.');
-      return false;
+      if (!this.getMapDialog()) {
+        const opened = await Core.safeClick(
+          () => this.getMapIcon(),
+          { beforeMin: 600, beforeMax: 1300 }
+        );
+        if (!opened) {
+          Core.log('raremap', `지도 아이콘 클릭 실패 (${attempt}/3)`);
+          continue;
+        }
+      }
+
+      const dialog = await Core.waitFor(() => this.getMapDialog(), 6000, 150);
+      if (!dialog) {
+        Core.log('raremap', `지도 아이템 창 표시 대기 실패 (${attempt}/3)`);
+        continue;
+      }
+
+      // 제목과 Dialog 껍데기가 먼저 나타나고 지도 목록은 뒤늦게 렌더링된다.
+      // 라디오 input이 실제로 생성될 때까지 기다려야 간헐적으로 첫 항목을
+      // 못 찾고 즉시 종료되는 경쟁 조건이 생기지 않는다.
+      const radioState = await Core.waitFor(() => {
+        const freshDialog = this.getMapDialog();
+        if (!freshDialog) return null;
+        const total = freshDialog.querySelectorAll('input[type="radio"]').length;
+        if (total === 0) return null;
+        return {
+          total,
+          available: this.getTopRadio(freshDialog),
+        };
+      }, 8000, 150);
+
+      if (!radioState) {
+        Core.log('raremap', `지도 목록 렌더링 대기 실패 (${attempt}/3)`);
+        await this.closeMapDialog();
+        continue;
+      }
+      if (!radioState.available) {
+        Core.log('raremap', '사용 가능한 지도 아이템이 없습니다.');
+        return { ok: false, reason: '사용 가능한 지도 없음', exhausted: true };
+      }
+
+      const selected = await Core.safeClick(() => {
+        const freshDialog = this.getMapDialog();
+        return freshDialog ? this.getTopRadio(freshDialog) : null;
+      }, { beforeMin: 600, beforeMax: 1300 });
+      if (!selected) {
+        Core.log('raremap', `지도 항목 선택 실패 (${attempt}/3)`);
+        await this.closeMapDialog();
+        continue;
+      }
+
+      const enabledUseButton = await Core.waitFor(() => {
+        const freshDialog = this.getMapDialog();
+        if (!freshDialog) return null;
+        const checked = freshDialog.querySelector('input[type="radio"]:checked');
+        const button = this.getUseButton(freshDialog);
+        return checked && button && !button.disabled && button.getAttribute('aria-disabled') !== 'true'
+          ? button
+          : null;
+      }, 5000, 150);
+      if (!enabledUseButton) {
+        Core.log('raremap', `지도 선택 또는 사용하기 활성화 확인 실패 (${attempt}/3)`);
+        await this.closeMapDialog();
+        continue;
+      }
+
+      const used = await Core.safeClick(() => {
+        const freshDialog = this.getMapDialog();
+        if (!freshDialog) return null;
+        const button = this.getUseButton(freshDialog);
+        return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true'
+          ? button
+          : null;
+      }, { beforeMin: 600, beforeMax: 1300 });
+      if (!used) {
+        Core.log('raremap', `사용하기 버튼 클릭 실패 (${attempt}/3)`);
+        await this.closeMapDialog();
+        continue;
+      }
+
+      const closed = await Core.waitFor(
+        () => (!this.getMapDialog() ? true : null),
+        10000,
+        200
+      );
+      if (closed) return { ok: true };
+
+      Core.log('raremap', `지도 사용 후 창 닫힘 확인 실패 (${attempt}/3)`);
+      await this.closeMapDialog();
     }
-    if (!(await Core.safeClick(() => {
-      const freshDialog = this.getMapDialog();
-      return freshDialog ? this.getUseButton(freshDialog) : null;
-    }, { beforeMin: 600, beforeMax: 1300 }))) return false;
-    return !!(await Core.waitFor(() => (!this.getMapDialog() || this.getRareMapButton() ? true : null), 10000, 300));
+
+    return { ok: false, reason: '지도 선택창 처리 3회 실패' };
   };
 
   Modules.raremap.clearRareMapsIfAny = async function () {
@@ -2572,9 +2661,15 @@
       Core.log('raremap', `사이클 시작 전 남아있던 레어맵 ${preCleared}개 클리어`);
     }
 
-    const used = await mod.useTopMapItem();
-    if (!used) {
-      Core.log('raremap', '지도 사용 실패 → 정지');
+    const useResult = await mod.useTopMapItem();
+    if (!useResult.ok) {
+      mod.stopReason = useResult.reason || '지도 사용 실패';
+      Core.log(
+        'raremap',
+        useResult.exhausted
+          ? '사용 가능한 지도가 없어 정상 종료합니다.'
+          : `지도 사용 실패: ${mod.stopReason} → 정지`
+      );
       mod.running = false;
       return;
     }
@@ -2585,12 +2680,23 @@
   Modules.raremap.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
+    mod.stopReason = '';
     while (mod.running && mod.cycleCount < mod.config.maxCycles) {
       await mod.runCycle();
       if (!mod.running) break;
       await Core.sleep(1600);
     }
-    Core.log('raremap', '매크로 종료 (최대 반복 횟수 도달 또는 중지됨)');
+    if (mod.stopRequested) {
+      Core.log('raremap', '사용자 요청으로 레어맵 매크로를 종료했습니다.');
+    } else if (mod.stopReason === '사용 가능한 지도 없음') {
+      Core.log('raremap', '레어맵 매크로 완료: 사용할 수 있는 지도 아이템이 없습니다.');
+    } else if (mod.stopReason) {
+      Core.log('raremap', `레어맵 매크로 오류 종료: ${mod.stopReason}`);
+    } else if (mod.cycleCount >= mod.config.maxCycles) {
+      Core.log('raremap', `안전장치 최대 반복 횟수 ${mod.config.maxCycles}회에 도달해 종료했습니다.`);
+    } else {
+      Core.log('raremap', '레어맵 매크로를 종료했습니다.');
+    }
     mod.running = false;
     Core.activeModuleId = Core.activeModuleId === 'raremap' ? null : Core.activeModuleId;
     Core.updateModuleButtons();
