@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.11.1-stable
+// @version      1.11.2-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8326,27 +8326,106 @@
     return { achieved, total: labels.length, exhausted: achieved >= labels.length, details };
   };
 
+  M.findBossRewardClaimButton = () =>
+    M.queryAll('button').find((el) =>
+      ['보상 모두 받기', '보상 받기'].includes(el.textContent.trim()) &&
+      M.isVisible(el) &&
+      !el.disabled &&
+      el.getAttribute('aria-disabled') !== 'true'
+    ) || null;
+
+  M.waitForBossListReady = async (bossKeys = BOSS_ORDER) => {
+    return await M.waitFor(() => {
+      if (location.pathname.replace(/\/$/, '') !== '/personal-boss') return null;
+      if (M.findBossRewardClaimButton()) return true;
+      return bossKeys.some((key) =>
+        M.findBossCardActionButton(BOSS_REGISTRY[key].label)
+      ) ? true : null;
+    }, 15000, 250);
+  };
+
   M.claimBossRewards = async () => {
     M.throwIfStopped();
     let claimed = 0;
+    // 목록 URL이 먼저 바뀌고 보상 영역은 나중에 렌더링될 수 있다.
+    // 카드 또는 보상 버튼이 실제 DOM에 나타난 뒤부터 수령 여부를 판단한다.
+    const ready = await M.waitForBossListReady();
+    if (!ready) throw new Error('보스 목록과 보상 영역의 렌더링을 확인하지 못했습니다.');
+    await M.sleep(1200);
+    M.throwIfStopped();
+
     for (let round = 0; round < 12; round++) {
-      const button = M.queryAll('button').find((el) =>
-        ['보상 모두 받기', '보상 받기'].includes(el.textContent.trim()) &&
-        M.isVisible(el) && !el.disabled
-      );
+      const button = M.findBossRewardClaimButton();
       if (!button) break;
+      if (M.uiLog) M.uiLog(`🎁 보스 "보상 모두 받기" 클릭 (${round + 1}/12)`);
       await M.humanPause(650, 1100);
       M.throwIfStopped();
       button.click();
       claimed++;
-      await M.humanPause(900, 1500);
-      const confirm = M.findConfirmInOpenDialog(['확인', '받기']);
+
+      // 확인창이 있는 경우와 클릭 즉시 수령되는 경우를 모두 지원한다.
+      const confirm = await M.waitFor(
+        () => {
+          const dialogButton = M.findConfirmInOpenDialog(['확인', '받기']);
+          if (dialogButton) return dialogButton;
+          return !button.isConnected || button.disabled || !M.findBossRewardClaimButton()
+            ? true
+            : null;
+        },
+        5000,
+        150
+      );
+      M.throwIfStopped();
       if (confirm) {
-        await M.humanPause(450, 800);
-        M.throwIfStopped();
-        confirm.click();
-        await M.humanPause(700, 1200);
+        if (confirm !== true) {
+          await M.humanPause(450, 800);
+          M.throwIfStopped();
+          confirm.click();
+        }
       }
+
+      const settled = await M.waitFor(
+        () => {
+          const openConfirm = M.findConfirmInOpenDialog(['확인', '받기']);
+          if (openConfirm) return null;
+          return !button.isConnected || button.disabled || !M.findBossRewardClaimButton()
+            ? true
+            : null;
+        },
+        10000,
+        200
+      );
+      if (!settled) {
+        throw new Error('"보상 모두 받기" 클릭 후 수령 완료 상태를 확인하지 못했습니다.');
+      }
+      await M.humanPause(500, 900);
+    }
+    return claimed;
+  };
+
+  M.claimBossRewardsAndVerify = async () => {
+    M.throwIfStopped();
+    const claimed = await M.claimBossRewards();
+    M.throwIfStopped();
+
+    // SPA 갱신 중 버튼이 잠깐 사라졌다 다시 나타나는 경우까지 막기 위해
+    // 연속 세 번 미검출되어야 보상 수령 완료로 확정한다.
+    let absentChecks = 0;
+    const verified = await M.waitFor(() => {
+      if (M.findBossRewardClaimButton()) {
+        absentChecks = 0;
+        return null;
+      }
+      absentChecks++;
+      return absentChecks >= 3 ? true : null;
+    }, 10000, 300);
+    if (!verified) {
+      throw new Error('보스 보상 수령 후에도 "보상 모두 받기" 버튼이 남아 있습니다.');
+    }
+    if (M.uiLog) {
+      M.uiLog(claimed > 0
+        ? `✅ 보스 보상 모두 받기 완료 (${claimed}회 클릭) - 다음 작업 진행`
+        : '✅ 수령할 보스 보상 없음 확인 - 다음 작업 진행');
     }
     return claimed;
   };
@@ -8373,7 +8452,7 @@
 
     await M.waitFor(() => selected.some((key) => M.findBossCardActionButton(BOSS_REGISTRY[key].label)), 10000, 250);
     M.assertBossRunAuthorized(auth.id);
-    await M.claimBossRewards();
+    await M.claimBossRewardsAndVerify();
     M.assertBossRunAuthorized(auth.id);
 
     const progressBefore = selected.map((key) => ({
@@ -8414,7 +8493,13 @@
       await M.goToBossListViaMenu();
       M.assertBossRunAuthorized(auth.id);
     }
-    await M.claimBossRewards();
+    const listReadyAfterQueue = await M.waitForBossListReady(remaining);
+    if (!listReadyAfterQueue) {
+      throw new Error('보스 처치 후 목록과 보상 영역의 렌더링을 확인하지 못했습니다.');
+    }
+    M.assertBossRunAuthorized(auth.id);
+    await M.claimBossRewardsAndVerify();
+    M.assertBossRunAuthorized(auth.id);
     const failed = remaining.filter((key) => {
       const progress = M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label);
       return !progress || !progress.exhausted;
