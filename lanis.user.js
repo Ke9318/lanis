@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.0-stable
+// @version      1.13.2-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -559,6 +559,469 @@
       throw new Error(`"${stoneName}" 사용을 확정하지 못했습니다.`);
     }
     Core.log(moduleId, `${stoneName} 1개 사용 완료`);
+  };
+
+  // ---------------- 장비용 기름 자동 사용 (자동사냥) ----------------
+  Core.EQUIPMENT_OIL_NAME = '장비용 기름';
+  Core.EQUIPMENT_CATEGORIES = ['무기', '방어구', '장신구'];
+
+  Core.openInventoryConsumables = async function (shouldCancel = Core.defaultShouldCancel) {
+    if (location.pathname.replace(/\/$/, '') !== '/inventory') {
+      await Core.goToCharacterPage('인벤토리', '/inventory');
+    }
+    if (shouldCancel && shouldCancel()) return false;
+
+    const findTab = () =>
+      Core.gameElements('[role="tab"], button').find(
+        (el) => el.textContent.trim() === '소모품' && Core.isElementVisible(el)
+      ) || null;
+    const tab = await Core.waitFor(findTab, 8000, 200, shouldCancel);
+    if (!tab) throw new Error('인벤토리 소모품 탭을 찾지 못했습니다.');
+
+    const isSelected =
+      tab.getAttribute('aria-selected') === 'true' ||
+      tab.getAttribute('aria-pressed') === 'true' ||
+      tab.getAttribute('data-state') === 'active';
+    if (!isSelected) {
+      if (!(await Core.safeClick(findTab, {
+        beforeMin: 600,
+        beforeMax: 1100,
+        afterMin: 700,
+        afterMax: 1200,
+        shouldCancel,
+      }))) {
+        throw new Error('인벤토리 소모품 탭을 열지 못했습니다.');
+      }
+    }
+    return true;
+  };
+
+  Core.findEquipmentOilRow = function () {
+    return Core.gameElements('tr').find((row) => {
+      if (!Core.isElementVisible(row)) return false;
+      const leaves = [...row.querySelectorAll('*')].filter(
+        (el) => el.children.length === 0
+      );
+      const hasExactOilName = leaves.some((el) => {
+        const text = el.textContent.replace(/\s+/g, ' ').trim();
+        return text === Core.EQUIPMENT_OIL_NAME ||
+          /^장비용 기름\s*[x×]\s*[\d,]+$/.test(text);
+      });
+      if (!hasExactOilName) return false;
+      const useButtons = [...row.querySelectorAll('button')].filter(
+        (button) =>
+          ['사용', '사용하기'].includes(button.textContent.trim()) &&
+          Core.isElementVisible(button)
+      );
+      return useButtons.length === 1;
+    }) || null;
+  };
+
+  Core.findEquipmentOilUseTarget = async function (shouldCancel = Core.defaultShouldCancel) {
+    // 인벤토리는 사용자가 마지막으로 보던 페이지를 유지할 수 있다. 현재
+    // 페이지부터 뒤쪽만 훑으면 3페이지의 기름을 4페이지에서 시작했을 때
+    // 영구히 놓치므로, 매 검색마다 1페이지로 돌아간 뒤 유한 순회한다.
+    const currentPageButton = Core.gameElements('button').find((button) =>
+      /^page\s+\d+$/.test(button.getAttribute('aria-label') || '') &&
+      Core.isElementVisible(button)
+    );
+    if (
+      currentPageButton &&
+      currentPageButton.getAttribute('aria-label') !== 'page 1'
+    ) {
+      const firstPage = Core.gameElements('button').find((button) =>
+        button.getAttribute('aria-label') === 'Go to page 1' &&
+        !button.disabled &&
+        Core.isElementVisible(button)
+      );
+      if (firstPage && !(await Core.safeClick(firstPage, {
+        beforeMin: 450,
+        beforeMax: 800,
+        afterMin: 550,
+        afterMax: 900,
+        shouldCancel,
+      }))) {
+        throw new Error('장비용 기름 검색을 위해 소모품 1페이지로 돌아가지 못했습니다.');
+      }
+    }
+
+    for (let page = 1; page <= 20; page++) {
+      if (shouldCancel && shouldCancel()) return null;
+      const row = Core.findEquipmentOilRow();
+      if (row) {
+        const buttons = [...row.querySelectorAll('button')].filter(
+          (button) =>
+            ['사용', '사용하기'].includes(button.textContent.trim()) &&
+            Core.isElementVisible(button)
+        );
+        if (buttons.length === 1) return { row, button: buttons[0] };
+        throw new Error('"장비용 기름" 행의 사용 버튼이 하나가 아니어서 안전하게 중단합니다.');
+      }
+
+      const next = Core.gameElements('button').find(
+        (button) =>
+          button.getAttribute('aria-label') === 'Go to next page' &&
+          !button.disabled &&
+          Core.isElementVisible(button)
+      );
+      if (!next) break;
+      if (!(await Core.safeClick(next, {
+        beforeMin: 500,
+        beforeMax: 900,
+        afterMin: 650,
+        afterMax: 1100,
+        shouldCancel,
+      }))) break;
+    }
+    return null;
+  };
+
+  Core.readEquipmentOilCount = function (row) {
+    if (!row) return null;
+    const text = row.textContent.replace(/\s+/g, ' ');
+    const match = text.match(/장비용 기름\s*[x×]\s*([\d,]+)/);
+    if (match) return parseInt(match[1].replace(/,/g, ''), 10);
+    // 수량이 1개일 때 게임은 이름에 x1을 붙이지 않고 두 번째 셀에만
+    // "1"을 표시한다.
+    const cells = [...row.querySelectorAll('td')];
+    const countText = cells[1] ? cells[1].textContent.trim() : '';
+    return /^[\d,]+$/.test(countText)
+      ? parseInt(countText.replace(/,/g, ''), 10)
+      : null;
+  };
+
+  Core.getOpenGameDialogs = function () {
+    return Core.gameElements('[role="dialog"], [role="presentation"]').filter(
+      (dialog) => Core.isElementVisible(dialog)
+    );
+  };
+
+  Core.findEquipmentOilDialog = function () {
+    const candidates = Core.getOpenGameDialogs().filter((dialog) => {
+      const hasExactHeading = [...dialog.querySelectorAll('h1, h2, h3, h4, h5, h6')]
+        .some((heading) =>
+          heading.textContent.trim() === '장비용 기름을 바를 장비 선택'
+        );
+      const categoryControls = [...dialog.querySelectorAll('[role="tab"], button')]
+        .filter((control) => Core.isElementVisible(control));
+      const hasAllCategories = Core.EQUIPMENT_CATEGORIES.every((category) =>
+        categoryControls.some((control) => {
+          const text = control.textContent.replace(/\s+/g, ' ').trim();
+          return text === category || text.startsWith(`${category} (`);
+        })
+      );
+      const selectButtons = [...dialog.querySelectorAll('button')].filter(
+        (button) =>
+          button.textContent.trim() === '선택' &&
+          Core.isElementVisible(button)
+      );
+      return hasExactHeading && hasAllCategories && selectButtons.length === 1;
+    });
+    if (candidates.length === 0) return null;
+    return candidates.reduce((smallest, candidate) =>
+      candidate.querySelectorAll('*').length < smallest.querySelectorAll('*').length
+        ? candidate
+        : smallest
+    );
+  };
+
+  Core.findEquipmentOilCategoryControl = function (category) {
+    const dialog = Core.findEquipmentOilDialog();
+    if (!dialog) return null;
+    const controls = [...dialog.querySelectorAll('[role="tab"], button, [role="button"]')]
+      .filter(
+        (control) => {
+          const text = control.textContent.replace(/\s+/g, ' ').trim();
+          return (
+            (text === category || text.startsWith(`${category} (`)) &&
+            Core.isElementVisible(control)
+          );
+        }
+      );
+    return controls.length === 1 ? controls[0] : null;
+  };
+
+  Core.findTopEquippedOilTarget = function () {
+    const dialog = Core.findEquipmentOilDialog();
+    if (!dialog) return null;
+    const equippedBadges = [...dialog.querySelectorAll('*')].filter(
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim() === '착용중' &&
+        Core.isElementVisible(el)
+    );
+    if (equippedBadges.length === 0) return null;
+
+    // 게임이 현재 착용 장비를 최상단에 정렬하므로 첫 번째 '착용중' 행만 쓴다.
+    // 실제 UI에서 행 본문([role=button])은 장비 상세를 펼치고, 선택 상태는
+    // 라디오를 감싼 span을 눌러야 바뀐다. 따라서 행 전체를 임의 클릭하지
+    // 않고 그 행 안의 단 하나뿐인 라디오 컨트롤만 사용한다.
+    const badge = equippedBadges[0];
+    const row = badge.closest('li') || badge.closest('[role="option"]');
+    if (!row || !dialog.contains(row)) return null;
+    const radioCandidates = [...row.querySelectorAll('input[type="radio"], [role="radio"]')];
+    if (radioCandidates.length !== 1) return null;
+    const radio = radioCandidates[0];
+    const clickTarget =
+      radio.closest('label') ||
+      (radio.parentElement && row.contains(radio.parentElement) ? radio.parentElement : null);
+    return clickTarget && Core.isElementVisible(clickTarget) ? clickTarget : null;
+  };
+
+  Core.findEquipmentOilSubmitButton = function () {
+    const dialog = Core.findEquipmentOilDialog();
+    if (!dialog) return null;
+    const buttons = [...dialog.querySelectorAll('button')].filter(
+      (button) =>
+        button.textContent.trim() === '선택' &&
+        Core.isElementVisible(button) &&
+        !button.disabled &&
+        button.getAttribute('aria-disabled') !== 'true'
+    );
+    return buttons.length === 1 ? buttons[0] : null;
+  };
+
+  Core.findEquipmentOilSecondaryConfirm = function (selectionDialog) {
+    const dialogs = Core.getOpenGameDialogs().filter(
+      (dialog) => dialog !== selectionDialog && !selectionDialog.contains(dialog)
+    );
+    for (const dialog of dialogs) {
+      const text = dialog.textContent.replace(/\s+/g, ' ').trim();
+      const hasUseConfirmHeading = [...dialog.querySelectorAll('h1, h2, h3, h4, h5, h6')]
+        .some((heading) => heading.textContent.trim() === '사용 확인');
+      if (
+        !hasUseConfirmHeading ||
+        !text.includes(Core.EQUIPMENT_OIL_NAME) ||
+        !text.includes('정말')
+      ) continue;
+      const buttons = [...dialog.querySelectorAll('button')].filter(
+        (button) =>
+          button.textContent.trim() === '확인' &&
+          Core.isElementVisible(button) &&
+          !button.disabled
+      );
+      if (buttons.length === 1) return buttons[0];
+    }
+    return null;
+  };
+
+  Core.useEquipmentOilOnce = async function (
+    category,
+    moduleId,
+    shouldCancel = Core.defaultShouldCancel
+  ) {
+    if (!Core.EQUIPMENT_CATEGORIES.includes(category)) {
+      throw new Error(`지원하지 않는 장비용 기름 대상입니다: ${category}`);
+    }
+    if (!(await Core.openInventoryConsumables(shouldCancel))) return false;
+
+    const useTarget = await Core.findEquipmentOilUseTarget(shouldCancel);
+    if (!useTarget) {
+      throw new Error(`"${category}"에 바를 "${Core.EQUIPMENT_OIL_NAME}"을 인벤토리에서 찾지 못했습니다.`);
+    }
+    const countBefore = Core.readEquipmentOilCount(useTarget.row);
+    const existingDialogs = new Set(Core.getOpenGameDialogs());
+    if (!(await Core.safeClick(() => {
+      const fresh = Core.findEquipmentOilRow();
+      if (!fresh) return null;
+      const buttons = [...fresh.querySelectorAll('button')].filter(
+        (button) =>
+          ['사용', '사용하기'].includes(button.textContent.trim()) &&
+          Core.isElementVisible(button)
+      );
+      return buttons.length === 1 ? buttons[0] : null;
+    }, {
+      beforeMin: 850,
+      beforeMax: 1500,
+      afterMin: 250,
+      afterMax: 450,
+      shouldCancel,
+    }))) {
+      throw new Error(`"${Core.EQUIPMENT_OIL_NAME}" 사용 버튼이 클릭 직전에 사라졌습니다.`);
+    }
+
+    const selectionDialog = await Core.waitFor(() => {
+      const dialog = Core.findEquipmentOilDialog();
+      return dialog && (!existingDialogs.has(dialog) || dialog.textContent.includes('착용중'))
+        ? dialog
+        : null;
+    }, 6000, 150, shouldCancel);
+    if (!selectionDialog) throw new Error(`"${Core.EQUIPMENT_OIL_NAME}" 장비 선택창을 찾지 못했습니다.`);
+
+    const categoryControl = await Core.waitFor(
+      () => Core.findEquipmentOilCategoryControl(category),
+      5000,
+      150,
+      shouldCancel
+    );
+    if (!categoryControl) {
+      throw new Error(`장비용 기름 선택창에서 "${category}" 분류를 정확히 찾지 못했습니다.`);
+    }
+    const categorySelected =
+      categoryControl.getAttribute('aria-selected') === 'true' ||
+      categoryControl.getAttribute('aria-pressed') === 'true' ||
+      categoryControl.getAttribute('data-state') === 'active';
+    if (!categorySelected) {
+      if (!(await Core.safeClick(
+        () => Core.findEquipmentOilCategoryControl(category),
+        {
+          beforeMin: 500,
+          beforeMax: 950,
+          afterMin: 500,
+          afterMax: 850,
+          shouldCancel,
+          afterCheck: () => {
+            const current = Core.findEquipmentOilCategoryControl(category);
+            return current && (
+              current.getAttribute('aria-selected') === 'true' ||
+              current.getAttribute('aria-pressed') === 'true' ||
+              current.getAttribute('data-state') === 'active'
+            ) ? current : null;
+          },
+        }
+      ))) {
+        throw new Error(`장비용 기름 선택창의 "${category}" 분류 클릭에 실패했습니다.`);
+      }
+    }
+
+    const equippedTarget = await Core.waitFor(
+      () => Core.findTopEquippedOilTarget(),
+      5000,
+      150,
+      shouldCancel
+    );
+    if (!equippedTarget) {
+      throw new Error(`"${category}" 목록에서 '착용중' 장비의 선택 컨트롤을 찾지 못했습니다.`);
+    }
+    const targetRadio = equippedTarget.matches('input[type="radio"], [role="radio"]')
+      ? equippedTarget
+      : equippedTarget.querySelector('input[type="radio"], [role="radio"]');
+    const alreadySelected = !!(
+      targetRadio &&
+      (targetRadio.checked || targetRadio.getAttribute('aria-checked') === 'true')
+    );
+    if (!alreadySelected) {
+      if (!(await Core.safeClick(
+        () => {
+          const fresh = Core.findTopEquippedOilTarget();
+          return fresh && Core.isElementVisible(fresh) ? fresh : null;
+        },
+        {
+          beforeMin: 650,
+          beforeMax: 1150,
+          afterMin: 350,
+          afterMax: 650,
+          shouldCancel,
+        }
+      ))) {
+        throw new Error(`"${category}"의 최상단 착용 장비 선택에 실패했습니다.`);
+      }
+    }
+
+    const submit = await Core.waitFor(
+      () => Core.findEquipmentOilSubmitButton(),
+      5000,
+      150,
+      shouldCancel
+    );
+    if (!submit) {
+      throw new Error('장비용 기름 선택창의 활성화된 "선택" 버튼을 하나로 확정하지 못했습니다.');
+    }
+
+    let successMutation = false;
+    const successObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        const nodes = [
+          ...record.addedNodes,
+          record.type === 'characterData' ? record.target.parentElement : null,
+        ].filter(Boolean);
+        if (nodes.some((node) => {
+          const text = node.textContent || '';
+          return text.includes('기름') &&
+            /(사용|보호)/.test(text) &&
+            /(완료|적용|사용했|발랐|보호됩니다)/.test(text);
+        })) {
+          successMutation = true;
+          break;
+        }
+      }
+    });
+    successObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+    try {
+      if (!(await Core.safeClick(
+        () => Core.findEquipmentOilSubmitButton(),
+        {
+          beforeMin: 700,
+          beforeMax: 1200,
+          afterMin: 250,
+          afterMax: 450,
+          shouldCancel,
+        }
+      ))) {
+        throw new Error(`"${category}" 장비에 기름을 바르는 최종 버튼 클릭에 실패했습니다.`);
+      }
+
+      const secondaryConfirm = await Core.waitFor(
+        () => Core.findEquipmentOilSecondaryConfirm(selectionDialog) || (
+          !selectionDialog.isConnected || !Core.isElementVisible(selectionDialog) ? true : null
+        ),
+        1800,
+        120,
+        shouldCancel
+      );
+      if (secondaryConfirm && secondaryConfirm !== true) {
+        if (!(await Core.safeClick(
+          () => Core.findEquipmentOilSecondaryConfirm(selectionDialog),
+          {
+            beforeMin: 500,
+            beforeMax: 900,
+            afterMin: 450,
+            afterMax: 750,
+            shouldCancel,
+          }
+        ))) {
+          throw new Error(`"${category}" 장비용 기름 확인창 클릭에 실패했습니다.`);
+        }
+      }
+
+      const applied = await Core.waitFor(() => {
+        const freshRow = Core.findEquipmentOilRow();
+        const countAfter = Core.readEquipmentOilCount(freshRow);
+        if (countBefore !== null) {
+          if (!freshRow || (countAfter !== null && countAfter < countBefore)) return true;
+        }
+        if (successMutation) return true;
+        const dialogClosed =
+          !selectionDialog.isConnected || !Core.isElementVisible(selectionDialog);
+        return countBefore === null && dialogClosed ? true : null;
+      }, 7000, 200, shouldCancel);
+      if (!applied) {
+        throw new Error(`"${category}" 장비용 기름 사용 후 수량 감소 또는 완료 신호를 확인하지 못했습니다.`);
+      }
+    } finally {
+      successObserver.disconnect();
+    }
+
+    Core.log(moduleId, `장비용 기름 적용 완료: ${category} 최상단 착용 장비`);
+    return true;
+  };
+
+  Core.useEquipmentOilForCategories = async function (
+    categories,
+    moduleId,
+    shouldCancel = Core.defaultShouldCancel
+  ) {
+    const uniqueCategories = [...new Set(categories)].filter(
+      (category) => Core.EQUIPMENT_CATEGORIES.includes(category)
+    );
+    if (uniqueCategories.length === 0) {
+      throw new Error('장비 보호가 풀린 부위를 결정하지 못했습니다.');
+    }
+    for (const category of uniqueCategories) {
+      if (shouldCancel && shouldCancel()) return false;
+      await Core.useEquipmentOilOnce(category, moduleId, shouldCancel);
+    }
+    return true;
   };
 
   Core.ensureCharacterElement = async function (targetElement, moduleId) {
@@ -2256,6 +2719,7 @@
     running: false,
     stopRequested: false,
     cycleCount: 0,
+    protectionVerificationPending: false,
     config: {
       originalElement: '',
       groundSuffix: '광산',
@@ -2441,10 +2905,93 @@
   };
 
   Modules.autohunt.isProtectionOff = function () {
-    const icons = Array.from(document.querySelectorAll('[aria-label]')).filter((e) =>
-      /보호\s*없음/.test(e.getAttribute('aria-label') || '')
+    return this.readEquipmentProtectionState().offIcons.length > 0;
+  };
+
+  Modules.autohunt.readEquipmentProtectionState = function () {
+    const protectionIcons = Core.gameElements('[aria-label]').filter((element) =>
+      /보호/.test(element.getAttribute('aria-label') || '')
     );
-    return icons.length > 0;
+    const offIcons = protectionIcons.filter((element) =>
+      /보호\s*없음/.test(element.getAttribute('aria-label') || '')
+    );
+    return {
+      seen: protectionIcons.length > 0,
+      protectionIcons,
+      offIcons,
+    };
+  };
+
+  Modules.autohunt.getUnprotectedEquipmentCategories = function () {
+    const { protectionIcons, offIcons } = this.readEquipmentProtectionState();
+    const resolved = [];
+    let unresolved = 0;
+
+    for (const icon of offIcons) {
+      let category = null;
+      for (let node = icon, depth = 0; node && depth < 7; node = node.parentElement, depth++) {
+        const context = [
+          node.getAttribute && node.getAttribute('aria-label'),
+          node.getAttribute && node.getAttribute('title'),
+          node.getAttribute && node.getAttribute('data-slot'),
+          node.getAttribute && node.getAttribute('data-category'),
+          node.textContent,
+        ].filter(Boolean).join(' ');
+        const matches = Core.EQUIPMENT_CATEGORIES.filter((candidate) =>
+          context.includes(candidate)
+        );
+        if (matches.length === 1) {
+          category = matches[0];
+          break;
+        }
+      }
+      // 보호 아이콘이 정확히 3개라면 게임의 장착 장비 표시 순서
+      // (무기 → 방어구 → 장신구)를 사용할 수 있다. aria-label이 단순히
+      // "보호 없음"뿐이라 조상 텍스트로 슬롯을 못 읽는 실화면의 보정이다.
+      if (!category && protectionIcons.length === Core.EQUIPMENT_CATEGORIES.length) {
+        const slotIndex = protectionIcons.indexOf(icon);
+        if (slotIndex >= 0) category = Core.EQUIPMENT_CATEGORIES[slotIndex];
+      }
+      if (category) resolved.push(category);
+      else unresolved++;
+    }
+
+    if (unresolved > 0 || resolved.length === 0) {
+      // 화면에서 슬롯명을 확정할 수 없을 때 한 부위를 임의로 고르면 계속
+      // 보호 없음이 남아 기름 사용 무한반복이 생긴다. 이 경우에만 세 부위를
+      // 한 번씩 보호하고, 사냥터 복귀 뒤 실제 '보호 없음' 소멸을 재검증한다.
+      return [...Core.EQUIPMENT_CATEGORIES];
+    }
+    return [...new Set(resolved)];
+  };
+
+  Modules.autohunt.recoverEquipmentProtection = async function () {
+    const mod = this;
+    const shouldCancel = () => mod.stopRequested || !mod.running;
+    const categories = mod.getUnprotectedEquipmentCategories();
+    Core.log(
+      'autohunt',
+      `장비 보호(기름) 해제 감지 → ${categories.join(' → ')} 착용 장비에 장비용 기름 사용`
+    );
+    const used = await Core.useEquipmentOilForCategories(
+      categories,
+      'autohunt',
+      shouldCancel
+    );
+    if (!used || shouldCancel()) return false;
+
+    const returned = await mod.ensureOnGround(
+      mod.config.groundSuffix,
+      mod.config.floor,
+      shouldCancel
+    );
+    if (!returned) throw new Error('장비용 기름 사용 후 사냥터 복귀에 실패했습니다.');
+    // 사냥터의 대기 화면에는 장비 보호 아이콘이 렌더링되지 않는다.
+    // 따라서 복귀 직후 확인하면 정상 적용도 실패로 오판한다. 다음 50회
+    // 전투 결과 화면에서 아이콘이 다시 나타날 때 단 한 번 재검증한다.
+    mod.protectionVerificationPending = true;
+    Core.log('autohunt', '장비용 기름 적용 완료 → 다음 사냥 결과에서 보호 상태 재검증 예정');
+    return true;
   };
 
   Modules.autohunt.checkAndDepositGold = async function () {
@@ -2458,6 +3005,7 @@
   Modules.autohunt.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
+    mod.protectionVerificationPending = false;
     Core.log('autohunt', '시작 전 공용 프리셋 "사냥" 적용');
     await Core.applyCommonPreset('사냥', 'autohunt');
     Core.log('autohunt', `시작 전 원래 속성(${mod.config.originalElement}) 확인`);
@@ -2492,9 +3040,41 @@
         Core.notifyStopped('autohunt', '포션이 부족해 체력이 0인 상태로 전투가 불가능합니다 — 정지합니다.');
         break;
       }
-      if (!mod.config.ignoreProtectionOff && mod.isProtectionOff()) {
-        Core.notifyStopped('autohunt', '장비 보호(기름)가 풀린 상태입니다 — 정지합니다.');
-        break;
+      const protectionState = mod.readEquipmentProtectionState();
+      if (
+        !mod.config.ignoreProtectionOff &&
+        mod.protectionVerificationPending &&
+        protectionState.seen
+      ) {
+        if (protectionState.offIcons.length > 0) {
+          mod.protectionVerificationPending = false;
+          Core.notifyStopped(
+            'autohunt',
+            '장비용 기름 사용 후 다음 사냥 결과에서도 "보호 없음"이 남아 있어 안전 정지합니다.'
+          );
+          break;
+        }
+        mod.protectionVerificationPending = false;
+        Core.log('autohunt', '장비용 기름 적용 및 다음 사냥 결과의 보호 상태 재검증 완료');
+      }
+      if (
+        !mod.config.ignoreProtectionOff &&
+        !mod.protectionVerificationPending &&
+        protectionState.offIcons.length > 0
+      ) {
+        try {
+          if (!(await mod.recoverEquipmentProtection())) break;
+        } catch (e) {
+          if (mod.stopRequested || !mod.running) break;
+          Core.notifyStopped(
+            'autohunt',
+            `장비용 기름 자동 사용에 실패하여 안전 정지합니다: ${e.message}`
+          );
+          break;
+        }
+        // 인벤토리 왕복 뒤에는 이전 사냥 결과 DOM을 재사용하지 않고 새
+        // 사이클에서 행동력·포션·사냥 버튼을 전부 다시 읽는다.
+        continue;
       }
 
       const energy = mod.readEnergy();
@@ -5163,28 +5743,86 @@
     ));
   };
 
+  Modules.deepdungeon.parseWeeklyCumulativeDamage = function () {
+    const matched = Core.bodyText().match(
+      /주간\s*누적\s*(?:데미지|피해)\s*[:：]?\s*([\d,]+)/
+    );
+    return matched ? parseInt(matched[1].replace(/,/g, ''), 10) : null;
+  };
+
+  Modules.deepdungeon.findTopNavigationTab = function (label) {
+    const tabLabels = ['입장', '기록', '랭킹', '보상', '목표 세트'];
+    const controls = Core.gameElements(
+      '[role="tab"], button, a, [role="button"]'
+    ).filter((control) => {
+      if (!Core.isElementVisible(control)) return false;
+      const text = control.textContent.replace(/\s+/g, ' ').trim();
+      const ariaLabel = (control.getAttribute('aria-label') || '').trim();
+      return text === label || ariaLabel === label;
+    });
+
+    const belongsToTopNavigation = (control) => {
+      if (
+        control.getAttribute('role') === 'tab' ||
+        /MuiTab/.test(control.className || '')
+      ) return true;
+
+      // 새 화면은 상단 메뉴를 일반 button으로 렌더링한다. 단순히 "입장"이라는
+      // 글자만 찾으면 특성 선택창의 실제 입장 버튼을 오인하므로, 같은 컨테이너에
+      // 기록·랭킹·보상 등 상단 메뉴가 3개 이상 함께 있는 경우만 탭으로 인정한다.
+      for (
+        let node = control.parentElement, depth = 0;
+        node && depth < 6;
+        node = node.parentElement, depth++
+      ) {
+        const siblingControls = [
+          ...node.querySelectorAll('[role="tab"], button, a, [role="button"]'),
+        ];
+        const foundLabels = new Set();
+        for (const sibling of siblingControls) {
+          const text = sibling.textContent.replace(/\s+/g, ' ').trim();
+          const ariaLabel = (sibling.getAttribute('aria-label') || '').trim();
+          const matchedLabel = tabLabels.find(
+            (candidate) => text === candidate || ariaLabel === candidate
+          );
+          if (matchedLabel) foundLabels.add(matchedLabel);
+        }
+        if (foundLabels.size >= 3) return true;
+      }
+      return false;
+    };
+
+    return controls.find(belongsToTopNavigation) || null;
+  };
+
   // "기록" 탭으로 이동해서 "주간 누적 데미지" 값을 읽는다. 실패하면 null 반환.
   Modules.deepdungeon.readWeeklyCumulativeDamage = async function (
     shouldCancel = Core.defaultShouldCancel
   ) {
-    const recordTab = await Core.retryStep('"기록" 탭 찾기', () => {
-      const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
-      return tabs.find((t) => t.textContent.trim() === '기록') || null;
-    }, { shouldCancel });
+    // 기록 화면이 이미 열려 있으면 탭 DOM 형식과 관계없이 보이는 값을 먼저
+    // 읽는다. 기존에는 이 화면에서도 role="tab" 탐색에 실패해 0을 놓쳤다.
+    const visibleDamage = this.parseWeeklyCumulativeDamage();
+    if (visibleDamage !== null) return visibleDamage;
+
+    const recordTab = await Core.retryStep(
+      '"기록" 탭 찾기',
+      () => this.findTopNavigationTab('기록'),
+      { shouldCancel }
+    );
     if (!recordTab) return null;
     if (!(await Core.safeClick(
-      () => Array.from(document.querySelectorAll('[role="tab"]'))
-        .find((t) => t.textContent.trim() === '기록') || null,
+      () => this.findTopNavigationTab('기록'),
       { beforeMin: 350, beforeMax: 750, shouldCancel }
     ))) return null;
     await Core.humanDelay(600, 1200);
 
     const matched = await Core.retryStep('"주간 누적 데미지" 텍스트 확인', () => {
-      const m = Core.bodyText().match(/주간\s*누적\s*데미지\s*([\d,]+)/);
-      return m || null;
+      const damage = this.parseWeeklyCumulativeDamage();
+      // retryStep은 truthy 결과만 성공으로 취급하므로 숫자 0을 그대로 반환하면
+      // 실패로 오인한다. 객체로 감싸 0도 정상 측정값으로 보존한다.
+      return damage !== null ? { damage } : null;
     }, { shouldCancel });
-    if (!matched) return null;
-    return parseInt(matched[1].replace(/,/g, ''), 10);
+    return matched ? matched.damage : null;
   };
 
   // 실제 확인된 플로우: 로비에서 "던전 진입" 클릭 → 디버프/버프 특성 선택 화면
@@ -5195,10 +5833,12 @@
   // 존재해서 Core.findButtonByText('입장')이 탭을 먼저 찾아버리는 문제가 있었다.
   // 탭(role="tab" 또는 MuiTab 클래스)을 제외한 진짜 버튼만 찾는 전용 헬퍼.
   Modules.deepdungeon.findEnterConfirmButton = function () {
+    const topEntryTab = this.findTopNavigationTab('입장');
     return (
       Core.allButtons().find(
         (b) =>
           b.textContent.trim() === '입장' &&
+          b !== topEntryTab &&
           b.getAttribute('role') !== 'tab' &&
           !/MuiTab/.test(b.className)
       ) || null
@@ -5359,10 +5999,10 @@
         );
         return;
       }
-      const enterTabAtStart = await Core.retryStep('"입장" 탭 찾기', () => {
-        const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
-        return tabs.find((t) => t.textContent.trim() === '입장') || null;
-      });
+      const enterTabAtStart = await Core.retryStep(
+        '"입장" 탭 찾기',
+        () => mod.findTopNavigationTab('입장')
+      );
       if (enterTabAtStart) {
         enterTabAtStart.click();
         await Core.humanDelay(600, 1200);
@@ -5401,20 +6041,20 @@
       Core.updateModuleButtons();
 
       if (mod.cycleCount >= 1) {
-        // 던전의 주인은 한 런당 1회만 도전 가능하다. "주간 누적 데미지 100만 이하시
+        // 던전의 주인은 한 런당 1회만 도전 가능하다. "주간 누적 데미지 100만 미만
         // 재도전" 옵션이 켜져 있으면, 기록 탭에서 실제 주간 누적 데미지를 확인해서
-        // 아직 100만 이하면 새 런을 시작해 계속 도전한다.
+        // 아직 100만 미만이면 새 런을 시작해 계속 도전한다.
         if (mod.config.retryIfWeeklyDamageUnder1M) {
           const weeklyDamage = await mod.readWeeklyCumulativeDamage();
-          if (weeklyDamage !== null && weeklyDamage <= 1000000) {
+          if (weeklyDamage !== null && weeklyDamage < 1000000) {
             Core.log(
               'deepdungeon',
-              `주간 누적 데미지 ${weeklyDamage.toLocaleString()} (100만 이하) → 재도전을 위해 새 런을 시작합니다.`
+              `주간 누적 데미지 ${weeklyDamage.toLocaleString()} (100만 미만) → 재도전을 위해 새 런을 시작합니다.`
             );
-            const enterTab = await Core.retryStep('"입장" 탭 찾기', () => {
-              const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
-              return tabs.find((t) => t.textContent.trim() === '입장') || null;
-            });
+            const enterTab = await Core.retryStep(
+              '"입장" 탭 찾기',
+              () => mod.findTopNavigationTab('입장')
+            );
             if (enterTab) {
               enterTab.click();
               await Core.humanDelay(600, 1200);
@@ -5439,7 +6079,7 @@
             );
             break;
           } else {
-            Core.log('deepdungeon', `주간 누적 데미지 ${weeklyDamage.toLocaleString()} (100만 초과) → 정지합니다.`);
+            Core.log('deepdungeon', `주간 누적 데미지 ${weeklyDamage.toLocaleString()} (100만 이상) → 정지합니다.`);
           }
         }
         Core.notifyCompleted('deepdungeon', '던전의 주인 도전을 완료했습니다.');
@@ -6364,7 +7004,7 @@
       Core.saveModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
     });
     const protLabel = document.createElement('span');
-    protLabel.textContent = '보호용 기름 없이도 사냥 (체크 시 기름 없어도 정지 안 함)';
+    protLabel.textContent = '장비용 기름 자동 사용 안 함 (체크 시 보호 없어도 계속 사냥)';
     protLabel.style.cssText = 'font-size:11px; color:#ccc;';
     protRow.appendChild(protCheck);
     protRow.appendChild(protLabel);
