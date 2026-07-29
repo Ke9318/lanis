@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.11.2-stable
+// @version      1.12.0-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5457,6 +5457,7 @@
   const DAILY_AUTH_KEY = 'lrm-daily-explicit-run-auth';
   const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'boss', 'autohunt', 'deepdungeon'];
   const DAILY_STEP_LABELS = {
+    attendance: '출석체크',
     dungeon: '던전',
     arena: '아레나',
     boss: '보스',
@@ -5475,6 +5476,166 @@
 
   Modules.daily.saveState = function (state) {
     localStorage.setItem(DAILY_STATE_KEY, JSON.stringify(state));
+  };
+
+  Modules.daily.findVisibleMenuItem = function (text) {
+    return Core.gameElements('[role="menuitem"]').find((item) =>
+      item.textContent.trim() === text &&
+      item.getClientRects().length > 0 &&
+      getComputedStyle(item).display !== 'none' &&
+      getComputedStyle(item).visibility !== 'hidden'
+    ) || null;
+  };
+
+  Modules.daily.goToMonthlyAttendance = async function () {
+    const shouldCancel = () => this.stopRequested || !Core.dailyActive;
+    if (location.pathname.replace(/\/$/, '') !== '/event/pass') {
+      let eventItem = this.findVisibleMenuItem('이벤트');
+      if (!eventItem) {
+        const findProfileButton = () => {
+          const header = document.querySelector('header, [role="banner"]');
+          if (!header) return null;
+          const buttons = [...header.querySelectorAll('button')]
+            .filter((button) => !button.closest('#lrm-panel, #lrm-banner'));
+          return buttons.length > 0 ? buttons[buttons.length - 1] : null;
+        };
+        const opened = await Core.safeClick(findProfileButton, {
+          beforeMin: 550,
+          beforeMax: 950,
+          afterMin: 250,
+          afterMax: 450,
+          shouldCancel,
+        });
+        if (!opened) throw new Error('맨 오른쪽 사용자 메뉴 버튼을 누르지 못했습니다.');
+        eventItem = await Core.waitFor(
+          () => this.findVisibleMenuItem('이벤트'),
+          6000,
+          150,
+          shouldCancel
+        );
+      }
+      if (!eventItem) throw new Error('사용자 메뉴의 "이벤트" 항목을 찾지 못했습니다.');
+      const clickedEvent = await Core.safeClick(
+        () => this.findVisibleMenuItem('이벤트'),
+        {
+          beforeMin: 550,
+          beforeMax: 950,
+          afterMin: 350,
+          afterMax: 650,
+          shouldCancel,
+        }
+      );
+      if (!clickedEvent) throw new Error('사용자 메뉴의 "이벤트"를 누르지 못했습니다.');
+    }
+
+    const eventPage = await Core.waitFor(
+      () =>
+        location.pathname.replace(/\/$/, '') === '/event/pass' &&
+        Core.gameElements('[role="tab"]').some((tab) =>
+          tab.textContent.trim() === '월간 출석체크'
+        ),
+      15000,
+      250,
+      shouldCancel
+    );
+    if (!eventPage) throw new Error('이벤트 화면 진입을 확인하지 못했습니다.');
+
+    const findMonthlyTab = () => Core.gameElements('[role="tab"]').find(
+      (tab) => tab.textContent.trim() === '월간 출석체크'
+    ) || null;
+    const monthlyTab = findMonthlyTab();
+    if (!monthlyTab) throw new Error('"월간 출석체크" 탭을 찾지 못했습니다.');
+    if (monthlyTab.getAttribute('aria-selected') !== 'true') {
+      const clickedTab = await Core.safeClick(findMonthlyTab, {
+        beforeMin: 500,
+        beforeMax: 900,
+        afterMin: 350,
+        afterMax: 650,
+        shouldCancel,
+      });
+      if (!clickedTab) throw new Error('"월간 출석체크" 탭을 누르지 못했습니다.');
+    }
+
+    const attendanceReady = await Core.waitFor(
+      () => {
+        const tab = findMonthlyTab();
+        if (!tab || tab.getAttribute('aria-selected') !== 'true') return null;
+        const text = Core.bodyText();
+        return text.includes('출석일수:') && text.includes('다음 출석체크 가능 시간:')
+          ? true
+          : null;
+      },
+      10000,
+      200,
+      shouldCancel
+    );
+    if (!attendanceReady) throw new Error('월간 출석체크 화면의 상태를 읽지 못했습니다.');
+  };
+
+  Modules.daily.runAttendance = async function () {
+    const shouldCancel = () => this.stopRequested || !Core.dailyActive;
+    await this.goToMonthlyAttendance();
+    if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
+
+    const findClaimButton = () => Core.gameElements('button').find((button) =>
+      button.textContent.trim() === '월간 출석체크하기' &&
+      !button.disabled &&
+      button.getAttribute('aria-disabled') !== 'true'
+    ) || null;
+    const claimButton = findClaimButton();
+    if (!claimButton) {
+      const alreadyDone = Core.gameElements('button').some((button) =>
+        button.textContent.trim() === '오늘 월간 출석체크 완료' && button.disabled
+      );
+      return alreadyDone
+        ? '오늘 월간 출석체크 이미 완료 - 건너뜀'
+        : '현재 받을 수 있는 월간 출석 보상 없음 - 건너뜀';
+    }
+
+    const beforeText = Core.bodyText();
+    const beforeMatch = beforeText.match(/출석일수:\s*(\d+)일/);
+    const beforeDays = beforeMatch ? parseInt(beforeMatch[1], 10) : null;
+    const clicked = await Core.safeClick(findClaimButton, {
+      beforeMin: 650,
+      beforeMax: 1100,
+      afterMin: 300,
+      afterMax: 550,
+      shouldCancel,
+    });
+    if (!clicked) throw new Error('월간 출석체크 수령 버튼 클릭에 실패했습니다.');
+
+    const completed = await Core.waitFor(
+      () => {
+        const doneButton = Core.gameElements('button').find((button) =>
+          button.textContent.trim() === '오늘 월간 출석체크 완료' && button.disabled
+        );
+        if (!doneButton) return null;
+        const match = Core.bodyText().match(/출석일수:\s*(\d+)일/);
+        const afterDays = match ? parseInt(match[1], 10) : null;
+        return beforeDays === null || afterDays === null || afterDays > beforeDays
+          ? { afterDays }
+          : null;
+      },
+      12000,
+      200,
+      shouldCancel
+    );
+    if (!completed) throw new Error('월간 출석체크 보상 수령 완료 상태를 확인하지 못했습니다.');
+
+    const closeButton = Core.gameElements('[role="alert"] button').find((button) =>
+      ['Close', '닫기', '확인'].includes(button.textContent.trim()) ||
+      ['Close', '닫기'].includes(button.getAttribute('aria-label') || '')
+    );
+    if (closeButton) {
+      await Core.safeClick(() => closeButton.isConnected ? closeButton : null, {
+        beforeMin: 250,
+        beforeMax: 450,
+        shouldCancel,
+      });
+    }
+    return completed.afterDays
+      ? `월간 출석체크 ${completed.afterDays}일차 보상 수령 완료`
+      : '월간 출석체크 보상 수령 완료';
   };
 
   Modules.daily.verifyDungeon = async function () {
@@ -5517,6 +5678,9 @@
   };
 
   Modules.daily.runStep = async function (step) {
+    if (step === 'attendance') {
+      return await this.runAttendance();
+    }
     if (step === 'dungeon') {
       await this.runCoreModule('dungeon');
       return await this.verifyDungeon();
@@ -5633,11 +5797,11 @@
       Core.showBanner('daily', '다른 작업이 실행 중입니다. 정지 후 다시 시작해주세요.');
       return;
     }
-    const steps = ['dungeon', 'arena', 'boss', 'autohunt', 'deepdungeon'].filter((key) => mod.config[key]);
-    if (steps.length === 0) {
-      Core.showBanner('daily', '실행할 일일 작업을 하나 이상 체크해주세요.');
-      return;
-    }
+    const steps = [
+      'attendance',
+      ...['dungeon', 'arena', 'boss', 'autohunt', 'deepdungeon']
+        .filter((key) => mod.config[key]),
+    ];
     if (
       steps.includes('dungeon') &&
       !Core.ELEMENT_OPTIONS.includes(Modules.dungeon.config.originalElement)
@@ -6547,7 +6711,7 @@
     Core.loadModuleConfig('daily', DAILY_CONFIG_KEYS);
 
     const intro = document.createElement('div');
-    intro.textContent = '체크한 작업을 던전 → 아레나 → 보스 → 자동사냥 → 심층던전 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
+    intro.textContent = '출석체크를 먼저 수행한 뒤 체크한 작업을 던전 → 아레나 → 보스 → 자동사냥 → 심층던전 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
     intro.style.cssText = 'color:#ccc; font-size:11px; line-height:1.5; margin-bottom:8px;';
     container.appendChild(intro);
 
@@ -6576,7 +6740,7 @@
     });
 
     const note = document.createElement('div');
-    note.textContent = '보스 보상이 모두 끝난 날은 수호자에 입장한 뒤 포기하여 일일 도전 과제만 처리합니다. 문제가 생긴 단계는 기록하고 다음 단계로 넘어갑니다.';
+    note.textContent = '월간 출석체크는 항상 실행하며 이미 수령했거나 받을 보상이 없으면 건너뜁니다. 보스 보상이 모두 끝난 날은 수호자에 입장한 뒤 포기하여 일일 도전 과제만 처리합니다. 문제가 생긴 단계는 기록하고 다음 단계로 넘어갑니다.';
     note.style.cssText = 'color:#f5a623; font-size:10px; line-height:1.45; margin:8px 0;';
     container.appendChild(note);
 
