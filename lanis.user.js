@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.12.2-stable
+// @version      1.12.3-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -211,6 +211,21 @@
     return typeof target === 'function' ? target() : target;
   };
 
+  Core.isElementVisible = function (el) {
+    if (!el || !el.isConnected) return false;
+    // 닫힌 메뉴·이전 모달의 자식은 자기 display가 block이어도 조상이
+    // 숨겨져 있을 수 있으므로 조상까지 확인한다.
+    for (let node = el; node && node !== document.documentElement; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.visibility === 'hidden' || style.display === 'none') return false;
+      if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') return false;
+    }
+    // Chrome이 백그라운드/최소화 탭의 레이아웃 계산을 생략하면 실제 버튼도
+    // rect가 0개로 보고된다. 숨은 탭에서는 CSS/aria 상태를 신뢰하고,
+    // 포그라운드에서만 rect 검사를 추가한다.
+    return document.hidden || el.getClientRects().length > 0;
+  };
+
   Core.safeClick = async function (
     target,
     { beforeMin = 500, beforeMax = 1300, afterMin = 0, afterMax = 0, shouldCancel = Core.defaultShouldCancel } = {}
@@ -224,7 +239,7 @@
       !el.isConnected ||
       el.disabled ||
       el.getAttribute('aria-disabled') === 'true' ||
-      el.getClientRects().length === 0
+      !Core.isElementVisible(el)
     ) return false;
     el.click();
     if (afterMax > 0) await Core.humanDelay(afterMin, afterMax);
@@ -401,7 +416,7 @@
     const consumableTab = await Core.waitFor(
       () =>
         Core.gameElements('[role="tab"], button').find(
-          (el) => el.textContent.trim() === '소모품' && el.getClientRects().length > 0
+          (el) => el.textContent.trim() === '소모품' && Core.isElementVisible(el)
         ) || null,
       8000
     );
@@ -413,14 +428,14 @@
     let useButton = null;
     for (let page = 1; page <= 20 && !useButton; page++) {
       const row = Core.gameElements('tr').find(
-        (tr) => tr.textContent.includes(stoneName) && tr.getClientRects().length > 0
+        (tr) => tr.textContent.includes(stoneName) && Core.isElementVisible(tr)
       );
       if (row) {
         useButton =
           [...row.querySelectorAll('button')].find(
             (button) =>
               ['사용', '사용하기'].includes(button.textContent.trim()) &&
-              button.getClientRects().length > 0
+              Core.isElementVisible(button)
           ) || null;
         break;
       }
@@ -428,7 +443,7 @@
         (button) =>
           button.getAttribute('aria-label') === 'Go to next page' &&
           !button.disabled &&
-          button.getClientRects().length > 0
+          Core.isElementVisible(button)
       );
       if (!next) break;
       if (!(await Core.safeClick(next, { beforeMin: 500, beforeMax: 900, afterMin: 650, afterMax: 1100 }))) break;
@@ -1356,30 +1371,33 @@
   };
 
   Modules.rejob.findEnergyPlusButton = function () {
-    const byLabel = document.querySelector('[aria-label="활력의 포션 사용"]');
+    const byLabel = [...document.querySelectorAll('button, [role="button"], [aria-label]')]
+      .find((el) => {
+        const label = el.getAttribute('aria-label') || '';
+        return label.includes('활력') && (label.includes('포션') || label.includes('사용') || label.includes('충전'));
+      });
     if (byLabel) return byLabel;
+
+    // 접근성 라벨이 없는 UI 변형에서는 좌표로 찾지 않는다. 백그라운드 탭은
+    // getBoundingClientRect()가 모두 0이 될 수 있으므로, 활력 수치(/2000)를
+    // 포함하는 의미 영역 안의 +/사용 버튼을 찾는다.
     const bars = [...document.querySelectorAll('[role="progressbar"]')];
-    const energyBar = bars.find((b) => {
-      const r = b.getBoundingClientRect();
-      return r.top < 200 && r.width > 200;
+    const energyBar = bars.find((bar) => {
+      const label = `${bar.getAttribute('aria-label') || ''} ${bar.parentElement ? bar.parentElement.textContent : ''}`;
+      return label.includes('활력') || /\d+\s*\/\s*2000/.test(label);
     });
     if (!energyBar) return null;
-    const barRect = energyBar.getBoundingClientRect();
-    const candidates = [...document.querySelectorAll('div')].filter((el) => {
-      const r = el.getBoundingClientRect();
-      const label = el.getAttribute('aria-label') || '';
-      return (
-        Math.abs(r.top - barRect.top) < 40 &&
-        r.left > barRect.left &&
-        r.left < barRect.right + 150 &&
-        r.width > 15 &&
-        r.width < 45 &&
-        r.height > 15 &&
-        r.height < 45 &&
-        label.includes('활력')
-      );
-    });
-    return candidates[0] || null;
+    let scope = energyBar.parentElement;
+    for (let depth = 0; scope && depth < 6; depth++, scope = scope.parentElement) {
+      const buttons = [...scope.querySelectorAll('button, [role="button"]')];
+      const candidate = buttons.find((el) => {
+        const text = el.textContent.trim();
+        const label = el.getAttribute('aria-label') || '';
+        return label.includes('활력') || text === '+' || text.includes('포션 사용');
+      });
+      if (candidate) return candidate;
+    }
+    return null;
   };
 
   Modules.rejob.parseEnergy = function () {
@@ -5481,9 +5499,7 @@
   Modules.daily.findVisibleMenuItem = function (text) {
     return Core.gameElements('[role="menuitem"]').find((item) =>
       item.textContent.trim() === text &&
-      item.getClientRects().length > 0 &&
-      getComputedStyle(item).display !== 'none' &&
-      getComputedStyle(item).visibility !== 'hidden'
+      Core.isElementVisible(item)
     ) || null;
   };
 
@@ -7363,6 +7379,18 @@
     await M.sleep(800);
   };
 
+  // 수호자·황제·엔트는 전투당 최대 15장, 망령은 10장이다. 직업별 배치
+  // 패턴은 그대로 유지하면서 남은 한도보다 배치가 크면 앞쪽 스크롤만
+  // 사용한다(예: 14장 사용 후 공격+집중 배치라면 공격 1장만 사용).
+  M.useScrollsWithinLimit = async (names, used, limit = 15) => {
+    const remaining = Math.max(0, limit - used);
+    if (remaining === 0) return used;
+    const batch = names.slice(0, remaining);
+    if (batch.length === 0) return used;
+    await M.useScrolls(batch);
+    return used + batch.length;
+  };
+
   // --- 상태 읽기 (HP/MP, 봉인된 어빌리티) --------------------------------------
   M.getHpMpNumbers = () => {
     const hpLabels = M.queryAll('*').filter(
@@ -9175,16 +9203,13 @@
     push('[2단계] 딜 프리셋 적용');
     let state = (await M.getValidHpMpNumbers());
     r = 0;
-    let scrollRoundsUsed = 0;
+    let scrollsUsed = 0;
     while (state.boss.hp.cur > 0 && r < maxDealRounds) {
       if (stopped()) return { log, cleared: false };
       await recoverUntilSafe();
-      // 공격+집중은 합계 2장, 전투당 스크롤 한도 10장이므로 최대 5회.
-      // 각 사용 직후 5턴을 공격하고, 모두 소진되면 스크롤 없이 계속 공격한다.
-      if (scrollRoundsUsed < 5) {
-        await M.useScrolls(['공격', '집중']);
-        scrollRoundsUsed++;
-        push(`[3단계] 공격/집중 스크롤 사용 (${scrollRoundsUsed}/5)`);
+      if (scrollsUsed < 15) {
+        scrollsUsed = await M.useScrollsWithinLimit(['공격', '집중'], scrollsUsed);
+        push(`[3단계] 공격/집중 스크롤 사용 (누적 ${scrollsUsed}/15장)`);
       }
       await M.clickTurn(5);
       r++;
@@ -9278,6 +9303,7 @@
     state = (await M.getValidHpMpNumbers());
     let round = 0;
     let attackRound = 0;
+    let scrollsUsed = 0;
     while (state.boss.hp.cur > 0 && round < maxDealRounds) {
       if (stopped()) return { log, cleared: false };
       round++;
@@ -9291,12 +9317,15 @@
         // 패턴이 밀리는 문제가 있었음(같은 종류 버그가 인술 망령에서도
         // 지적됨).
         attackRound++;
-        if (attackRound === 1 || attackRound === 2) {
-          await M.useScrolls(['공격', '집중']);
-          push(`[3단계 스크롤 공격${attackRound}회차] 공격+집중`);
-        } else if (attackRound === 3) {
-          await M.useScrolls(['공격', '집중', '재생']);
-          push(`[3단계 스크롤 공격${attackRound}회차] 공격+집중+재생`);
+        const pattern = [
+          ['공격', '집중'],
+          ['공격', '집중'],
+          ['공격', '집중', '재생'],
+        ];
+        if (scrollsUsed < 15) {
+          const batch = pattern[(attackRound - 1) % pattern.length];
+          scrollsUsed = await M.useScrollsWithinLimit(batch, scrollsUsed);
+          push(`[3단계 스크롤 공격${attackRound}회차] ${batch.join('+')} (누적 ${scrollsUsed}/15장)`);
         }
         await M.clickTurn(5);
       }
@@ -9426,6 +9455,7 @@
     let state = (await M.getValidHpMpNumbers());
     r = 0;
     let dealAttackRound = 0;
+    let scrollsUsed = 0;
     while (state.boss.hp.cur > 0 && r < maxDealRounds) {
       if (stopped()) return { log, cleared: false };
       r++;
@@ -9435,9 +9465,9 @@
         push(`[4단계 ${r}회차] 내HP ${Math.round(ratio * 100)}% -> 회복 (스크롤 생략)`);
       } else {
         dealAttackRound++;
-        if (dealAttackRound <= 5) {
-          await M.useScrolls(['공격', '집중']);
-          push(`[4단계 공격${dealAttackRound}회차] 공격+집중 스크롤 (${dealAttackRound}/5)`);
+        if (scrollsUsed < 15) {
+          scrollsUsed = await M.useScrollsWithinLimit(['공격', '집중'], scrollsUsed);
+          push(`[4단계 공격${dealAttackRound}회차] 공격+집중 스크롤 (누적 ${scrollsUsed}/15장)`);
         } else {
           push(`[4단계 공격${dealAttackRound}회차] 스크롤 소진 후 무스크롤 공격`);
         }
@@ -9686,6 +9716,7 @@
 
     await M.applyBossPreset('딜'); push('[3단계] 딜 프리셋 적용');
     let state = (await M.getValidHpMpNumbers()); r = 0;
+    let scrollsUsed = 0;
     while (state.boss.hp.cur > 0 && r < maxDealRounds) {
       if (stopped()) return { log, cleared: false }; r++;
       const ratio = state.player.hp.cur / state.player.hp.max;
@@ -9693,9 +9724,11 @@
         await M.clickRecover();
         push(`[3단계 ${r}회차] 내HP ${Math.round(ratio * 100)}% -> 회복 (스크롤 생략)`);
       } else {
-        await M.useScrolls(['공격', '집중']);
+        if (scrollsUsed < 15) {
+          scrollsUsed = await M.useScrollsWithinLimit(['공격', '집중'], scrollsUsed);
+        }
         await M.clickTurn(5);
-        push(`[3단계 ${r}회차] 공격+집중 스크롤 후 5턴 공격`);
+        push(`[3단계 ${r}회차] 스크롤 누적 ${scrollsUsed}/15장 후 5턴 공격`);
       }
       state = (await M.getValidHpMpNumbers());
       push(`[3단계 ${r}회차] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
@@ -9878,14 +9911,19 @@
     await M.applyBossPreset('딜');
     let state = await M.getValidHpMpNumbers();
     let attackRound = 0;
+    let scrollsUsed = 0;
+    const scrollPattern = [
+      ['공격', '집중'],
+      ['공격', '집중'],
+      ['공격', '집중', '재생'],
+    ];
     for (let round = 1; state.boss.hp.cur > 0 && round <= maxDealRounds; round++) {
       if (M.stopRequested) return { log, cleared: false };
       await M.archeryRecoverUntilAbove(hpThreshold, null, push);
       attackRound++;
-      if (attackRound === 1 || attackRound === 2) {
-        await M.useScrolls(['공격', '집중']);
-      } else if (attackRound === 3) {
-        await M.useScrolls(['공격', '집중', '재생']);
+      if (scrollsUsed < 15) {
+        const batch = scrollPattern[(attackRound - 1) % scrollPattern.length];
+        scrollsUsed = await M.useScrollsWithinLimit(batch, scrollsUsed);
       }
       await M.clickTurn(5);
       state = await M.getValidHpMpNumbers();
@@ -9934,14 +9972,19 @@
     state = await M.getValidHpMpNumbers();
 
     let attackRound = 0;
+    let scrollsUsed = 0;
+    const scrollPattern = [
+      ['공격', '집중'],
+      ['공격', '집중'],
+      ['공격', '집중', '재생'],
+    ];
     for (let round = 1; state.boss.hp.cur > 0 && round <= maxDealRounds; round++) {
       if (M.stopRequested) return { log, cleared: false };
       await M.archeryRecoverUntilAbove(hpThreshold, null, push);
       attackRound++;
-      if (attackRound === 1 || attackRound === 2) {
-        await M.useScrolls(['공격', '집중']);
-      } else if (attackRound === 3) {
-        await M.useScrolls(['공격', '집중', '재생']);
+      if (scrollsUsed < 15) {
+        const batch = scrollPattern[(attackRound - 1) % scrollPattern.length];
+        scrollsUsed = await M.useScrollsWithinLimit(batch, scrollsUsed);
       }
       await M.clickTurn(5);
       state = await M.getValidHpMpNumbers();
@@ -9986,15 +10029,16 @@
     await M.applyBossPreset('딜');
     let state = await M.getValidHpMpNumbers();
     let attackRound = 0;
+    let scrollsUsed = 0;
     for (let round = 1; state.boss.hp.cur > 0 && round <= maxDealRounds; round++) {
       if (M.stopRequested) return { log, cleared: false };
       await M.archeryRecoverUntilAbove(hpThreshold, null, push);
       attackRound++;
-      if (attackRound <= 4) {
+      if (scrollsUsed < 15) {
         const scrolls = attackRound % 2 === 1
           ? ['공격', '집중']
           : ['공격', '집중', '재생'];
-        await M.useScrolls(scrolls);
+        scrollsUsed = await M.useScrollsWithinLimit(scrolls, scrollsUsed);
       }
       await M.clickTurn(5);
       state = await M.getValidHpMpNumbers();
@@ -10132,9 +10176,12 @@
       ['공격', '집중'],
       ['공격', '집중', '재생'],
     ];
+    let scrollsUsed = 0;
     for (let r = 0; state.boss.hp.cur > 0 && r < maxDealRounds; r++) {
       await M.martialRecover(hpThreshold, push);
-      if (r < pattern.length) await M.useScrolls(pattern[r]);
+      if (scrollsUsed < 15) {
+        scrollsUsed = await M.useScrollsWithinLimit(pattern[r % pattern.length], scrollsUsed);
+      }
       await M.clickTurn(5);
       state = await M.getValidHpMpNumbers();
       push(`[딜 ${r + 1}] bossHp=${state.boss.hp.cur}`);
@@ -10180,9 +10227,12 @@
       ['공격', '집중'],
       ['공격', '집중', '재생'],
     ];
+    let scrollsUsed = 0;
     for (let r = 0; state.boss.hp.cur > 0 && r < maxDealRounds; r++) {
       await M.martialRecover(hpThreshold, push);
-      if (r < pattern.length) await M.useScrolls(pattern[r]);
+      if (scrollsUsed < 15) {
+        scrollsUsed = await M.useScrollsWithinLimit(pattern[r % pattern.length], scrollsUsed);
+      }
       await M.clickTurn(5);
       state = await M.getValidHpMpNumbers();
       push(`[딜 ${r + 1}] bossHp=${state.boss.hp.cur}`);
@@ -10222,16 +10272,15 @@
     await M.clickTurn(10);
     await M.applyBossPreset('딜');
     let state = await M.getValidHpMpNumbers();
-    let scrollPairs = 0;
+    let scrollsUsed = 0;
     for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
       await M.martialRecover(hpThreshold, push);
-      if (scrollPairs < 7) {
+      if (scrollsUsed < 15) {
         try {
-          await M.useScrolls(['공격', '집중']);
-          scrollPairs++;
+          scrollsUsed = await M.useScrollsWithinLimit(['공격', '집중'], scrollsUsed);
         } catch (e) {
           push(`스크롤 소진 확인: ${e.message}`);
-          scrollPairs = 7;
+          scrollsUsed = 15;
         }
       }
       await M.clickTurn(5);
@@ -10347,13 +10396,12 @@
     let scrollsUsed = 0;
     for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
       await M.magicRecover(hpThreshold, push);
-      if (scrollsUsed < 7) {
-        await M.useScrolls(['공격']);
-        scrollsUsed++;
+      if (scrollsUsed < 15) {
+        scrollsUsed = await M.useScrollsWithinLimit(['공격'], scrollsUsed);
       }
       await M.clickTurn(5);
       state = await M.getValidHpMpNumbers();
-      push(`[딜 ${r}] bossHp=${state.boss.hp.cur}, 공격스크롤=${scrollsUsed}/7`);
+      push(`[딜 ${r}] bossHp=${state.boss.hp.cur}, 공격스크롤=${scrollsUsed}/15`);
     }
     const cleared = state.boss.hp.cur <= 0;
     if (cleared) await M.closeClearPopupIfAny();
@@ -10395,13 +10443,12 @@
     let scrollsUsed = 0;
     for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
       await M.magicRecover(hpThreshold, push);
-      if (scrollsUsed < 7) {
-        await M.useScrolls(['공격']);
-        scrollsUsed++;
+      if (scrollsUsed < 15) {
+        scrollsUsed = await M.useScrollsWithinLimit(['공격'], scrollsUsed);
       }
       await M.clickTurn(5);
       state = await M.getValidHpMpNumbers();
-      push(`[딜 ${r}] bossHp=${state.boss.hp.cur}, 공격스크롤=${scrollsUsed}/7`);
+      push(`[딜 ${r}] bossHp=${state.boss.hp.cur}, 공격스크롤=${scrollsUsed}/15`);
     }
     const cleared = state.boss.hp.cur <= 0;
     if (cleared) await M.closeClearPopupIfAny();
