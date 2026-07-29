@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.12.1-stable
+// @version      1.12.2-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -1992,7 +1992,7 @@
     if (!mod.running) return;
 
     const score = await mod.checkStrongScore();
-    if (score !== null && score > mod.config.targetScore) {
+    if (score !== null && score >= mod.config.targetScore) {
       Core.notifyCompleted(
         'rejob',
         `강함 점수 ${score.toLocaleString()}이(가) 목표치(${mod.config.targetScore.toLocaleString()})를 초과했습니다! 목표를 달성하여 정지합니다.`
@@ -5913,11 +5913,25 @@
     container.appendChild(labelEl('목표 강함점수'));
     const scoreInput = document.createElement('input');
     scoreInput.type = 'number';
+    scoreInput.min = '0';
+    scoreInput.step = '100';
     scoreInput.value = mod.config.targetScore;
+    scoreInput.title = '클릭 후 원하는 점수를 직접 입력할 수 있습니다. 화살표는 100점씩 증감합니다.';
     scoreInput.style.cssText = inputStyle();
-    scoreInput.addEventListener('change', (e) => {
-      mod.config.targetScore = parseInt(e.target.value, 10) || 5000;
+    // 기존 값 위에 바로 새 점수를 입력할 수 있게 첫 포커스에서 전체 선택.
+    // 화살표만 사용하더라도 기본 1점이 아니라 100점씩 증감한다.
+    scoreInput.addEventListener('focus', (e) => e.target.select());
+    scoreInput.addEventListener('input', (e) => {
+      const value = parseInt(e.target.value, 10);
+      if (!Number.isFinite(value) || value < 0) return;
+      mod.config.targetScore = value;
       Core.saveModuleConfig('rejob', REJOB_PERSIST_KEYS);
+    });
+    scoreInput.addEventListener('change', (e) => {
+      const value = parseInt(e.target.value, 10);
+      if (!Number.isFinite(value) || value < 0) {
+        e.target.value = mod.config.targetScore;
+      }
     });
     container.appendChild(scoreInput);
 
