@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.12.3-stable
+// @version      1.13.0-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -26,7 +26,11 @@
     audioCtx: null, // 알림음 재생용 (v1.2.24)
     dailyActive: false,
     moduleResults: {},
+    // Chrome이 메모리 절약으로 탭을 폐기했다가 복원한 경우에만 안전한
+    // 체크포인트 재개를 허용한다. 사용자의 일반 새로고침과는 명확히 구분한다.
+    wasDiscarded: document.wasDiscarded === true,
   };
+  window.__lanisWasDiscarded = Core.wasDiscarded;
 
   const PANEL_POS_KEY = 'lrm-unified-panel-pos'; // 패널 위치 저장용 localStorage 키 (하나의 패널이므로 키도 하나)
 
@@ -48,6 +52,7 @@
         const item = pending.get(e.data);
         if (item) {
           pending.delete(e.data);
+          clearTimeout(item.fallbackTimer);
           item.resolve();
         }
       };
@@ -55,6 +60,7 @@
         workerFailed = true;
         if (event && typeof event.preventDefault === 'function') event.preventDefault();
         for (const item of pending.values()) {
+          clearTimeout(item.fallbackTimer);
           const elapsed = Date.now() - item.startedAt;
           fallback(item.resolve, item.ms - elapsed);
         }
@@ -73,10 +79,21 @@
             return;
           }
           const id = ++counter;
-          pending.set(id, { resolve, ms, startedAt: Date.now() });
+          // Worker가 오류 이벤트도 없이 멎는 경우를 대비한다. 일반 타이머도
+          // 숨은 탭에서 늦어질 수 있지만, 탭이 다시 살아나는 순간에는 둘 중
+          // 먼저 도착한 쪽이 Promise를 반드시 해제한다.
+          const finish = () => {
+            const item = pending.get(id);
+            if (!item) return;
+            pending.delete(id);
+            item.resolve();
+          };
+          const fallbackTimer = setTimeout(finish, Math.max(0, ms) + 5000);
+          pending.set(id, { resolve, ms, startedAt: Date.now(), fallbackTimer });
           try {
             worker.postMessage({ id, ms });
           } catch (e) {
+            clearTimeout(fallbackTimer);
             pending.delete(id);
             fallback(resolve, ms);
           }
@@ -88,6 +105,21 @@
   })();
 
   Core.sleep = Core._bgSleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  Core.interruptibleSleep = async function (
+    ms,
+    shouldCancel = Core.defaultShouldCancel,
+    chunkMs = 400
+  ) {
+    const deadline = Date.now() + Math.max(0, ms);
+    while (Date.now() < deadline) {
+      if (shouldCancel && shouldCancel()) return false;
+      await Core.sleep(Math.min(chunkMs, deadline - Date.now()));
+    }
+    return !(shouldCancel && shouldCancel());
+  };
+  // 보스 엔진도 동일한 스케줄러를 사용한다. 두 Worker/오디오 구현이 서로
+  // 다른 상태로 멎는 구조를 피하고 한 곳에서 상태를 관리한다.
+  window.__lanisBackgroundSleep = Core.sleep;
   Core.rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
   Core.humanDelay = (minMs, maxMs) => Core.sleep(minMs + Math.random() * (maxMs - minMs));
 
@@ -102,15 +134,28 @@
     return !!ctx && Core.isRunCancelled(ctx.moduleId, ctx.runId);
   };
 
+  Core._bodyTextCache = { at: 0, value: '' };
   Core.bodyText = function () {
-    const prevPanelDisplay = Core.panelEl ? Core.panelEl.style.display : null;
-    const prevBannerDisplay = Core.bannerEl ? Core.bannerEl.style.display : null;
-    if (Core.panelEl) Core.panelEl.style.display = 'none';
-    if (Core.bannerEl) Core.bannerEl.style.display = 'none';
-    const text = document.body.innerText;
-    if (Core.panelEl) Core.panelEl.style.display = prevPanelDisplay;
-    if (Core.bannerEl) Core.bannerEl.style.display = prevBannerDisplay;
-    return text;
+    const now = performance.now();
+    if (now - Core._bodyTextCache.at < 25) return Core._bodyTextCache.value;
+    // innerText는 전체 페이지 레이아웃을 강제로 계산한다. 숨은 탭에서 이
+    // 계산이 지연되거나 오래된 결과를 줄 수 있으므로 텍스트 노드를 직접
+    // 수집한다. 매크로 GUI·스크립트·숨김 DOM은 제외한다.
+    const chunks = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let textNode;
+    while ((textNode = walker.nextNode())) {
+      const parent = textNode.parentElement;
+      if (!parent) continue;
+      if (parent.closest(
+        '#lrm-panel, #lrm-banner, #lrm-boss-ref-panel, script, style, noscript, template, [hidden], [aria-hidden="true"]'
+      )) continue;
+      const value = (textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
+      if (value) chunks.push(value);
+    }
+    const value = `\n${chunks.join('\n')}\n`;
+    Core._bodyTextCache = { at: now, value };
+    return value;
   };
 
   Core.allButtons = function () {
@@ -120,7 +165,9 @@
   };
 
   Core.findButtonByText = function (text) {
-    return Core.allButtons().find((b) => b.textContent.trim() === text) || null;
+    return Core.allButtons().find(
+      (b) => b.textContent.trim() === text && (!Core.isElementVisible || Core.isElementVisible(b))
+    ) || null;
   };
 
   Core.findByExactText = function (selector, text) {
@@ -156,7 +203,6 @@
         throttleAllowance += Math.min(excessDelay, maxThrottleAllowance - throttleAllowance);
       }
       lastTick = now;
-      if (now - startedAt >= timeoutMs + throttleAllowance) break;
       if (shouldCancel && shouldCancel()) return null;
       let result = null;
       try {
@@ -165,6 +211,9 @@
         result = null;
       }
       if (result) return result;
+      // 장시간 숨김 뒤 깨어났을 때는 화면이 이미 준비됐을 수 있다. 조건을
+      // 한 번 확인한 뒤에만 제한시간 만료를 적용한다.
+      if (now - startedAt >= timeoutMs + throttleAllowance) break;
       await Core.sleep(intervalMs);
     }
     return null;
@@ -187,7 +236,7 @@
 
       if (Core.bodyText().includes('서버에 재연결')) {
         Core.log('core', `(${label}) 서버 재연결 감지 → 3초 추가 대기 후 재확인`);
-        await Core.sleep(3000);
+        if (!(await Core.interruptibleSleep(3000, shouldCancel))) return null;
         if (shouldCancel && shouldCancel()) return null;
         let retryResult = null;
         try {
@@ -201,7 +250,7 @@
       if (i < attempts - 1) {
         const waitMs = waits[Math.min(i, waits.length - 1)];
         Core.log('core', `(${label}) 아직 실패 (${i + 1}/${attempts}) → ${waitMs / 1000}초 후 재시도`);
-        await Core.sleep(waitMs);
+        if (!(await Core.interruptibleSleep(waitMs, shouldCancel))) return null;
       }
     }
     return null;
@@ -228,7 +277,15 @@
 
   Core.safeClick = async function (
     target,
-    { beforeMin = 500, beforeMax = 1300, afterMin = 0, afterMax = 0, shouldCancel = Core.defaultShouldCancel } = {}
+    {
+      beforeMin = 500,
+      beforeMax = 1300,
+      afterMin = 0,
+      afterMax = 0,
+      shouldCancel = Core.defaultShouldCancel,
+      afterCheck = null,
+      afterTimeout = 8000,
+    } = {}
   ) {
     if (shouldCancel && shouldCancel()) return false;
     await Core.humanDelay(beforeMin, beforeMax);
@@ -243,6 +300,10 @@
     ) return false;
     el.click();
     if (afterMax > 0) await Core.humanDelay(afterMin, afterMax);
+    if (afterCheck) {
+      const confirmed = await Core.waitFor(afterCheck, afterTimeout, 200, shouldCancel);
+      if (!confirmed) return false;
+    }
     return true;
   };
 
@@ -260,34 +321,62 @@
     return Core.waitFor(checkFn, timeoutMs, 300, shouldCancel);
   };
 
-  Core.clickNavMenuExact = async function (navLabel, itemText) {
-    const navBtn = await Core.waitFor(() => Core.findButtonByText(navLabel), 15000);
+  Core.clickNavMenuExact = async function (
+    navLabel,
+    itemText,
+    shouldCancel = Core.defaultShouldCancel
+  ) {
+    const navBtn = await Core.waitFor(
+      () => Core.findButtonByText(navLabel),
+      15000,
+      300,
+      shouldCancel
+    );
     if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
-    if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), { beforeMin: 500, beforeMax: 1000 }))) {
+    if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), {
+      beforeMin: 500,
+      beforeMax: 1000,
+      shouldCancel,
+    }))) {
       throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
     }
-    const item = await Core.waitFor(() =>
-      [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim() === itemText)
-    );
+    const findItem = () => [...document.querySelectorAll('[role="menuitem"]')].find(
+      (el) => el.textContent.trim() === itemText && Core.isElementVisible(el)
+    ) || null;
+    const item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
     if (!item) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
-    if (!(await Core.safeClick(() =>
-      [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim() === itemText)
-    ))) throw new Error(`메뉴 항목 "${itemText}"가 클릭 직전에 사라짐`);
+    if (!(await Core.safeClick(findItem, { shouldCancel }))) {
+      throw new Error(`메뉴 항목 "${itemText}"가 클릭 직전에 사라짐`);
+    }
   };
 
-  Core.clickNavMenuSuffix = async function (navLabel, suffixText) {
-    const navBtn = await Core.waitFor(() => Core.findButtonByText(navLabel), 15000);
+  Core.clickNavMenuSuffix = async function (
+    navLabel,
+    suffixText,
+    shouldCancel = Core.defaultShouldCancel
+  ) {
+    const navBtn = await Core.waitFor(
+      () => Core.findButtonByText(navLabel),
+      15000,
+      300,
+      shouldCancel
+    );
     if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
-    if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), { beforeMin: 500, beforeMax: 1000 }))) {
+    if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), {
+      beforeMin: 500,
+      beforeMax: 1000,
+      shouldCancel,
+    }))) {
       throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
     }
-    const item = await Core.waitFor(() =>
-      [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim().endsWith(suffixText))
-    );
+    const findItem = () => [...document.querySelectorAll('[role="menuitem"]')].find(
+      (el) => el.textContent.trim().endsWith(suffixText) && Core.isElementVisible(el)
+    ) || null;
+    const item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
     if (!item) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
-    if (!(await Core.safeClick(() =>
-      [...document.querySelectorAll('[role="menuitem"]')].find((el) => el.textContent.trim().endsWith(suffixText))
-    ))) throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
+    if (!(await Core.safeClick(findItem, { shouldCancel }))) {
+      throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
+    }
   };
 
   // ---------------- 공용 프리셋 적용 (던전·자동사냥·심층던전 공용) ----------------
@@ -328,9 +417,17 @@
       let confirmationMutated = false;
       const observer = new MutationObserver((records) => {
         for (const record of records) {
-          const nodes = [record.target, ...record.addedNodes];
+          const nodes = [
+            ...record.addedNodes,
+            ...(record.type === 'characterData' ? [record.target] : []),
+          ];
           if (nodes.some((node) => {
-            const text = node && node.textContent ? node.textContent : '';
+            const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+            if (!el || !el.closest) return false;
+            const notice = el.matches('[role="alert"], [role="status"], .MuiSnackbar-root, .MuiAlert-root, [class*="toast"]')
+              ? el
+              : el.closest('[role="alert"], [role="status"], .MuiSnackbar-root, .MuiAlert-root, [class*="toast"]');
+            const text = notice && notice.textContent ? notice.textContent : '';
             return text.includes(presetName) &&
               (text.includes('적용했습니다') || text.includes('적용 완료') || text.includes('불러왔습니다'));
           })) {
@@ -557,11 +654,27 @@
     owners: new Set(),
     ctx: null,
     osc: null,
+    healthRunId: 0,
+    resume() {
+      if (this.ctx && this.ctx.state === 'suspended') {
+        this.ctx.resume().catch(() => {});
+      }
+    },
+    startHealthLoop() {
+      const runId = ++this.healthRunId;
+      (async () => {
+        while (this.owners.size > 0 && runId === this.healthRunId) {
+          this.resume();
+          await Core.sleep(5000);
+        }
+      })().catch(() => {});
+    },
     acquire(owner) {
       if (!owner) return;
       this.owners.add(owner);
       if (this.ctx) {
-        if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+        this.resume();
+        this.startHealthLoop();
         return;
       }
       try {
@@ -574,7 +687,9 @@
         osc.start();
         this.ctx = ctx;
         this.osc = osc;
-        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+        ctx.onstatechange = () => this.resume();
+        this.resume();
+        this.startHealthLoop();
       } catch (e) {
         Core.log('core', `백그라운드 유지 오디오 시작 실패: ${e.message}`);
       }
@@ -582,12 +697,17 @@
     release(owner) {
       if (owner) this.owners.delete(owner);
       if (this.owners.size > 0) return;
+      this.healthRunId++;
       try { if (this.osc) this.osc.stop(); } catch (e) {}
       try { if (this.ctx) this.ctx.close(); } catch (e) {}
       this.ctx = null;
       this.osc = null;
     },
   };
+  document.addEventListener('visibilitychange', () => {
+    if (Core.backgroundKeeper.owners.size > 0) Core.backgroundKeeper.resume();
+  });
+  window.__lanisBackgroundKeeper = Core.backgroundKeeper;
 
   Core.beep = function (freq, durationMs, delayMs = 0, waveType = 'sine', volume = 0.2) {
     const ctx = Core.getAudioCtx();
@@ -919,8 +1039,10 @@
       const remainingInterval = Math.max(0, clickIntervalMs - (Date.now() - lastAttemptAt));
       if (remainingInterval > 0) {
         Core.log('arena', `다음 클릭까지 ${Math.ceil(remainingInterval / 1000)}초 대기`);
-        await Core.sleep(remainingInterval);
-        if (mod.stopRequested) return;
+        if (!(await Core.interruptibleSleep(
+          remainingInterval,
+          () => mod.stopRequested || !mod.running
+        ))) return;
       }
       Core.log('arena', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}/${target}회`);
       const startButton = await mod.waitForEnabledStart();
@@ -2032,7 +2154,10 @@
     if (mod.cycleCount >= mod.nextRestAt) {
       const restSec = Core.rand(mod.config.restSeconds[0], mod.config.restSeconds[1]);
       Core.log('rejob', `${mod.cycleCount}사이클 도달 → ${restSec}초 휴식`);
-      await Core.sleep(restSec * 1000);
+      if (!(await Core.interruptibleSleep(
+        restSec * 1000,
+        () => mod.stopRequested || !mod.running
+      ))) return;
       mod.nextRestAt = mod.cycleCount + Core.rand(mod.config.restEvery[0], mod.config.restEvery[1]);
     }
   };
@@ -2116,7 +2241,10 @@
           break;
         }
         Core.log('rejob', '10초 대기 후 이번 사이클 재시도');
-        await Core.sleep(10000);
+        if (!(await Core.interruptibleSleep(
+          10000,
+          () => mod.stopRequested || !mod.running
+        ))) break;
       }
       await mod.clickDelayWait();
     }
@@ -2174,37 +2302,58 @@
     return { cur: this.parseNumber(m[1]), max: this.parseNumber(m[2]) };
   };
 
-  Modules.autohunt.ensureOnGround = async function (groundSuffix, floor) {
+  Modules.autohunt.ensureOnGround = async function (
+    groundSuffix,
+    floor,
+    shouldCancel = Core.defaultShouldCancel
+  ) {
     if (this.findHuntX50Button(groundSuffix)) {
       if (floor) {
-        const floorSelected = await this.selectFloor(floor);
+        const floorSelected = await this.selectFloor(floor, shouldCancel);
         if (!floorSelected) return false;
       }
       return !!this.findHuntX50Button(groundSuffix);
     }
     try {
-      await Core.clickNavMenuSuffix('전투', groundSuffix);
+      await Core.clickNavMenuSuffix('전투', groundSuffix, shouldCancel);
     } catch (e) {
       Core.log('autohunt', `오류: ${e.message}`);
       return false;
     }
     await Core.sleep(600);
+    if (shouldCancel && shouldCancel()) return false;
     if (floor) {
-      const floorSelected = await this.selectFloor(floor);
+      const floorSelected = await this.selectFloor(floor, shouldCancel);
       if (!floorSelected) return false;
     }
-    return !!(await Core.waitFor(() => this.findHuntX50Button(groundSuffix), 8000));
+    return !!(await Core.waitFor(
+      () => this.findHuntX50Button(groundSuffix),
+      8000,
+      300,
+      shouldCancel
+    ));
   };
 
-  Modules.autohunt.selectFloor = async function (floor) {
+  Modules.autohunt.selectFloor = async function (
+    floor,
+    shouldCancel = Core.defaultShouldCancel
+  ) {
     const target = `${floor}층`;
-    const btn = await Core.waitFor(() => Core.allButtons().find((b) => b.textContent.trim() === target) || null, 6000);
+    const btn = await Core.waitFor(
+      () => Core.allButtons().find((b) => b.textContent.trim() === target) || null,
+      6000,
+      300,
+      shouldCancel
+    );
     if (!btn) {
       Core.log('autohunt', `경고: "${target}" 버튼을 찾지 못했습니다.`);
       return false;
     }
     if (btn.getAttribute('aria-pressed') !== 'true') {
-      btn.click();
+      if (!(await Core.safeClick(
+        () => Core.allButtons().find((b) => b.textContent.trim() === target) || null,
+        { beforeMin: 350, beforeMax: 700, shouldCancel }
+      ))) return false;
       await Core.sleep(500);
     }
     return true;
@@ -2332,7 +2481,10 @@
           Core.notifyStopped('autohunt', '사냥터 이동에 반복 실패하여 정지합니다. 화면 상태를 확인해주세요.');
           break;
         }
-        await Core.sleep(3000);
+        if (!(await Core.interruptibleSleep(
+          3000,
+          () => mod.stopRequested || !mod.running
+        ))) break;
         continue;
       }
 
@@ -2369,7 +2521,10 @@
           Core.notifyStopped('autohunt', '사냥 버튼 클릭에 반복 실패하여 정지합니다.');
           break;
         }
-        await Core.sleep(3000);
+        if (!(await Core.interruptibleSleep(
+          3000,
+          () => mod.stopRequested || !mod.running
+        ))) break;
         continue;
       }
 
@@ -2390,7 +2545,10 @@
           Core.notifyStopped('autohunt', '사냥 결과를 반복적으로 확인하지 못해 정지합니다.');
           break;
         }
-        await Core.sleep(3000);
+        if (!(await Core.interruptibleSleep(
+          3000,
+          () => mod.stopRequested || !mod.running
+        ))) break;
         continue;
       }
       consecutiveFailures = 0;
@@ -2849,9 +3007,16 @@
     return card.textContent.includes('오늘 완료');
   };
 
-  Modules.dungeon.goToDungeonSelect = async function () {
-    await Core.clickNavMenuExact('전투', '던전');
-    await Core.waitFor(() => Core.bodyText().includes('일일 던전'));
+  Modules.dungeon.goToDungeonSelect = async function (
+    shouldCancel = Core.defaultShouldCancel
+  ) {
+    await Core.clickNavMenuExact('전투', '던전', shouldCancel);
+    return !!(await Core.waitFor(
+      () => Core.bodyText().includes('일일 던전'),
+      15000,
+      300,
+      shouldCancel
+    ));
   };
 
   Modules.dungeon.scanEligibleDungeons = function () {
@@ -3409,7 +3574,9 @@
 
       const pick = this.pickShopCard(dungeonDef, affordableCards, isLastShopBeforeBoss);
       const isPremiumPick = pick && (this.isGodStrikeFamily(pick.card.label) || this.isAllStatsLabel(pick.card.label));
-      const shouldBuyNow = pick && (isLastShopBeforeBoss || rerollGuard === 0 || isPremiumPick);
+      // 일반 후보는 첫 화면이라는 이유만으로 즉시 사지 않는다. 보스 직전이거나
+      // 신의 일격/모든 스탯 계열을 찾았을 때만 구매하고, 그 외에는 리롤한다.
+      const shouldBuyNow = pick && (isLastShopBeforeBoss || isPremiumPick);
 
       if (shouldBuyNow) {
         let bought = false;
@@ -3817,6 +3984,7 @@
         '정확한 한 발': '칠색',
       },
       requiredLifePair: { names: ['라이프 드레인', '재생'], target: '칠색' },
+      collectionGate: ['관통', '집중', '정확한 한 발'],
       recommendedAbilities: [
         '매직컬 댄싱',
         '분노의 일격',
@@ -3842,6 +4010,7 @@
         '정확한 한 발': '금',
       },
       requiredLifePair: null,
+      collectionGate: ['마법검'],
       recommendedAbilities: ['독참', '상태이상공명', '도박사의 룰렛', '재생', '디버프 증폭', '고통의 공명'],
       recommendedCap: 2,
       mainStat: '지능',
@@ -3860,6 +4029,7 @@
         마나비전: '칠색',
       },
       requiredLifePair: null,
+      collectionGate: ['관통', '집중', '정확한 한 발'],
       recommendedAbilities: ['재생', '영혼 복제', '정복자의 발걸음'],
       recommendedCap: 2,
       mainStat: '지능',
@@ -4047,7 +4217,11 @@
     const names = abilities.map((a) => a.name);
     const profile = this.getJobProfile();
 
-    const tier1Names = Object.keys(profile.requiredTargets).filter((n) => n !== '급속 성장');
+    // requiredTargets는 제단 승급 목표이고, 수집 단계 종료 조건과는 분리한다.
+    // 둘을 묶으면 직업별 부가 목표 하나가 안 나왔다는 이유로 50층까지 일반
+    // 전투만 고르는 구조가 된다.
+    const tier1Names = profile.collectionGate ||
+      Object.keys(profile.requiredTargets).filter((n) => n !== '급속 성장');
     const tier1Owned = tier1Names.every((n) => names.includes(n));
     const lifeOwned = profile.requiredLifePair ? profile.requiredLifePair.names.some((n) => names.includes(n)) : true;
     if (!tier1Owned || !lifeOwned) return false;
@@ -4152,7 +4326,7 @@
         : ctx.currentAC < this.config.targetAC;
     if (acBehind) order.push('정신');
 
-    // 속도가 직업별 기준(물리딜 800 / 신술 600) 미만이면 속도, 아니면 직업별
+    // 속도가 직업별 기준(물리딜 800 / 신술·마술 700) 미만이면 속도, 아니면 직업별
     // 폴백 스탯(물리딜=행운, 신술=힘)을 고른다.
     order.push(ctx.mySpeed !== null && ctx.mySpeed < profile.speedThreshold ? '속도' : profile.fallbackStat);
     order.push(profile.fallbackStat, '속도');
@@ -4253,6 +4427,9 @@
   };
 
   Modules.deepdungeon.decideFloorEvent = async function (options) {
+    // 이전 층의 상점 진입 사유가 다음 상점까지 남으면 마술 상점 구매 정책이
+    // 엉뚱하게 재사용된다. 매 층의 결정을 시작할 때 반드시 초기화한다.
+    this.shopVisitReason = null;
     const hp = this.readHp();
     const hpPct = hp ? (hp.cur / hp.max) * 100 : 100;
     const floor = this.readFloor();
@@ -4650,6 +4827,7 @@
     // 하지 않는다. 물리딜/신술은 이 구분 없이 항상 기존 방식대로 동작한다.
     const statOnly = profile.buyEquipmentShards && this.shopVisitReason !== 'deliberate';
 
+    try {
     for (let i = 0; i < 8; i++) {
       const items = this.parseShopItems();
       if (items.length === 0) break;
@@ -4697,6 +4875,10 @@
       await Core.humanDelay(600, 1200);
     }
     return true;
+    } finally {
+      // 구매 도중 오류나 정지가 나도 다음 상점에 사유가 누수되지 않게 한다.
+      this.shopVisitReason = null;
+    }
   };
 
   Modules.deepdungeon.handleShadyMerchant = async function () {
@@ -4872,7 +5054,8 @@
   };
 
   Modules.deepdungeon.handleCompass = async function () {
-    const myAttr = this.readMyAttribute();
+    const combat = this.readCombatSummaryStats();
+    const myAttr = (combat && combat.attr) || this.readMyAttribute();
     const target = myAttr ? DD_ATTR_COUNTER[myAttr] : null;
     if (target) {
       const attrCard = this.findLeafCard(target);
@@ -4968,25 +5151,38 @@
     return true;
   };
 
-  Modules.deepdungeon.goToDeepDungeon = async function () {
-    await Core.clickNavMenuExact('전투', '심층 던전');
-    await Core.waitFor(() => (/deep-dungeon/.test(location.href) || Core.bodyText().includes('던전 진입') ? true : null));
+  Modules.deepdungeon.goToDeepDungeon = async function (
+    shouldCancel = Core.defaultShouldCancel
+  ) {
+    await Core.clickNavMenuExact('전투', '심층 던전', shouldCancel);
+    return !!(await Core.waitFor(
+      () => (/deep-dungeon/.test(location.href) || Core.bodyText().includes('던전 진입') ? true : null),
+      15000,
+      300,
+      shouldCancel
+    ));
   };
 
   // "기록" 탭으로 이동해서 "주간 누적 데미지" 값을 읽는다. 실패하면 null 반환.
-  Modules.deepdungeon.readWeeklyCumulativeDamage = async function () {
+  Modules.deepdungeon.readWeeklyCumulativeDamage = async function (
+    shouldCancel = Core.defaultShouldCancel
+  ) {
     const recordTab = await Core.retryStep('"기록" 탭 찾기', () => {
       const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
       return tabs.find((t) => t.textContent.trim() === '기록') || null;
-    });
+    }, { shouldCancel });
     if (!recordTab) return null;
-    recordTab.click();
+    if (!(await Core.safeClick(
+      () => Array.from(document.querySelectorAll('[role="tab"]'))
+        .find((t) => t.textContent.trim() === '기록') || null,
+      { beforeMin: 350, beforeMax: 750, shouldCancel }
+    ))) return null;
     await Core.humanDelay(600, 1200);
 
     const matched = await Core.retryStep('"주간 누적 데미지" 텍스트 확인', () => {
       const m = Core.bodyText().match(/주간\s*누적\s*데미지\s*([\d,]+)/);
       return m || null;
-    });
+    }, { shouldCancel });
     if (!matched) return null;
     return parseInt(matched[1].replace(/,/g, ''), 10);
   };
@@ -5149,7 +5345,14 @@
     // 수동 플레이로 이미 채워둔 경우) 새 런에 진입하지 않고 바로 정지한다.
     if (mod.config.retryIfWeeklyDamageUnder1M) {
       const startDamage = await mod.readWeeklyCumulativeDamage();
-      if (startDamage !== null && startDamage >= 1000000) {
+      if (startDamage === null) {
+        Core.notifyStopped(
+          'deepdungeon',
+          '시작 전 주간 누적 데미지를 읽지 못해 새 런에 진입하지 않고 정지합니다.'
+        );
+        return;
+      }
+      if (startDamage >= 1000000) {
         Core.notifyCompleted(
           'deepdungeon',
           `이미 주간 누적 데미지 ${startDamage.toLocaleString()} (100만 이상)라 시작하지 않고 정지합니다.`
@@ -5219,6 +5422,9 @@
             const enteredAgain = await mod.enterFreshRunIfNeeded();
             if (enteredAgain) {
               mod.cycleCount = 0;
+              mod.usedSmithyOnce = false;
+              mod.hpBeforeBattle = null;
+              mod.shopVisitReason = null;
               consecutiveNoProgress = 0;
               await Core.humanDelay(300, 700);
               continue;
@@ -5227,7 +5433,11 @@
             break;
           }
           if (weeklyDamage === null) {
-            Core.log('deepdungeon', '주간 누적 데미지를 확인하지 못해 안전하게 정지합니다.');
+            Core.notifyStopped(
+              'deepdungeon',
+              '주간 누적 데미지를 확인하지 못해 완료로 기록하지 않고 안전하게 정지합니다.'
+            );
+            break;
           } else {
             Core.log('deepdungeon', `주간 누적 데미지 ${weeklyDamage.toLocaleString()} (100만 초과) → 정지합니다.`);
           }
@@ -5655,7 +5865,10 @@
   };
 
   Modules.daily.verifyDungeon = async function () {
-    await Modules.dungeon.goToDungeonSelect();
+    const shouldCancel = () => this.stopRequested || !Core.dailyActive;
+    const arrived = await Modules.dungeon.goToDungeonSelect(shouldCancel);
+    if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
+    if (!arrived) throw new Error('던전 선택 화면 진입을 확인하지 못함');
     const remaining = Modules.dungeon.scanEligibleDungeons();
     if (remaining.length > 0) {
       throw new Error(`아직 입장 가능한 던전이 남아 있음: ${remaining.map((d) => d.label).join(', ')}`);
@@ -5664,8 +5877,14 @@
   };
 
   Modules.daily.verifyAutohunt = async function () {
+    const shouldCancel = () => this.stopRequested || !Core.dailyActive;
     const mod = Modules.autohunt;
-    const onGround = await mod.ensureOnGround(mod.config.groundSuffix, mod.config.floor);
+    const onGround = await mod.ensureOnGround(
+      mod.config.groundSuffix,
+      mod.config.floor,
+      shouldCancel
+    );
+    if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
     if (!onGround) throw new Error('사냥 종료 후 사냥터 화면을 확인하지 못함');
     const energy = mod.readEnergy();
     if (energy === null) throw new Error('사냥 종료 후 행동력을 읽지 못함');
@@ -5676,9 +5895,13 @@
   };
 
   Modules.daily.verifyDeepDungeon = async function () {
+    const shouldCancel = () => this.stopRequested || !Core.dailyActive;
     const mod = Modules.deepdungeon;
-    await mod.goToDeepDungeon();
-    const damage = await mod.readWeeklyCumulativeDamage();
+    const arrived = await mod.goToDeepDungeon(shouldCancel);
+    if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
+    if (!arrived) throw new Error('심층던전 화면 진입을 확인하지 못함');
+    const damage = await mod.readWeeklyCumulativeDamage(shouldCancel);
+    if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
     if (damage === null) throw new Error('심층던전 주간 누적 데미지를 읽지 못함');
     if (damage < 1000000) throw new Error(`주간 누적 데미지가 아직 100만 미만: ${damage.toLocaleString()}`);
     return `주간 누적 데미지 ${damage.toLocaleString()} 확인`;
@@ -5722,8 +5945,12 @@
     }
     if (step === 'deepdungeon') {
       const mod = Modules.deepdungeon;
-      await mod.goToDeepDungeon();
-      const before = await mod.readWeeklyCumulativeDamage();
+      const shouldCancel = () => this.stopRequested || !Core.dailyActive;
+      const arrived = await mod.goToDeepDungeon(shouldCancel);
+      if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
+      if (!arrived) throw new Error('심층던전 화면 진입을 확인하지 못함');
+      const before = await mod.readWeeklyCumulativeDamage(shouldCancel);
+      if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
       if (before === null) throw new Error('심층던전 시작 전 주간 누적 데미지를 읽지 못함');
       if (before >= 1000000) return `이미 주간 누적 데미지 ${before.toLocaleString()} - 실행 생략`;
 
@@ -6935,6 +7162,49 @@
     if (document.getElementById('lrm-panel')) return;
     buildPanel();
     Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 아이템 / 심층던전 / 보스 / 일일)');
+    if (Core.wasDiscarded) {
+      const state = Modules.daily.loadState();
+      let auth = null;
+      try {
+        auth = JSON.parse(sessionStorage.getItem(DAILY_AUTH_KEY) || 'null');
+      } catch (e) {
+        auth = null;
+      }
+      const canResumeDaily = !!(
+        state &&
+        auth &&
+        auth.schema === DAILY_AUTH_SCHEMA &&
+        auth.startedAt === state.startedAt
+      );
+      if (canResumeDaily) {
+        Modules.daily.stopRequested = false;
+        Core.dailyActive = true;
+        Modules.daily.running = true;
+        Core.backgroundKeeper.acquire('daily');
+        Core.log(
+          'core',
+          `Chrome 폐기 탭 복원 감지: 일일 ${state.index + 1}/${state.steps.length} 단계부터 안전 재개`
+        );
+        Core.sleep(1800)
+          .then(() => Modules.daily.mainLoop())
+          .catch((e) => {
+            Core.dailyActive = false;
+            Modules.daily.running = false;
+            Core.showBanner('daily', `폐기 탭 복구 중 오류: ${e.message}`, false);
+          })
+          .finally(() => Core.backgroundKeeper.release('daily'));
+      } else {
+        if (state) {
+          state.running = false;
+          Modules.daily.saveState(state);
+        }
+        sessionStorage.removeItem(DAILY_AUTH_KEY);
+        Core.log('core', 'Chrome 폐기 탭 복원 감지: 유효한 일일 실행 허가가 없어 일일 작업은 중단');
+      }
+      // 보스 큐는 아래 보스 엔진이 같은 조건(document.wasDiscarded + 현재
+      // sessionStorage 허가)을 다시 검증한 뒤에만 재개한다.
+      return;
+    }
     // 저장값만으로 자동화를 재개하지 않는다. 통합 일일 작업은 SPA 안에서
     // 연속 실행되며, 실제 새로고침/탭 재실행이 발생했다면 안전하게 중단한다.
     // 오래된 running 상태를 복구하면 동일 단계(특히 보스)를 처음부터 다시
@@ -7002,7 +7272,7 @@
   //     끝나 있으면 찾는 버튼이 없을 수 있음
   //   - 그래서 "고정 시간 대기 후 한 번만 확인"이 아니라, M.waitFor로
   //     원하는 상태가 나타날 때까지 반복 확인하는 방식을 같이 써야 함
-  M._workerSleepFn = (function () {
+  M._workerSleepFn = window.__lanisBackgroundSleep || (function () {
     try {
       const workerCode =
         'self.onmessage = function (e) {' +
@@ -7103,10 +7373,12 @@
         throttleAllowance += Math.min(excessDelay, maxThrottleAllowance - throttleAllowance);
       }
       lastTick = now;
-      if (now - startedAt >= timeoutMs + throttleAllowance) break;
       if (M.stopRequested) return null;
       const result = fn();
       if (result) return result;
+      // 숨은 탭에서 오래 지연된 뒤 돌아온 첫 tick에도 실제 준비 상태를 먼저
+      // 검사한다. 준비된 화면을 단순 시간 초과로 버리지 않는다.
+      if (now - startedAt >= timeoutMs + throttleAllowance) break;
       await M.sleep(intervalMs);
     }
     return null;
@@ -7265,10 +7537,19 @@
       let confirmationMutated = false;
       const observer = new MutationObserver((records) => {
         for (const record of records) {
-          const nodes = [record.target, ...record.addedNodes];
+          const nodes = [
+            ...record.addedNodes,
+            ...(record.type === 'characterData' ? [record.target] : []),
+          ];
           if (nodes.some((node) => {
-            const text = node && node.textContent ? node.textContent : '';
-            return text.includes(name) && text.includes('적용');
+            const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+            if (!el || !el.closest) return false;
+            const notice = el.matches('[role="alert"], [role="status"], .MuiSnackbar-root, .MuiAlert-root, [class*="toast"]')
+              ? el
+              : el.closest('[role="alert"], [role="status"], .MuiSnackbar-root, .MuiAlert-root, [class*="toast"]');
+            const text = notice && notice.textContent ? notice.textContent : '';
+            return text.includes(name) &&
+              (text.includes('적용했습니다') || text.includes('적용 완료') || text.includes('불러왔습니다'));
           })) {
             confirmationMutated = true;
             break;
@@ -7339,6 +7620,44 @@
     const freshStart = M.findConfirmInOpenDialog(['회복', '전투 시작', '회복 시작']) || startBtn;
     freshStart.click();
     await M.sleep(1800);
+  };
+
+  M.readDisplayedBattleTurn = () => {
+    const match = (document.body && document.body.textContent || '')
+      .match(/(\d+)\s*\/\s*(\d+)\s*턴/);
+    return match
+      ? { current: parseInt(match[1], 10), max: parseInt(match[2], 10) }
+      : null;
+  };
+
+  // 화면의 실제 턴을 우선하고, 렌더링이 늦을 때만 로컬 누적값을 사용한다.
+  // 회복 1회(2턴)도 같은 예산에 포함하므로 망령 자세 루프가 표시상 n턴보다
+  // 훨씬 많은 실제 턴을 쓰는 문제를 막는다.
+  M.createBattleTurnBudget = (fallbackMax = 150) => {
+    const initial = M.readDisplayedBattleTurn();
+    let used = initial ? initial.current : 0;
+    let max = initial ? initial.max : fallbackMax;
+    return {
+      async spend(turns, action) {
+        const shown = M.readDisplayedBattleTurn();
+        if (shown) {
+          used = Math.max(used, shown.current);
+          max = shown.max || max;
+        }
+        if (used + turns > max) return false;
+        await action();
+        used += turns;
+        return true;
+      },
+      current() {
+        const shown = M.readDisplayedBattleTurn();
+        if (shown) {
+          used = Math.max(used, shown.current);
+          max = shown.max || max;
+        }
+        return { used, max };
+      },
+    };
   };
 
   M.useScrolls = async (names) => {
@@ -8361,38 +8680,17 @@
   // 호출해야 오디오 자동재생 정책에 안 걸림.
   // ==========================================================================
   M.antiThrottle = {
-    ctx: null,
-    osc: null,
+    active: false,
     start() {
-      if (this.ctx) {
-        if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
-        return;
-      }
-      try {
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        const ctx = new Ctx();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        gain.gain.value = 0.002; // 완전 무음은 크롬 스로틀링 면제 대상이 아님(공식 확인)
-        // 사용자 청취 테스트: 0.002는 안 들리고 0.003부터 미세하게 들림.
-        // 거슬리지 않는 걸 우선해 0.002로 설정(사용자 요청) - 사람 귀엔 안
-        // 들려도 신호 자체는 0이 아니라서 크롬이 "재생 중"으로 인식할 수도
-        // 있지만, 인식 못 할 위험도 0.01보다 커짐. 실전에서 스로틀링 방지
-        // 효과가 없는 것 같으면 이 값을 다시 올려야 함.
-        osc.connect(gain).connect(ctx.destination);
-        osc.start();
-        this.ctx = ctx;
-        this.osc = osc;
-        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-      } catch (e) {
-        // 오디오 컨텍스트 생성 실패해도 매크로 자체는 계속 진행되게 조용히 무시
-      }
+      const keeper = window.__lanisBackgroundKeeper;
+      if (!keeper || this.active) return;
+      keeper.acquire('boss');
+      this.active = true;
     },
     stop() {
-      try { if (this.osc) this.osc.stop(); } catch (e) {}
-      try { if (this.ctx) this.ctx.close(); } catch (e) {}
-      this.ctx = null;
-      this.osc = null;
+      const keeper = window.__lanisBackgroundKeeper;
+      if (keeper && this.active) keeper.release('boss');
+      this.active = false;
     },
   };
 
@@ -8546,7 +8844,9 @@
       details.push({ label, achieved: orange });
     }
     return {
-      achieved: alreadyCleared ? labels.length : achieved,
+      // 로그에는 색상으로 실제 읽은 단계 수를 그대로 보여준다. 오늘 이미
+      // 처치했다는 재도전 상태는 중복 도전 방지용 exhausted에만 반영한다.
+      achieved,
       total: labels.length,
       exhausted: alreadyCleared || achieved >= labels.length,
       alreadyCleared,
@@ -8672,6 +8972,31 @@
     M.assertBossRunAuthorized(auth && auth.id);
     const selected = BOSS_ORDER.filter((key) => loadSelectedBosses().includes(key));
     if (selected.length === 0) throw new Error('선택한 보스가 없습니다.');
+
+    // Chrome이 실행 중인 탭을 폐기했다 복원한 경우에는 저장된 보스 큐가
+    // 현재 전투 체크포인트다. 먼저 목록으로 이동하면 진행 중 전투를 버리고
+    // 같은 보스를 처음부터 시작하므로, 큐를 그대로 끝낸 뒤 보상을 검증한다.
+    if (window.__lanisWasDiscarded === true && localStorage.getItem(QUEUE_KEY)) {
+      if (M.uiLog) M.uiLog('⏳ 폐기 탭 복구: 진행 중이던 보스 큐부터 재개');
+      if (!M.isRunning) await M.continueBossQueue();
+      await M.waitForBossQueueEnd();
+      if (location.pathname.replace(/\/$/, '') !== '/personal-boss') {
+        await M.goToBossListViaMenu();
+      }
+      const listReady = await M.waitForBossListReady(selected);
+      if (!listReady) throw new Error('복구된 보스 큐 종료 후 목록 렌더링을 확인하지 못했습니다.');
+      await M.claimBossRewardsAndVerify();
+      const failed = selected.filter((key) => {
+        const progress = M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label);
+        return !progress || !progress.exhausted;
+      });
+      if (failed.length) {
+        throw new Error(
+          `복구 후에도 주간 보상 완료를 확인하지 못함: ${failed.map((key) => BOSS_REGISTRY[key].label).join(', ')}`
+        );
+      }
+      return `폐기 탭에서 보스 큐 복구 및 선택 보스 ${selected.length}종 보상 확인`;
+    }
 
     if (location.pathname.replace(/\/$/, '') !== '/personal-boss') {
       await M.goToBossListViaMenu();
@@ -8906,9 +9231,9 @@
   function loadSelectedJob() {
     try {
       const value = localStorage.getItem(JOB_KEY);
-      return ['검술', '인술', '궁술', '체술', '마술'].includes(value) ? value : '궁술';
+      return ['검술', '인술', '궁술', '체술', '마술'].includes(value) ? value : null;
     } catch (e) {
-      return '궁술';
+      return null;
     }
   }
   function saveSelectedJob(value) {
@@ -8969,7 +9294,7 @@
     // 마지막으로 선택한 직업과 보스 체크 상태는 실행 큐와 별도로 영구 저장한다.
     // 새로고침이나 보스 화면 이동으로 스크립트가 다시 로드돼도 그대로 복원됨.
     const jobSelect = panel.querySelector('#lrm-boss-ref-job');
-    jobSelect.value = loadSelectedJob();
+    jobSelect.value = loadSelectedJob() || '';
     jobSelect.addEventListener('change', (e) => saveSelectedJob(e.target.value));
 
     const savedBosses = new Set(loadSelectedBosses());
@@ -9049,16 +9374,38 @@
   window.__mountLanisBossTool = buildPanel;
   buildPanel();
 
-  // 새로고침/재접속 시에는 절대 자동으로 보스를 시작하지 않는다.
+  // 일반 새로고침은 항상 중단한다. Chrome 메모리 절약으로 폐기된 탭만
+  // 현재 sessionStorage 실행 허가와 큐 authId가 모두 일치할 때 재개한다.
   (function resumePendingIfAny() {
-    localStorage.removeItem(PENDING_KEY);
-    localStorage.removeItem(QUEUE_KEY);
-    sessionStorage.removeItem(RUN_AUTH_KEY);
-    localStorage.setItem(STOP_LATCH_KEY, String(Date.now()));
-    M.stopRequested = true;
-    if (M.uiLog) M.uiLog('■ 새로고침 후 보스 자동 재개 차단 - 사용자가 시작을 눌러야 실행');
-    return;
-    /*
+    if (window.__lanisWasDiscarded !== true) {
+      localStorage.removeItem(PENDING_KEY);
+      localStorage.removeItem(QUEUE_KEY);
+      sessionStorage.removeItem(RUN_AUTH_KEY);
+      localStorage.setItem(STOP_LATCH_KEY, String(Date.now()));
+      M.stopRequested = true;
+      if (M.uiLog) M.uiLog('■ 새로고침 후 보스 자동 재개 차단 - 사용자가 시작을 눌러야 실행');
+      return;
+    }
+    // 일일 실행 중이라면 일일 오케스트레이터가 기존 큐를 이어받는다.
+    // 여기서 동시에 재개하면 같은 보스를 두 루프가 클릭할 수 있다.
+    let dailyState = null;
+    let dailyAuth = null;
+    try {
+      dailyState = JSON.parse(localStorage.getItem('lrm-daily-sequence-state') || 'null');
+      dailyAuth = JSON.parse(sessionStorage.getItem('lrm-daily-explicit-run-auth') || 'null');
+    } catch (e) {
+      dailyState = null;
+      dailyAuth = null;
+    }
+    if (
+      dailyState &&
+      dailyState.running &&
+      dailyAuth &&
+      dailyAuth.startedAt === dailyState.startedAt
+    ) {
+      if (M.uiLog) M.uiLog('⏳ Chrome 폐기 탭 복원: 일일 실행이 보스 큐를 이어받습니다.');
+      return;
+    }
     // 큐/pending 값은 과거 실행의 찌꺼기일 수 있다. 사용자가 현재 탭에서
     // 직접 시작해 발급된 허가가 없으면 어떤 경우에도 자동 실행하지 않는다.
     if (!sessionStorage.getItem(RUN_AUTH_KEY)) {
@@ -9148,7 +9495,6 @@
           });
       }, 1200); // 페이지가 완전히 로드될 시간을 조금 줌
     }
-    */
   })();
 
   // ==========================================================================
@@ -9535,45 +9881,50 @@
     const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
     const stopped = () => { if (M.stopRequested) { push('■ 사용자 요청으로 정지'); return true; } return false; };
     const getStance = async () => (await M.getValidBossStance(bossLabel)).stance;
+    const turnBudget = M.createBattleTurnBudget();
     const recoverUntilSafe = async () => {
       for (let i = 0; i < 10; i++) {
         const state = await M.getValidHpMpNumbers();
         const ratio = state.player.hp.cur / state.player.hp.max;
-        if (ratio > hpThreshold) return;
-        await M.clickRecover();
+        if (ratio > hpThreshold) return true;
+        if (!(await turnBudget.spend(2, () => M.clickRecover()))) return false;
         push(`HP ${Math.round(ratio * 100)}% -> 회복`);
       }
       throw new Error('망령: 10회 회복 후에도 HP 70% 초과 실패');
     };
     const safeTurn = async (turns) => {
-      await recoverUntilSafe();
-      await M.clickTurn(turns);
+      if (!(await recoverUntilSafe())) return false;
+      return turnBudget.spend(turns, () => M.clickTurn(turns));
     };
 
     // 공격 페이즈: 5턴 시도 후, 안 바뀌면 1턴씩 추가 시도 (버프 소멸 대기)
     const attackUntilFlip = async (label, maxTurns) => {
-      let stance = await getStance();
-      await safeTurn(5);
+      const stance = await getStance();
+      if (!(await safeTurn(5))) return false;
       let n = 5;
-      while ((await getStance()) === stance && n < maxTurns) {
+      let observed = await getStance();
+      while (observed === stance && n < maxTurns) {
         if (stopped()) return false;
-        await safeTurn(1);
+        if (!(await safeTurn(1))) return false;
         n++;
+        observed = await getStance();
       }
-      const ok = (await getStance()) !== stance;
+      const ok = observed !== stance;
       push(`[${label}] ${n}턴만에 ${ok ? '전환 성공' : '전환 실패'}: ` + JSON.stringify(await M.getValidBossStance(bossLabel)));
       return ok;
     };
     // 수비 페이즈: 1턴씩 시도 (스크롤 재사용 없음)
     const defendUntilFlip = async (label) => {
-      let stance = await getStance();
+      const stance = await getStance();
       let n = 0;
-      while ((await getStance()) === stance && n < maxDefendTurns) {
+      let observed = stance;
+      while (observed === stance && n < maxDefendTurns) {
         if (stopped()) return false;
-        await safeTurn(1);
+        if (!(await safeTurn(1))) return false;
         n++;
+        observed = await getStance();
       }
-      const ok = (await getStance()) !== stance;
+      const ok = observed !== stance;
       push(`[${label}] ${n}턴만에 ${ok ? '전환 성공' : '전환 실패'}: ` + JSON.stringify(await M.getValidBossStance(bossLabel)));
       return ok;
     };
@@ -9619,17 +9970,26 @@
       const hpRatio = state.player.hp.cur / state.player.hp.max;
       const mpRatio = state.player.mp.cur / state.player.mp.max;
       if (hpRatio <= hpThreshold) {
-        await M.clickRecover();
+        if (!(await turnBudget.spend(2, () => M.clickRecover()))) {
+          push('⛔ 실제 150턴 예산 소진 - 전투 중단');
+          break;
+        }
         push(`[딜 ${round}] HP ${Math.round(hpRatio * 100)}% -> 회복`);
       } else if (mpRatio <= mpThreshold) {
-        await M.clickRecover();
+        if (!(await turnBudget.spend(2, () => M.clickRecover()))) {
+          push('⛔ 실제 150턴 예산 소진 - 전투 중단');
+          break;
+        }
         push(`[딜 ${round}] MP ${Math.round(mpRatio * 100)}% -> 회복`);
       } else {
         if (attackCounter % 5 === 0) {
           try { await M.useScrolls(['공격']); push(`[딜 ${round}] 공격 스크롤 사용`); }
           catch (e) { push(`[딜 ${round}] 스크롤 실패(잔여 소진 추정): ` + e.message); }
         }
-        await M.clickTurn(1);
+        if (!(await turnBudget.spend(1, () => M.clickTurn(1)))) {
+          push('⛔ 실제 150턴 예산 소진 - 전투 중단');
+          break;
+        }
         attackCounter++;
         push(`[딜 ${round}] 1턴 공격 (누적 공격턴=${attackCounter})`);
       }
@@ -9764,44 +10124,49 @@
     const stopped = () => { if (M.stopRequested) { push('■ 사용자 요청으로 정지'); return true; } return false; };
     const getStance = async () => (await M.getValidBossStance(bossLabel)).stance;
     const getDef = async () => (await M.getValidBossStance(bossLabel)).def;
+    const turnBudget = M.createBattleTurnBudget();
     const recoverUntilSafe = async () => {
       for (let i = 0; i < 10; i++) {
         const state = await M.getValidHpMpNumbers();
         const ratio = state.player.hp.cur / state.player.hp.max;
-        if (ratio > hpThreshold) return;
-        await M.clickRecover();
+        if (ratio > hpThreshold) return true;
+        if (!(await turnBudget.spend(2, () => M.clickRecover()))) return false;
         push(`HP ${Math.round(ratio * 100)}% -> 회복`);
       }
-      throw new Error('망령: 10회 회복 후에도 HP 70% 초과 실패');
+      throw new Error(`망령: 10회 회복 후에도 HP ${Math.round(hpThreshold * 100)}% 초과 실패`);
     };
     const safeTurn = async (turns) => {
-      await recoverUntilSafe();
-      await M.clickTurn(turns);
+      if (!(await recoverUntilSafe())) return false;
+      return turnBudget.spend(turns, () => M.clickTurn(turns));
     };
 
     // 공격 페이즈: 5턴 시도 후, 안 바뀌면 1턴씩 추가 시도 (스크롤 없음)
     const attackUntilFlip = async (label, maxTurns) => {
-      let stance = await getStance();
-      await safeTurn(5);
+      const stance = await getStance();
+      if (!(await safeTurn(5))) return false;
       let n = 5;
-      while ((await getStance()) === stance && n < maxTurns) {
+      let observed = await getStance();
+      while (observed === stance && n < maxTurns) {
         if (stopped()) return false;
-        await safeTurn(1);
+        if (!(await safeTurn(1))) return false;
         n++;
+        observed = await getStance();
       }
-      const ok = (await getStance()) !== stance;
+      const ok = observed !== stance;
       push(`[${label}] ${n}턴만에 ${ok ? '전환 성공' : '전환 실패'}: ` + JSON.stringify(await M.getValidBossStance(bossLabel)));
       return ok;
     };
     const defendUntilFlip = async (label) => {
-      let stance = await getStance();
+      const stance = await getStance();
       let n = 0;
-      while ((await getStance()) === stance && n < maxDefendTurns) {
+      let observed = stance;
+      while (observed === stance && n < maxDefendTurns) {
         if (stopped()) return false;
-        await safeTurn(1);
+        if (!(await safeTurn(1))) return false;
         n++;
+        observed = await getStance();
       }
-      const ok = (await getStance()) !== stance;
+      const ok = observed !== stance;
       push(`[${label}] ${n}턴만에 ${ok ? '전환 성공' : '전환 실패'}: ` + JSON.stringify(await M.getValidBossStance(bossLabel)));
       return ok;
     };
@@ -9838,7 +10203,10 @@
       round++;
       const hpRatio = state.player.hp.cur / state.player.hp.max;
       if (hpRatio <= hpThreshold) {
-        await M.clickRecover();
+        if (!(await turnBudget.spend(2, () => M.clickRecover()))) {
+          push('⛔ 실제 150턴 예산 소진 - 전투 중단');
+          break;
+        }
         push(`[딜 ${round}] HP ${Math.round(hpRatio * 100)}% -> 회복`);
       } else {
         // 스크롤 패턴(1·2회차 공격+집중, 3·4회차 +방어)은 "실제 공격한
@@ -9852,7 +10220,10 @@
           await M.useScrolls(['공격', '집중', '방어']);
           push(`[딜 스크롤 공격${attackRound}회차] 공격+집중+방어`);
         }
-        await M.clickTurn(5);
+        if (!(await turnBudget.spend(5, () => M.clickTurn(5)))) {
+          push('⛔ 실제 150턴 예산 소진 - 전투 중단');
+          break;
+        }
       }
       state = (await M.getValidHpMpNumbers());
       push(`[딜 ${round}회차] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
@@ -9871,7 +10242,12 @@
   // ==========================================================================
   // 궁술 공략
   // ==========================================================================
-  M.archeryRecoverUntilAbove = async (hpThreshold, mpThreshold = null, push = null) => {
+  M.archeryRecoverUntilAbove = async (
+    hpThreshold,
+    mpThreshold = null,
+    push = null,
+    turnBudget = null
+  ) => {
     for (let i = 0; i < 10; i++) {
       const state = await M.getValidHpMpNumbers();
       const hpRatio = state.player.hp.cur / state.player.hp.max;
@@ -9879,7 +10255,13 @@
       const needsHp = hpRatio <= hpThreshold;
       const needsMp = mpThreshold !== null && mpRatio <= mpThreshold;
       if (!needsHp && !needsMp) return state;
-      await M.clickRecover();
+      if (turnBudget) {
+        if (!(await turnBudget.spend(2, () => M.clickRecover()))) {
+          throw new Error('궁술: 실제 전투 턴 예산이 부족해 회복을 중단합니다.');
+        }
+      } else {
+        await M.clickRecover();
+      }
       if (push) push(`회복: HP ${Math.round(hpRatio * 100)}%, MP ${Math.round(mpRatio * 100)}%`);
     }
     throw new Error('10회 회복 후에도 궁술 안전 기준을 충족하지 못함');
@@ -10060,31 +10442,41 @@
     const log = [];
     const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
     const stance = async () => (await M.getValidBossStance(bossLabel)).stance;
+    const turnBudget = M.createBattleTurnBudget();
 
     const safeTurn = async (turns, checkMp = false) => {
-      await M.archeryRecoverUntilAbove(hpThreshold, checkMp ? mpThreshold : null, push);
-      await M.clickTurn(turns);
+      await M.archeryRecoverUntilAbove(
+        hpThreshold,
+        checkMp ? mpThreshold : null,
+        push,
+        turnBudget
+      );
+      return turnBudget.spend(turns, () => M.clickTurn(turns));
     };
     const attackToDefense = async (firstCycle) => {
       const before = await stance();
-      await safeTurn(5);
+      if (!(await safeTurn(5))) return false;
       let used = 5;
-      while ((await stance()) === before && used < 8) {
-        await safeTurn(1);
+      let observed = await stance();
+      while (observed === before && used < 8) {
+        if (!(await safeTurn(1))) return false;
         used++;
+        observed = await stance();
       }
-      const ok = (await stance()) !== before;
+      const ok = observed !== before;
       push(`[공격→수비] ${used}턴, ${ok ? '성공' : '실패'}`);
       return ok;
     };
     const defenseToAttack = async () => {
       const before = await stance();
       let used = 0;
-      while ((await stance()) === before && used < maxDefendTurns) {
-        await safeTurn(1);
+      let observed = before;
+      while (observed === before && used < maxDefendTurns) {
+        if (!(await safeTurn(1))) return false;
         used++;
+        observed = await stance();
       }
-      const ok = (await stance()) !== before;
+      const ok = observed !== before;
       push(`[수비→공격] ${used}턴, ${ok ? '성공' : '실패'}`);
       return ok;
     };
@@ -10100,7 +10492,7 @@
     for (let cycle = 1; cycle <= 5; cycle++) {
       if (M.stopRequested) return { log, cleared: false };
       await M.applyBossPreset('공격');
-      await M.archeryRecoverUntilAbove(hpThreshold, null, push);
+      await M.archeryRecoverUntilAbove(hpThreshold, null, push, turnBudget);
       await M.useScrolls(['회피']);
       if (!(await attackToDefense(false))) return { log, cleared: false };
       await M.applyBossPreset('수비');
@@ -10120,12 +10512,15 @@
     let attackScrollsUsed = 0;
     for (let round = 1; state.boss.hp.cur > 0 && round <= maxDealRounds; round++) {
       if (M.stopRequested) return { log, cleared: false };
-      await M.archeryRecoverUntilAbove(hpThreshold, mpThreshold, push);
+      await M.archeryRecoverUntilAbove(hpThreshold, mpThreshold, push, turnBudget);
       if (attacks % 5 === 0 && attackScrollsUsed < 5) {
         await M.useScrolls(['공격']);
         attackScrollsUsed++;
       }
-      await M.clickTurn(1);
+      if (!(await turnBudget.spend(1, () => M.clickTurn(1)))) {
+        push('⛔ 실제 150턴 예산 소진 - 전투 중단');
+        break;
+      }
       attacks++;
       state = await M.getValidHpMpNumbers();
       push(`[딜 ${attacks}] bossHp=${state.boss.hp.cur}, 공격스크롤=${attackScrollsUsed}/5`);
@@ -10138,13 +10533,24 @@
   // --- 체술 공통 -------------------------------------------------------------
   // 실전 검증값:
   // 수호자 70%, 황제 60%, 엔트 50%, 망령 기믹 25%/75%, 최종 딜 70%.
-  M.martialRecover = async (threshold, push = null, inclusive = true) => {
+  M.martialRecover = async (
+    threshold,
+    push = null,
+    inclusive = true,
+    turnBudget = null
+  ) => {
     for (let i = 0; i < 10; i++) {
       const state = await M.getValidHpMpNumbers();
       const ratio = state.player.hp.cur / state.player.hp.max;
       const unsafe = inclusive ? ratio <= threshold : ratio < threshold;
       if (!unsafe) return state;
-      await M.clickRecover();
+      if (turnBudget) {
+        if (!(await turnBudget.spend(2, () => M.clickRecover()))) {
+          throw new Error('체술: 실제 전투 턴 예산이 부족해 회복을 중단합니다.');
+        }
+      } else {
+        await M.clickRecover();
+      }
       if (push) push(`내HP ${Math.round(ratio * 100)}% -> 회복`);
     }
     throw new Error(`체술: HP ${Math.round(threshold * 100)}% 안전선 회복 실패`);
@@ -10300,49 +10706,54 @@
     const log = [];
     const push = (s) => { log.push(s); if (M.uiLog) M.uiLog(s); };
     const stance = async () => (await M.getValidBossStance(bossLabel)).stance;
+    const turnBudget = M.createBattleTurnBudget();
 
     const defenseToAttack = async () => {
       await M.applyBossPreset('수비');
-      await M.martialRecover(0.25, push);
+      await M.martialRecover(0.25, push, true, turnBudget);
       const before = await stance();
+      let observed = before;
       for (let n = 1; n <= maxDefenseTurns; n++) {
-        await M.clickTurn(1);
-        if ((await stance()) !== before) return true;
+        if (!(await turnBudget.spend(1, () => M.clickTurn(1)))) return false;
+        observed = await stance();
+        if (observed !== before) return true;
       }
       return false;
     };
 
     const attackToDefense = async () => {
       await M.applyBossPreset('공격');
-      await M.martialRecover(0.25, push);
+      await M.martialRecover(0.25, push, true, turnBudget);
       await M.useScrolls(['방어']);
       const before = await stance();
-      await M.clickTurn(5);
+      if (!(await turnBudget.spend(5, () => M.clickTurn(5)))) return false;
       let used = 5;
-      while ((await stance()) === before && used < 8) {
-        await M.clickTurn(1);
+      let observed = await stance();
+      while (observed === before && used < 8) {
+        if (!(await turnBudget.spend(1, () => M.clickTurn(1)))) return false;
         used++;
+        observed = await stance();
       }
       push(`[공격→수비] ${used}턴`);
-      return (await stance()) !== before;
+      return observed !== before;
     };
 
     // 첫 사이클: 기력발산 10턴 -> 극딜 5턴 -> 공격+방어스크롤.
     await M.applyBossPreset('기력발산');
-    await M.clickTurn(10);
+    if (!(await turnBudget.spend(10, () => M.clickTurn(10)))) return { log, cleared: false };
     await M.applyBossPreset('극딜');
-    await M.clickTurn(5);
+    if (!(await turnBudget.spend(5, () => M.clickTurn(5)))) return { log, cleared: false };
     if (!(await attackToDefense())) return { log, cleared: false, retryRequired: true };
     if (!(await defenseToAttack())) return { log, cleared: false };
 
     // 공격+집중 3회와 방어 3회를 교대로 사용하면, 첫 방어를 포함해 총 10장.
     for (let cycle = 1; cycle <= 3; cycle++) {
       await M.applyBossPreset('기력발산');
-      await M.clickTurn(10);
-      await M.martialRecover(0.75, push);
+      if (!(await turnBudget.spend(10, () => M.clickTurn(10)))) return { log, cleared: false };
+      await M.martialRecover(0.75, push, true, turnBudget);
       await M.useScrolls(['공격', '집중']);
       await M.applyBossPreset('극딜');
-      await M.clickTurn(5);
+      if (!(await turnBudget.spend(5, () => M.clickTurn(5)))) return { log, cleared: false };
       if (!(await attackToDefense())) return { log, cleared: false, retryRequired: true };
       if (!(await defenseToAttack())) return { log, cleared: false };
     }
@@ -10350,8 +10761,11 @@
     await M.applyBossPreset('스크롤 이후');
     let state = await M.getValidHpMpNumbers();
     for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
-      await M.martialRecover(0.7, push, false);
-      await M.clickTurn(5);
+      await M.martialRecover(0.7, push, false, turnBudget);
+      if (!(await turnBudget.spend(5, () => M.clickTurn(5)))) {
+        push('⛔ 실제 150턴 예산 소진 - 전투 중단');
+        break;
+      }
       state = await M.getValidHpMpNumbers();
       push(`[최종 딜 ${r}] bossHp=${state.boss.hp.cur}`);
     }
@@ -10458,6 +10872,7 @@
   M.runVineEntMagic = async ({
     maxManaRecoveryRounds = 30,
     maxFinalCycles = 30,
+    sealHpThreshold = 0.7,
     finalHpThreshold = 0.6,
   } = {}) => {
     const log = [];
@@ -10467,6 +10882,9 @@
     let burn = false;
     await M.applyBossPreset('봉인');
     for (let used = 0; !sealed.has('휘감은 뿌리') && used < 45; used += 5) {
+      // 봉인/화상 단계도 실제 전투다. 딜 단계 전용 회복만 두면 약한
+      // 캐릭터가 기믹 완료 전에 사망할 수 있으므로 매 공격 전에 70%를 보장한다.
+      await M.magicRecover(sealHpThreshold, push);
       await M.clickTurn(5);
       for (const x of M.parseSealedAbilities(candidates)) sealed.add(x);
       if (sealed.has('노 컨디션') && !sealed.has('휘감은 뿌리') && !burn) {
