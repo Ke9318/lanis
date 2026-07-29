@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.12.0-stable
+// @version      1.12.1-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -7121,9 +7121,20 @@
   // 열린 모달로 취급되는 문제 방지)
   M.isVisible = (el) => {
     if (!el || !el.isConnected) return false;
-    if (el.getClientRects().length === 0) return false;
-    const style = getComputedStyle(el);
-    return style.visibility !== 'hidden' && style.display !== 'none';
+    // 숨겨진 이전 모달을 잘못 고르지 않도록 자기 자신뿐 아니라 조상까지
+    // CSS/aria 숨김 상태를 확인한다.
+    for (let node = el; node && node !== document.documentElement; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.visibility === 'hidden' || style.display === 'none') return false;
+      if (node.getAttribute && node.getAttribute('aria-hidden') === 'true') return false;
+    }
+    // Chrome은 백그라운드/최소화된 탭에서 레이아웃 계산을 생략해 실제로
+    // 열려 있는 프리셋 패널·확인 모달도 getClientRects()가 빈 배열로
+    // 보일 수 있다. 이 상태를 "숨김"으로 처리하면 특히 망령 진입 직후
+    // 첫 프리셋을 못 찾아 그대로 멈춘다. 숨은 탭에서는 CSS 숨김 여부만
+    // 확인하고, 포그라운드에서는 기존의 엄격한 레이아웃 검사를 유지한다.
+    if (!document.hidden && el.getClientRects().length === 0) return false;
+    return true;
   };
 
   M.findConfirmInOpenDialog = (candidates) => {
@@ -8465,6 +8476,11 @@
   M.getWeeklyRewardProgress = (bossLabel) => {
     const card = M.getBossCardContainer(bossLabel);
     if (!card) return null;
+    // 행동 버튼의 "재도전"은 이 보스를 오늘 이미 처치했다는 게임 자체의
+    // 확정 상태다. 보상을 받은 뒤에는 달성 아이콘의 주황색이 회색으로
+    // 바뀌거나 테마별 색상값이 달라질 수 있으므로 색상만 세면 0/8로
+    // 오판해 이미 잡은 보스를 다시 잡는다.
+    const alreadyCleared = M.isBossAlreadyCleared(bossLabel);
     const labels = ['클리어', '13%', '25%', '38%', '50%', '63%', '75%', '88%'];
     let achieved = 0;
     const details = [];
@@ -8487,7 +8503,13 @@
       if (orange) achieved++;
       details.push({ label, achieved: orange });
     }
-    return { achieved, total: labels.length, exhausted: achieved >= labels.length, details };
+    return {
+      achieved: alreadyCleared ? labels.length : achieved,
+      total: labels.length,
+      exhausted: alreadyCleared || achieved >= labels.length,
+      alreadyCleared,
+      details,
+    };
   };
 
   M.findBossRewardClaimButton = () =>
