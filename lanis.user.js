@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.5-stable
+// @version      1.13.6-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8114,11 +8114,18 @@
 
   M.findButtonByText = (text) =>
     M.queryAll('button').find(
-      (b) => b.textContent.trim() === text || b.getAttribute('aria-label') === text
+      (b) =>
+        (b.textContent.trim() === text || b.getAttribute('aria-label') === text) &&
+        (typeof M.isVisible !== 'function' || M.isVisible(b))
     ) || null;
 
   M.findLeafByExactText = (text) =>
-    M.queryAll('*').find((el) => el.children.length === 0 && el.textContent.trim() === text) ||
+    M.queryAll('*').find(
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim() === text &&
+        (typeof M.isVisible !== 'function' || M.isVisible(el))
+    ) ||
     null;
 
   // 확인/시작류 버튼은 반드시 "현재 열려있는 모달" 안에서만 찾는다
@@ -8167,38 +8174,108 @@
   };
 
   // --- 프리셋 -----------------------------------------------------------------
+  M.findBossPresetPanelTab = () => {
+    const candidates = M.queryAll('button').filter(
+      (button) => button.textContent.trim() === '프리셋' && M.isVisible(button)
+    );
+    return candidates.find((button) => {
+      let node = button.parentElement;
+      for (let depth = 0; node && depth < 7; depth++, node = node.parentElement) {
+        const labels = [...node.querySelectorAll('button')]
+          .filter(M.isVisible)
+          .map((item) => item.textContent.trim());
+        if (labels.includes('프리셋(구)') && labels.includes('종합')) return true;
+      }
+      return false;
+    }) || null;
+  };
+  M.isBossPresetPanelReady = () =>
+    M.queryAll('*').some(
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim() === '이 보스 전용' &&
+        M.isVisible(el)
+    );
   M.openPresetPanel = async () => {
     M.throwIfStopped();
-    const btn = await M.waitFor(() => M.findButtonByText('프리셋 변경'));
-    if (!btn) throw new Error('프리셋 변경 버튼 못찾음');
-    M.throwIfStopped();
-    btn.click();
-    // 전투 행동줄과 패널 내부에 "프리셋" 버튼이 각각 하나씩 존재한다.
-    // 첫 번째 버튼을 누르면 패널 탭이 바뀌지 않으므로, "프리셋(구)"와
-    // "종합" 탭을 함께 가진 패널 내부의 버튼만 찾는다.
-    const tab = await M.waitFor(() => {
-      const candidates = M.queryAll('button').filter((button) => button.textContent.trim() === '프리셋');
-      return candidates.find((button) => {
-        let node = button.parentElement;
-        for (let depth = 0; node && depth < 7; depth++, node = node.parentElement) {
-          const labels = [...node.querySelectorAll('button')].map((item) => item.textContent.trim());
-          if (labels.includes('프리셋(구)') && labels.includes('종합')) return true;
+    // 이미 보스 전용 목록이 열려 있으면 상단 토글을 다시 누르지 않는다.
+    // 열린 상태에서 "프리셋 변경"을 다시 누르면 구형 프리셋 화면으로
+    // 되돌아가며, 백그라운드 렌더링이 늦을 때 내부 탭 탐색이 실패한다.
+    if (M.isBossPresetPanelReady()) return true;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      M.throwIfStopped();
+      let tab = M.findBossPresetPanelTab();
+
+      // 패널 자체가 닫힌 경우에만 상단 토글을 누른다. 숨겨진 이전 전투의
+      // 버튼을 선택하지 않도록 현재 보이는 버튼만 허용한다.
+      if (!tab) {
+        const toggle = await M.waitFor(
+          () => M.queryAll('button').find(
+            (button) =>
+              M.isVisible(button) &&
+              (
+                button.textContent.trim() === '프리셋 변경' ||
+                button.getAttribute('aria-label') === '프리셋 변경'
+              )
+          ) || null,
+          5000
+        );
+        if (toggle) {
+          M.throwIfStopped();
+          toggle.click();
+          tab = await M.waitFor(
+            () => M.findBossPresetPanelTab() || (M.isBossPresetPanelReady() ? true : null),
+            7000,
+            200
+          );
         }
-        return false;
-      }) || null;
-    }, 5000);
-    if (!tab) throw new Error('프리셋 패널 내부의 "프리셋" 탭을 못찾음');
-    M.throwIfStopped();
-    tab.click();
-    const ready = await M.waitFor(
-      () => M.queryAll('*').some((el) => el.children.length === 0 && el.textContent.trim() === '이 보스 전용'),
-      5000
-    );
-    if (!ready) throw new Error('보스 전용 프리셋 목록 전환 실패');
+      }
+
+      if (M.isBossPresetPanelReady()) return true;
+      if (tab && tab !== true) {
+        M.throwIfStopped();
+        tab.click();
+        const ready = await M.waitFor(
+          () => M.isBossPresetPanelReady() || null,
+          7000,
+          200
+        );
+        if (ready) return true;
+      }
+
+      if (attempt < 3) await M.humanPause(350, 700);
+    }
+    throw new Error('보스 전용 프리셋 패널을 3회 시도했지만 열지 못함');
   };
   M.closePresetPanel = () => {
-    const b = M.findButtonByText('프리셋 패널 닫기');
+    const b = M.queryAll('button').find(
+      (button) =>
+        M.isVisible(button) &&
+        (
+          button.textContent.trim() === '프리셋 패널 닫기' ||
+          button.getAttribute('aria-label') === '프리셋 패널 닫기'
+        )
+    ) || null;
     if (b) b.click();
+    return !!b;
+  };
+  M.isBossPresetPanelOpen = () =>
+    M.isBossPresetPanelReady() || !!M.findBossPresetPanelTab();
+  M.closeBossPresetPanelAndWait = async () => {
+    if (!M.isBossPresetPanelOpen()) return true;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      M.throwIfStopped();
+      M.closePresetPanel();
+      const closed = await M.waitFor(
+        () => !M.isBossPresetPanelOpen() ? true : null,
+        5000,
+        200
+      );
+      if (closed) return true;
+      if (attempt < 3) await M.humanPause(250, 500);
+    }
+    throw new Error('프리셋 패널 닫기를 3회 시도했지만 닫힘을 확인하지 못함');
   };
   M.findBossPresetOption = (name) => {
     const leaves = M.queryAll('*').filter(
@@ -8219,7 +8296,7 @@
       .replace(/\s+/g, ' ')
       .trim();
   M.findBossPresetCard = (optionLeaf) => {
-    let node = optionLeaf && optionLeaf.parentElement;
+    let node = optionLeaf;
     for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
       const exactLabels = new Set(
         [...node.querySelectorAll('*')]
@@ -8301,12 +8378,39 @@
     expected.weapon === actual.weapon &&
     expected.armor === actual.armor &&
     expected.accessory === actual.accessory;
+  M.findBossPresetVerificationCard = (expectedEquipment, targetCard) => {
+    const seen = new Set();
+    const weaponLabels = M.queryAll('*').filter(
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim() === '무기' &&
+        M.isVisible(el)
+    );
+    for (const label of weaponLabels) {
+      const card = M.findBossPresetCard(label);
+      if (!card || card === targetCard || seen.has(card) || !M.isVisible(card)) continue;
+      seen.add(card);
+      const equipment = M.readBossPresetEquipmentFingerprint(card);
+      if (
+        equipment &&
+        !M.bossEquipmentFingerprintMatches(expectedEquipment, equipment)
+      ) {
+        const name = [...card.querySelectorAll('p')]
+          .map((el) => el.textContent.trim())
+          .find((text) => text && !['무기', '방어', '장신'].includes(text)) ||
+          '검증용 프리셋';
+        return { card, equipment, name };
+      }
+    }
+    return null;
+  };
   M.formatBossEquipmentFingerprint = (fingerprint) => fingerprint
     ? `${fingerprint.weapon} / ${fingerprint.armor} / ${fingerprint.accessory}`
     : '읽기 실패';
   M.applyBossPreset = async (name, { requireConfirmation = true, attempts = 3 } = {}) => {
     // 새 프리셋 전환을 시작하는 순간 이전 프리셋의 공격 허가를 폐기한다.
     // 적용 확인이 실패하면 이전 봉인 프리셋 상태로 공격을 이어갈 수 없다.
+    const previousPreset = M.currentBossPreset;
     M.currentBossPreset = null;
     let confirmed = false;
     for (let attempt = 1; attempt <= attempts && !confirmed; attempt++) {
@@ -8332,10 +8436,98 @@
       // 현재 보스 전용 프리셋은 성공 토스트를 만들지 않는다. 카드 전체에 걸린
       // 클릭 핸들러를 정확히 누른 뒤, 전투 캐릭터 카드의 무기·방어구·장신구가
       // 대상 카드와 일치하는지를 실제 적용 증거로 사용한다.
-      const clickTarget = M.findBossPresetCard(fresh) ||
+      let clickTarget = M.findBossPresetCard(fresh) ||
         fresh.closest('button, [role="button"], [tabindex]') ||
         fresh;
+      let actualBefore = M.readLiveBossEquipmentFingerprint();
+      let requiresFreshSuccessNotice =
+        previousPreset !== name &&
+        M.bossEquipmentFingerprintMatches(expectedEquipment, actualBefore);
+      // 새 전투처럼 현재 프리셋 이름을 신뢰할 수 없는데 장비만 이미 같으면,
+      // 대상 클릭이 먹히지 않아도 즉시 성공으로 오인할 수 있다. 장비가 다른
+      // 검증용 프리셋으로 한 번 이동한 뒤 대상 장비로 돌아와 실제 클릭 성공을
+      // 증명한다. 이전 단계에서 같은 이름을 이미 확인한 경우만 이 왕복을 생략한다.
+      if (
+        previousPreset !== name &&
+        M.bossEquipmentFingerprintMatches(expectedEquipment, actualBefore)
+      ) {
+        const verification = M.findBossPresetVerificationCard(
+          expectedEquipment,
+          clickTarget
+        );
+        if (!verification) {
+          // 다른 장비 카드가 없어도 게임이 클릭 직후 내보내는 정확한 성공
+          // 알림을 새로 관찰하면 같은 장비의 어빌리티 프리셋을 검증할 수 있다.
+          if (M.uiLog) {
+            M.uiLog(
+              `🔎 프리셋 "${name}" 동일 장비: 새 적용 성공 알림으로 확인`
+            );
+          }
+        } else {
+          if (M.uiLog) {
+            M.uiLog(
+              `↔ 프리셋 "${name}" 동일 장비 오인 방지: ` +
+              `"${verification.name}"으로 이동 후 재적용`
+            );
+          }
+          M.throwIfStopped();
+          verification.card.click();
+          const moved = await M.waitFor(() => {
+            const actual = M.readLiveBossEquipmentFingerprint();
+            return M.bossEquipmentFingerprintMatches(
+              verification.equipment,
+              actual
+            ) ? actual : null;
+          }, 5000, 150);
+          if (!moved) {
+            M.closePresetPanel();
+            if (attempt < attempts) {
+              if (M.uiLog) {
+                M.uiLog(
+                  `↻ 프리셋 "${name}" 검증용 장비 전환 실패 ` +
+                  `(${attempt}/${attempts}) - 다시 시도`
+                );
+              }
+              await M.humanPause(500, 900);
+              continue;
+            }
+            throw new Error(
+              `프리셋 "${name}" 적용 검증용 장비 전환을 ${attempts}회 시도했지만 확인하지 못함`
+            );
+          }
+          actualBefore = moved || actualBefore;
+          requiresFreshSuccessNotice = false;
+          // 검증용 프리셋 클릭으로 React가 카드 DOM을 다시 만들 수 있다.
+          // 전환 전의 노드를 그대로 클릭하면 이미 분리된(stale) 노드라서 아무
+          // 반응이 없는데도 장비 비교만 기다리게 된다. 대상 카드를 반드시
+          // 현재 DOM에서 다시 찾아 클릭한다.
+          const refreshedTarget = M.findBossPresetOption(name);
+          clickTarget = refreshedTarget && (
+            M.findBossPresetCard(refreshedTarget) ||
+            refreshedTarget.closest('button, [role="button"], [tabindex]') ||
+            refreshedTarget
+          );
+          if (!clickTarget || !clickTarget.isConnected) {
+            M.closePresetPanel();
+            throw new Error(`프리셋 "${name}" 검증 전환 후 대상 카드를 다시 찾지 못했습니다.`);
+          }
+        }
+      } else if (
+        previousPreset === name &&
+        M.bossEquipmentFingerprintMatches(expectedEquipment, actualBefore)
+      ) {
+        confirmed = true;
+        await M.closeBossPresetPanelAndWait();
+        if (M.uiLog) {
+          M.uiLog(
+            `✓ 프리셋 "${name}" 이전 적용 상태 유지 확인: ` +
+            M.formatBossEquipmentFingerprint(actualBefore)
+          );
+        }
+        break;
+      }
       let confirmationFailureText = '';
+      let confirmationSuccessText = '';
       const observer = new MutationObserver((records) => {
         const noticeSelector =
           '[role="alert"], [role="status"], .MuiSnackbar-root, .MuiAlert-root, ' +
@@ -8378,6 +8570,9 @@
                 confirmationFailureText = text;
                 break;
               }
+              if (verdict === 'success') {
+                confirmationSuccessText = text;
+              }
             }
             if (confirmationFailureText) break;
           }
@@ -8393,7 +8588,10 @@
           () => {
             if (confirmationFailureText) return { failed: true };
             const actualEquipment = M.readLiveBossEquipmentFingerprint();
-            if (M.bossEquipmentFingerprintMatches(expectedEquipment, actualEquipment)) {
+            if (
+              M.bossEquipmentFingerprintMatches(expectedEquipment, actualEquipment) &&
+              (!requiresFreshSuccessNotice || confirmationSuccessText)
+            ) {
               return { failed: false, actualEquipment };
             }
             return null;
@@ -8406,7 +8604,7 @@
       } finally {
         observer.disconnect();
       }
-      M.closePresetPanel();
+      await M.closeBossPresetPanelAndWait();
       if (confirmationFailureText) {
         throw new Error(
           `프리셋 "${name}" 적용을 게임이 거부했습니다: ${confirmationFailureText}`
@@ -8439,11 +8637,33 @@
   };
 
   // --- 턴 진행 / 회복 / 스크롤 --------------------------------------------------
+  M.waitForBattleTurnAdvance = async (beforeTurn, actionLabel) => {
+    if (!beforeTurn) {
+      throw new Error(`${actionLabel} 전 현재 전투 턴을 읽지 못해 클릭을 중단합니다.`);
+    }
+    const advanced = await M.waitFor(() => {
+      const shown = M.readDisplayedBattleTurn();
+      if (shown && shown.current > beforeTurn.current) return shown;
+      if (typeof M.findBossClearPopup === 'function' && M.findBossClearPopup()) {
+        return { cleared: true };
+      }
+      return null;
+    }, 10000, 150);
+    if (!advanced) {
+      throw new Error(
+        `${actionLabel} 클릭 후 턴 증가를 확인하지 못했습니다. ` +
+        `클릭 누락 가능성이 있어 중복 공격 없이 중단합니다.`
+      );
+    }
+    return advanced;
+  };
   M.clickTurn = async (n) => {
     M.throwIfStopped();
     if (!M.currentBossPreset) {
       throw new Error('적용이 확인된 보스 프리셋이 없어 공격을 차단합니다.');
     }
+    const beforeTurn = M.readDisplayedBattleTurn();
+    if (!beforeTurn) throw new Error('공격 전 현재 전투 턴을 읽지 못함');
     const btn = await M.waitFor(() => M.findButtonByText(`턴 진행${n}턴`));
     if (!btn) throw new Error('턴 진행 버튼 못찾음: ' + n);
     M.throwIfStopped();
@@ -8455,13 +8675,13 @@
     M.throwIfStopped();
     const freshStart = M.findConfirmInOpenDialog(['전투 시작']) || startBtn;
     freshStart.click();
-    // 턴 진행 결과가 로그/HP에 반영될 시간을 기다림 (고정이지만, 이후
-    // 각 단계에서 다시 waitFor로 실제 결과를 확인하므로 큰 문제 없음)
-    await M.sleep(1800);
+    return await M.waitForBattleTurnAdvance(beforeTurn, `${n}턴 공격`);
   };
 
   M.clickRecover = async () => {
     M.throwIfStopped();
+    const beforeTurn = M.readDisplayedBattleTurn();
+    if (!beforeTurn) throw new Error('회복 전 현재 전투 턴을 읽지 못함');
     const btn = await M.waitFor(() => M.findButtonByText('회복2턴'));
     if (!btn) throw new Error('회복 버튼 못찾음');
     M.throwIfStopped();
@@ -8472,15 +8692,25 @@
     M.throwIfStopped();
     const freshStart = M.findConfirmInOpenDialog(['회복', '전투 시작', '회복 시작']) || startBtn;
     freshStart.click();
-    await M.sleep(1800);
+    return await M.waitForBattleTurnAdvance(beforeTurn, '회복');
   };
 
   M.readDisplayedBattleTurn = () => {
-    const match = (document.body && document.body.textContent || '')
-      .match(/(\d+)\s*\/\s*(\d+)\s*턴/);
-    return match
-      ? { current: parseInt(match[1], 10), max: parseInt(match[2], 10) }
-      : null;
+    const matches = M.queryAll('*')
+      .filter(
+        (el) =>
+          el.children.length === 0 &&
+          M.isVisible(el) &&
+          /^\d+\s*\/\s*\d+\s*턴$/.test(el.textContent.trim())
+      )
+      .map((el) => el.textContent.trim().match(/^(\d+)\s*\/\s*(\d+)\s*턴$/))
+      .filter(Boolean)
+      .map((match) => ({
+        current: parseInt(match[1], 10),
+        max: parseInt(match[2], 10),
+      }));
+    if (matches.length !== 1) return null;
+    return matches[0];
   };
 
   // 화면의 실제 턴을 우선하고, 렌더링이 늦을 때만 로컬 누적값을 사용한다.
@@ -8513,9 +8743,37 @@
     };
   };
 
+  M.readBattleScrollUsage = () => {
+    const button = M.queryAll('button').find(
+      (el) => M.isVisible(el) && el.textContent.trim().startsWith('전투 스크롤 사용')
+    );
+    if (!button) return null;
+    const match = button.textContent.match(/\((\d+)\s*\/\s*(\d+)\)/);
+    return match
+      ? {
+          used: parseInt(match[1], 10),
+          max: parseInt(match[2], 10),
+        }
+      : null;
+  };
+  M.getEffectiveBattleScrollLimit = (configuredLimit = 15) => {
+    const displayed = M.readBattleScrollUsage();
+    return displayed ? Math.min(configuredLimit, displayed.max) : configuredLimit;
+  };
+  M.canUseMoreBattleScrolls = (used, configuredLimit = 15) =>
+    used < M.getEffectiveBattleScrollLimit(configuredLimit);
   M.useScrolls = async (names) => {
     M.throwIfStopped();
-    const openBtn = await M.waitFor(() => M.queryAll('button').find((b) => b.textContent.trim().startsWith('전투 스크롤 사용')));
+    const beforeUsage = M.readBattleScrollUsage();
+    if (!beforeUsage) throw new Error('전투 스크롤 사용 전 현재 사용 수를 읽지 못함');
+    if (beforeUsage.used >= beforeUsage.max) {
+      throw new Error(
+        `전투 스크롤 사용 한도 ${beforeUsage.max}/${beforeUsage.max}에 도달했습니다.`
+      );
+    }
+    const openBtn = await M.waitFor(() => M.queryAll('button').find(
+      (b) => M.isVisible(b) && b.textContent.trim().startsWith('전투 스크롤 사용')
+    ));
     if (!openBtn) throw new Error('전투 스크롤 사용 버튼 못찾음');
     M.throwIfStopped();
     openBtn.click();
@@ -8539,7 +8797,13 @@
       // 원하는 스크롤이 전부 이미 활성 상태 - 새로 쓸 필요 없으니 취소로 닫음
       const cancelBtn = M.findConfirmInOpenDialog(['취소']);
       if (cancelBtn) cancelBtn.click();
-      return;
+      const closed = await M.waitFor(
+        () => !M.findLeafByExactText(`스크롤:${names[0]}`) ? true : null,
+        5000,
+        150
+      );
+      if (!closed) throw new Error('활성 스크롤 확인창을 닫지 못함');
+      return { ...beforeUsage, newlySelected: 0 };
     }
     const confirmPattern = /^\d+개 스크롤 사용$/;
     const confirmBtn = await M.waitFor(() => M.findConfirmByPatternInOpenDialog(confirmPattern));
@@ -8548,28 +8812,57 @@
     M.throwIfStopped();
     const freshConfirm = M.findConfirmByPatternInOpenDialog(confirmPattern) || confirmBtn;
     freshConfirm.click();
-    await M.sleep(800);
+    const applied = await M.waitFor(() => {
+      if (M.findConfirmByPatternInOpenDialog(confirmPattern)) return null;
+      const after = M.readBattleScrollUsage();
+      if (!after) return null;
+      return after.used >= beforeUsage.used + newlySelected ? after : null;
+    }, 8000, 150);
+    if (!applied) {
+      throw new Error(
+        `스크롤 ${newlySelected}개 사용 후 사용 수 증가를 확인하지 못했습니다. ` +
+        '중복 사용 없이 중단합니다.'
+      );
+    }
+    return { ...applied, newlySelected };
   };
 
-  // 수호자·황제·엔트는 전투당 최대 15장, 망령은 10장이다. 직업별 배치
-  // 패턴은 그대로 유지하면서 남은 한도보다 배치가 크면 앞쪽 스크롤만
-  // 사용한다(예: 14장 사용 후 공격+집중 배치라면 공격 1장만 사용).
+  // 전투별 스크롤 한도는 화면의 "전투 스크롤 사용 (사용/최대)" 값을
+  // 기준으로 한다. 수호자 화면이 7/7인데 로컬 상수 15만 믿으면 보스가
+  // 살아 있을 때 존재하지 않는 8번째 사용을 시도한다. 직업별 배치 상한과
+  // 화면 한도 중 작은 값을 사용하고, 재개 시 화면 사용량도 함께 반영한다.
   M.useScrollsWithinLimit = async (names, used, limit = 15) => {
-    const remaining = Math.max(0, limit - used);
-    if (remaining === 0) return used;
+    const displayed = M.readBattleScrollUsage();
+    const effectiveLimit = displayed
+      ? Math.min(limit, displayed.max)
+      : limit;
+    const effectiveUsed = displayed
+      ? Math.max(used, displayed.used)
+      : used;
+    const remaining = Math.max(0, effectiveLimit - effectiveUsed);
+    if (remaining === 0) return effectiveUsed;
     const batch = names.slice(0, remaining);
-    if (batch.length === 0) return used;
-    await M.useScrolls(batch);
-    return used + batch.length;
+    if (batch.length === 0) return effectiveUsed;
+    const result = await M.useScrolls(batch);
+    const consumed = result && Number.isInteger(result.newlySelected)
+      ? result.newlySelected
+      : batch.length;
+    return effectiveUsed + consumed;
   };
 
   // --- 상태 읽기 (HP/MP, 봉인된 어빌리티) --------------------------------------
   M.getHpMpNumbers = () => {
     const hpLabels = M.queryAll('*').filter(
-      (el) => el.children.length === 0 && el.textContent.trim() === 'HP'
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim() === 'HP' &&
+        M.isVisible(el)
     );
     const mpLabels = M.queryAll('*').filter(
-      (el) => el.children.length === 0 && el.textContent.trim() === 'MP'
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim() === 'MP' &&
+        M.isVisible(el)
     );
     // React가 다시 그리는 찰나에 라벨이 아직 없거나 숫자 파싱이 실패하는
     // 경우가 있음(실전에서 확인 가능성 지적됨). 예외를 던지는 대신 null을
@@ -8606,7 +8899,10 @@
   // 전투 기록 로그 컨테이너 (문서 전체로 범위가 새지 않도록 상한을 둠)
   M.getLogContainer = () => {
     const marker = M.queryAll('*').find(
-      (el) => el.children.length === 0 && el.textContent.trim().startsWith('전투 기록 (')
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim().startsWith('전투 기록 (') &&
+        M.isVisible(el)
     );
     if (!marker) return null;
     let container = marker.parentElement;
@@ -8717,7 +9013,7 @@
     const nums = [];
     for (let i = idx + 1; i < all.length && nums.length < 2; i++) {
       const el = all[i];
-      if (el.children.length === 0) {
+      if (el.children.length === 0 && M.isVisible(el)) {
         const t = el.textContent.trim();
         if (/^\d+$/.test(t)) nums.push(parseInt(t, 10));
       }
@@ -8762,7 +9058,7 @@
     const idx = all.indexOf(heading);
     for (let i = idx + 1; i < all.length; i++) {
       const el = all[i];
-      if (el.children.length === 0) {
+      if (el.children.length === 0 && M.isVisible(el)) {
         const t = el.textContent.trim();
         if (t === 'HP') break;
         if (ELEMENTS.includes(t)) return t;
@@ -8912,6 +9208,7 @@
     const matches = M.queryAll('*')
       .filter((el) =>
         el.children.length === 0 &&
+        M.isVisible(el) &&
         Object.prototype.hasOwnProperty.call(BOSS_JOB_BY_CLASS_NAME, el.textContent.trim())
       )
       .map((el) => el.textContent.trim());
@@ -8963,6 +9260,50 @@
   // 지우면 클릭 직전 저장된 페이지 상태나 다른 일일 실행 경로가 다시 큐를
   // 만들 수 있으므로, 명시적인 다음 시작 전까지 자동 재개를 금지한다.
   const STOP_LATCH_KEY = 'lrm-boss-ref-user-stopped';
+  M.parseBossQueueState = (raw) => {
+    try {
+      const queue = JSON.parse(raw || 'null');
+      if (
+        !queue ||
+        !Array.isArray(queue.remaining) ||
+        queue.remaining.length > BOSS_ORDER.length ||
+        new Set(queue.remaining).size !== queue.remaining.length ||
+        typeof queue.authId !== 'string' ||
+        queue.authId.trim() === '' ||
+        queue.remaining.some((key) => !BOSS_REGISTRY[key])
+      ) {
+        throw new Error('필수 필드가 없거나 보스 키가 잘못됨');
+      }
+      if (
+        queue.attempts !== undefined &&
+        (!Number.isInteger(queue.attempts) || queue.attempts < 0 || queue.attempts > 3)
+      ) {
+        throw new Error('재시도 횟수가 잘못됨');
+      }
+      if (
+        queue.entryFailStreak !== undefined &&
+        (!Number.isInteger(queue.entryFailStreak) ||
+          queue.entryFailStreak < 0 ||
+          queue.entryFailStreak > 3)
+      ) {
+        throw new Error('진입 실패 횟수가 잘못됨');
+      }
+      if (
+        queue.failedLabels !== undefined &&
+        (!Array.isArray(queue.failedLabels) ||
+          queue.failedLabels.some((label) => typeof label !== 'string'))
+      ) {
+        throw new Error('실패 목록이 잘못됨');
+      }
+      if (!Array.isArray(queue.failedLabels)) queue.failedLabels = [];
+      return queue;
+    } catch (error) {
+      localStorage.removeItem(QUEUE_KEY);
+      throw new Error(
+        `저장된 보스 큐가 손상되어 안전하게 폐기했습니다: ${error.message}`
+      );
+    }
+  };
 
   M.clearBossRunState = () => {
     M.stopRequested = true;
@@ -9063,7 +9404,12 @@
   // 이름이 일치하는 모든 후보를 문서 순서대로 순회하며, 실제로 도전 버튼을
   // 찾을 수 있는 후보를 사용한다.
   M.findAllLeavesByExactText = (text) =>
-    M.queryAll('*').filter((el) => el.children.length === 0 && el.textContent.trim() === text);
+    M.queryAll('*').filter(
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim() === text &&
+        M.isVisible(el)
+    );
 
   const BOSS_CARD_BOUNDARY_NAMES = [
     '타락한 수호자', '공허의 황제', '지하를 휘감은 엔트', '지하의 망령',
@@ -9078,7 +9424,12 @@
       if (headingIdx === -1) continue;
       for (let i = headingIdx + 1; i < all.length; i++) {
         const el = all[i];
-        if (el.tagName === 'BUTTON' && ['도전하기', '계속하기', '재도전'].includes(el.textContent.trim())) {
+        if (!M.isVisible(el)) continue;
+        if (
+          el.tagName === 'BUTTON' &&
+          M.isVisible(el) &&
+          ['도전하기', '계속하기', '재도전'].includes(el.textContent.trim())
+        ) {
           return el;
         }
         if (el.children.length === 0) {
@@ -9108,7 +9459,7 @@
       if (start < 0) continue;
       for (let i = start + 1; i < all.length; i++) {
         const el = all[i];
-        if (el.children.length !== 0) continue;
+        if (!M.isVisible(el) || el.children.length !== 0) continue;
         const text = el.textContent.trim();
         if (text !== bossLabel && BOSS_CARD_BOUNDARY_NAMES.includes(text)) break;
         if (elements.includes(text)) return text;
@@ -9159,7 +9510,9 @@
 
   M.getCharacterElementOnStatus = () => {
     const leaf = M.queryAll('*').find((el) =>
-      el.children.length === 0 && /^속성\s*:\s*(불|물|번개|별|바람|빛|어둠)$/.test(el.textContent.trim())
+      el.children.length === 0 &&
+      M.isVisible(el) &&
+      /^속성\s*:\s*(불|물|번개|별|바람|빛|어둠)$/.test(el.textContent.trim())
     );
     if (!leaf) return null;
     const match = leaf.textContent.trim().match(/^속성\s*:\s*(.+)$/);
@@ -9655,8 +10008,11 @@
       let node = heading.parentElement;
       for (let depth = 0; node && depth < 9; depth++, node = node.parentElement) {
         const text = node.textContent || '';
-        const action = [...node.querySelectorAll('button')]
-          .find((button) => ['도전하기', '계속하기', '재도전'].includes(button.textContent.trim()));
+      const action = [...node.querySelectorAll('button')]
+          .find((button) =>
+            M.isVisible(button) &&
+            ['도전하기', '계속하기', '재도전'].includes(button.textContent.trim())
+          );
         const milestoneCount = milestoneLabels.filter((label) =>
           [...node.querySelectorAll('*')].some((el) => el.children.length === 0 && el.textContent.trim() === label)
         ).length;
@@ -9957,7 +10313,7 @@
       while (true) {
         raw = localStorage.getItem(QUEUE_KEY);
         if (!raw) return;
-        const q = JSON.parse(raw);
+        const q = M.parseBossQueueState(raw);
         if (q.attempts === undefined) q.attempts = 0;
         if (q.entryFailStreak === undefined) q.entryFailStreak = 0;
         if (!M.isBossRunAuthorized(q.authId) || q.remaining.length === 0) break;
@@ -9971,7 +10327,7 @@
 
       const raw2 = localStorage.getItem(QUEUE_KEY);
       if (!raw2) return; // 그 사이 정지 등으로 큐가 지워졌으면 종료
-      const q2 = JSON.parse(raw2);
+      const q2 = M.parseBossQueueState(raw2);
       if (!M.isBossRunAuthorized(q2.authId)) return;
       if (q2.attempts === undefined) q2.attempts = 0;
       if (q2.entryFailStreak === undefined) q2.entryFailStreak = 0;
@@ -10042,7 +10398,9 @@
     }
 
       const finalRaw = localStorage.getItem(QUEUE_KEY);
-      const failedLabels = finalRaw ? JSON.parse(finalRaw).failedLabels : [];
+      const failedLabels = finalRaw
+        ? M.parseBossQueueState(finalRaw).failedLabels
+        : [];
       localStorage.removeItem(QUEUE_KEY);
       if (M.uiLog) M.uiLog('=== 보스 큐 종료 ===');
       if (failedLabels.length > 0) {
@@ -10051,6 +10409,14 @@
       } else if (!M.stopRequested) {
         if (M.uiLog) M.uiLog('🎉 선택한 보스를 모두 처치했습니다!');
       }
+    } catch (error) {
+      // 예상하지 못한 DOM/프리셋/클릭 오류가 큐를 남긴 채 빠져나가면,
+      // 일일 대기 루프가 끝나지 않거나 폐기 탭 복구 때 같은 보스를 다시
+      // 시작할 수 있다. 실패 시 허가·pending·queue를 함께 폐기하고 다음
+      // 명시적 시작 전에는 자동 재개하지 않는다.
+      M.clearBossRunState();
+      if (M.uiLog) M.uiLog(`🛑 보스 큐 예외 중단: ${error.message}`);
+      throw error;
     } finally {
       M.queueRunning = false;
     }
@@ -10406,7 +10772,7 @@
     while (state.boss.hp.cur > 0 && r < maxDealRounds) {
       if (stopped()) return { log, cleared: false };
       await recoverUntilSafe();
-      if (scrollsUsed < 15) {
+      if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
         scrollsUsed = await M.useScrollsWithinLimit(['공격', '집중'], scrollsUsed);
         push(`[3단계] 공격/집중 스크롤 사용 (누적 ${scrollsUsed}/15장)`);
       }
@@ -10521,7 +10887,7 @@
           ['공격', '집중'],
           ['공격', '집중', '재생'],
         ];
-        if (scrollsUsed < 15) {
+        if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
           const batch = pattern[(attackRound - 1) % pattern.length];
           scrollsUsed = await M.useScrollsWithinLimit(batch, scrollsUsed);
           push(`[3단계 스크롤 공격${attackRound}회차] ${batch.join('+')} (누적 ${scrollsUsed}/15장)`);
@@ -10664,7 +11030,7 @@
         push(`[4단계 ${r}회차] 내HP ${Math.round(ratio * 100)}% -> 회복 (스크롤 생략)`);
       } else {
         dealAttackRound++;
-        if (scrollsUsed < 15) {
+        if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
           scrollsUsed = await M.useScrollsWithinLimit(['공격', '집중'], scrollsUsed);
           push(`[4단계 공격${dealAttackRound}회차] 공격+집중 스크롤 (누적 ${scrollsUsed}/15장)`);
         } else {
@@ -10937,7 +11303,7 @@
         await M.clickRecover();
         push(`[3단계 ${r}회차] 내HP ${Math.round(ratio * 100)}% -> 회복 (스크롤 생략)`);
       } else {
-        if (scrollsUsed < 15) {
+        if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
           scrollsUsed = await M.useScrollsWithinLimit(['공격', '집중'], scrollsUsed);
         }
         await M.clickTurn(5);
@@ -11156,7 +11522,7 @@
       if (M.stopRequested) return { log, cleared: false };
       await M.archeryRecoverUntilAbove(hpThreshold, null, push);
       attackRound++;
-      if (scrollsUsed < 15) {
+      if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
         const batch = scrollPattern[(attackRound - 1) % scrollPattern.length];
         scrollsUsed = await M.useScrollsWithinLimit(batch, scrollsUsed);
       }
@@ -11217,7 +11583,7 @@
       if (M.stopRequested) return { log, cleared: false };
       await M.archeryRecoverUntilAbove(hpThreshold, null, push);
       attackRound++;
-      if (scrollsUsed < 15) {
+      if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
         const batch = scrollPattern[(attackRound - 1) % scrollPattern.length];
         scrollsUsed = await M.useScrollsWithinLimit(batch, scrollsUsed);
       }
@@ -11269,7 +11635,7 @@
       if (M.stopRequested) return { log, cleared: false };
       await M.archeryRecoverUntilAbove(hpThreshold, null, push);
       attackRound++;
-      if (scrollsUsed < 15) {
+      if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
         const scrolls = attackRound % 2 === 1
           ? ['공격', '집중']
           : ['공격', '집중', '재생'];
@@ -11438,7 +11804,7 @@
     let scrollsUsed = 0;
     for (let r = 0; state.boss.hp.cur > 0 && r < maxDealRounds; r++) {
       await M.martialRecover(hpThreshold, push);
-      if (scrollsUsed < 15) {
+      if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
         scrollsUsed = await M.useScrollsWithinLimit(pattern[r % pattern.length], scrollsUsed);
       }
       await M.clickTurn(5);
@@ -11489,7 +11855,7 @@
     let scrollsUsed = 0;
     for (let r = 0; state.boss.hp.cur > 0 && r < maxDealRounds; r++) {
       await M.martialRecover(hpThreshold, push);
-      if (scrollsUsed < 15) {
+      if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
         scrollsUsed = await M.useScrollsWithinLimit(pattern[r % pattern.length], scrollsUsed);
       }
       await M.clickTurn(5);
@@ -11534,7 +11900,7 @@
     let scrollsUsed = 0;
     for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
       await M.martialRecover(hpThreshold, push);
-      if (scrollsUsed < 15) {
+      if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
         try {
           scrollsUsed = await M.useScrollsWithinLimit(['공격', '집중'], scrollsUsed);
         } catch (e) {
@@ -11663,7 +12029,7 @@
     let scrollsUsed = 0;
     for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
       await M.magicRecover(hpThreshold, push);
-      if (scrollsUsed < 15) {
+      if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
         scrollsUsed = await M.useScrollsWithinLimit(['공격'], scrollsUsed);
       }
       await M.clickTurn(5);
@@ -11710,7 +12076,7 @@
     let scrollsUsed = 0;
     for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
       await M.magicRecover(hpThreshold, push);
-      if (scrollsUsed < 15) {
+      if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
         scrollsUsed = await M.useScrollsWithinLimit(['공격'], scrollsUsed);
       }
       await M.clickTurn(5);
