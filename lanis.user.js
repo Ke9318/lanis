@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.3-stable
+// @version      1.13.4-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8238,25 +8238,57 @@
       // 다음 단계로 넘어가는 사례가 있었다.
       const clickTarget = fresh.closest('button, [role="button"], [tabindex]') || fresh;
       let confirmationMutated = false;
+      let confirmationFailureText = '';
       const observer = new MutationObserver((records) => {
+        const noticeSelector =
+          '[role="alert"], [role="status"], .MuiSnackbar-root, .MuiAlert-root, ' +
+          '[class*="toast" i], [class*="snackbar" i], [class*="alert" i]';
         for (const record of records) {
           const nodes = [
             ...record.addedNodes,
             ...(record.type === 'characterData' ? [record.target] : []),
           ];
-          if (nodes.some((node) => {
+          for (const node of nodes) {
             const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
-            if (!el || !el.closest) return false;
-            const notice = el.matches('[role="alert"], [role="status"], .MuiSnackbar-root, .MuiAlert-root, [class*="toast"]')
-              ? el
-              : el.closest('[role="alert"], [role="status"], .MuiSnackbar-root, .MuiAlert-root, [class*="toast"]');
-            const text = notice && notice.textContent ? notice.textContent : '';
-            return text.includes(name) &&
-              (text.includes('적용했습니다') || text.includes('적용 완료') || text.includes('불러왔습니다'));
-          })) {
-            confirmationMutated = true;
-            break;
+            if (
+              !el ||
+              !el.closest ||
+              el.closest('#lrm-panel, #lrm-banner, #lrm-boss-ref-panel')
+            ) continue;
+
+            const explicitNotices = [];
+            const closestNotice = el.closest(noticeSelector);
+            if (closestNotice) explicitNotices.push(closestNotice);
+            if (el.matches && el.matches(noticeSelector)) explicitNotices.push(el);
+            if (el.querySelectorAll) {
+              explicitNotices.push(...el.querySelectorAll(noticeSelector));
+            }
+            const candidates = explicitNotices.length > 0
+              ? [...new Set(explicitNotices)]
+              : [el];
+
+            for (const candidate of candidates) {
+              const text = (candidate.textContent || '').replace(/\s+/g, ' ').trim();
+              const isExplicitNotice =
+                explicitNotices.includes(candidate) ||
+                (candidate === el && text.length > 0 && text.length <= 300);
+              const verdict = Core.classifyPresetApplyNotice(
+                text,
+                name,
+                isExplicitNotice
+              );
+              if (verdict === 'failure') {
+                confirmationFailureText = text;
+                break;
+              }
+              if (verdict === 'success') {
+                confirmationMutated = true;
+                break;
+              }
+            }
+            if (confirmationMutated || confirmationFailureText) break;
           }
+          if (confirmationMutated || confirmationFailureText) break;
         }
       });
       observer.observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -8264,17 +8296,22 @@
         M.throwIfStopped();
         clickTarget.click();
         confirmed = await M.waitFor(
-          // 클릭 뒤 발생한 새 적용 mutation은 이미 이름까지 검사했다.
-          // getClientRects 기반 visible 검사를 다시 요구하면 숨은 탭에서
-          // 실제 적용 토스트도 보이지 않는 것으로 오판할 수 있다.
-          () => confirmationMutated,
-          3000,
+          // 공용 프리셋과 같은 새 알림 판정기를 사용한다. 게임의 실제 알림은
+          // "프리셋 '봉인'을(를) 적용했습니다." 형태이며, role/class가 없는
+          // 커스텀 알림도 클릭 직후 추가된 짧은 노드일 때만 인정한다.
+          () => confirmationMutated || confirmationFailureText || null,
+          5000,
           150
         );
       } finally {
         observer.disconnect();
       }
       M.closePresetPanel();
+      if (confirmationFailureText) {
+        throw new Error(
+          `프리셋 "${name}" 적용을 게임이 거부했습니다: ${confirmationFailureText}`
+        );
+      }
       if (!confirmed && attempt < attempts) {
         if (M.uiLog) M.uiLog(`↻ 프리셋 "${name}" 적용 확인 실패 (${attempt}/${attempts}) - 다시 적용`);
         await M.humanPause(500, 900);
