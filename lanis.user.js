@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.4-stable
+// @version      1.13.5-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8213,6 +8213,97 @@
       return false;
     }) || null;
   };
+  M.normalizeBossPresetItemName = (value) =>
+    String(value || '')
+      .replace(/\(\s*\+\s*\d+\s*\)\s*$/u, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  M.findBossPresetCard = (optionLeaf) => {
+    let node = optionLeaf && optionLeaf.parentElement;
+    for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+      const exactLabels = new Set(
+        [...node.querySelectorAll('*')]
+          .filter((el) => el.children.length === 0)
+          .map((el) => el.textContent.trim())
+      );
+      if (
+        exactLabels.has('무기') &&
+        exactLabels.has('방어') &&
+        exactLabels.has('장신')
+      ) return node;
+    }
+    return null;
+  };
+  M.readBossPresetEquipmentFingerprint = (optionLeaf) => {
+    const card = M.findBossPresetCard(optionLeaf);
+    if (!card) return null;
+    const readRow = (label) => {
+      const labelEl = [...card.querySelectorAll('*')].find(
+        (el) => el.children.length === 0 && el.textContent.trim() === label
+      );
+      const row = labelEl && labelEl.parentElement;
+      if (!row) return null;
+      const values = [...row.querySelectorAll('p')]
+        .map((el) => M.normalizeBossPresetItemName(el.textContent))
+        .filter((text) => text && text !== label);
+      return values.length ? values[values.length - 1] : null;
+    };
+    const fingerprint = {
+      weapon: readRow('무기'),
+      armor: readRow('방어'),
+      accessory: readRow('장신'),
+    };
+    return Object.values(fingerprint).every(Boolean) ? fingerprint : null;
+  };
+  M.findLiveBossPlayerCard = () => {
+    const portrait = M.queryAll('img[alt="head-back"]').find((el) => el.isConnected);
+    let node = portrait && portrait.parentElement;
+    for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+      const exactLabels = new Set(
+        [...node.querySelectorAll('*')]
+          .filter((el) => el.children.length === 0)
+          .map((el) => el.textContent.trim())
+      );
+      if (
+        exactLabels.has('무기') &&
+        exactLabels.has('방어구') &&
+        exactLabels.has('장신구') &&
+        exactLabels.has('HP') &&
+        exactLabels.has('MP')
+      ) return node;
+    }
+    return null;
+  };
+  M.readLiveBossEquipmentFingerprint = () => {
+    const card = M.findLiveBossPlayerCard();
+    if (!card) return null;
+    const readRow = (label) => {
+      const labelEl = [...card.querySelectorAll('*')].find(
+        (el) => el.children.length === 0 && el.textContent.trim() === label
+      );
+      const row = labelEl && labelEl.parentElement;
+      if (!row) return null;
+      const values = [...row.querySelectorAll('p')]
+        .map((el) => M.normalizeBossPresetItemName(el.textContent))
+        .filter((text) => text && text !== label);
+      return values.length ? values[values.length - 1] : null;
+    };
+    const fingerprint = {
+      weapon: readRow('무기'),
+      armor: readRow('방어구'),
+      accessory: readRow('장신구'),
+    };
+    return Object.values(fingerprint).every(Boolean) ? fingerprint : null;
+  };
+  M.bossEquipmentFingerprintMatches = (expected, actual) =>
+    !!expected &&
+    !!actual &&
+    expected.weapon === actual.weapon &&
+    expected.armor === actual.armor &&
+    expected.accessory === actual.accessory;
+  M.formatBossEquipmentFingerprint = (fingerprint) => fingerprint
+    ? `${fingerprint.weapon} / ${fingerprint.armor} / ${fingerprint.accessory}`
+    : '읽기 실패';
   M.applyBossPreset = async (name, { requireConfirmation = true, attempts = 3 } = {}) => {
     // 새 프리셋 전환을 시작하는 순간 이전 프리셋의 공격 허가를 폐기한다.
     // 적용 확인이 실패하면 이전 봉인 프리셋 상태로 공격을 이어갈 수 없다.
@@ -8233,11 +8324,17 @@
         M.closePresetPanel();
         throw new Error('프리셋 이름 못찾음(재검색 실패): ' + name);
       }
-      // 글자 leaf 자체가 아니라 실제 클릭 이벤트가 걸린 가장 가까운 버튼/행을
-      // 누른다. 특히 "정신일도"는 글자만 클릭되면 토스트도 장비 변경도 없이
-      // 다음 단계로 넘어가는 사례가 있었다.
-      const clickTarget = fresh.closest('button, [role="button"], [tabindex]') || fresh;
-      let confirmationMutated = false;
+      const expectedEquipment = M.readBossPresetEquipmentFingerprint(fresh);
+      if (!expectedEquipment) {
+        M.closePresetPanel();
+        throw new Error(`프리셋 "${name}" 카드의 장비 정보를 읽지 못했습니다.`);
+      }
+      // 현재 보스 전용 프리셋은 성공 토스트를 만들지 않는다. 카드 전체에 걸린
+      // 클릭 핸들러를 정확히 누른 뒤, 전투 캐릭터 카드의 무기·방어구·장신구가
+      // 대상 카드와 일치하는지를 실제 적용 증거로 사용한다.
+      const clickTarget = M.findBossPresetCard(fresh) ||
+        fresh.closest('button, [role="button"], [tabindex]') ||
+        fresh;
       let confirmationFailureText = '';
       const observer = new MutationObserver((records) => {
         const noticeSelector =
@@ -8281,28 +8378,31 @@
                 confirmationFailureText = text;
                 break;
               }
-              if (verdict === 'success') {
-                confirmationMutated = true;
-                break;
-              }
             }
-            if (confirmationMutated || confirmationFailureText) break;
+            if (confirmationFailureText) break;
           }
-          if (confirmationMutated || confirmationFailureText) break;
+          if (confirmationFailureText) break;
         }
       });
       observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      let confirmedEquipment = null;
       try {
         M.throwIfStopped();
         clickTarget.click();
-        confirmed = await M.waitFor(
-          // 공용 프리셋과 같은 새 알림 판정기를 사용한다. 게임의 실제 알림은
-          // "프리셋 '봉인'을(를) 적용했습니다." 형태이며, role/class가 없는
-          // 커스텀 알림도 클릭 직후 추가된 짧은 노드일 때만 인정한다.
-          () => confirmationMutated || confirmationFailureText || null,
-          5000,
+        const result = await M.waitFor(
+          () => {
+            if (confirmationFailureText) return { failed: true };
+            const actualEquipment = M.readLiveBossEquipmentFingerprint();
+            if (M.bossEquipmentFingerprintMatches(expectedEquipment, actualEquipment)) {
+              return { failed: false, actualEquipment };
+            }
+            return null;
+          },
+          4000,
           150
         );
+        confirmed = !!result && !result.failed;
+        confirmedEquipment = confirmed ? result.actualEquipment : null;
       } finally {
         observer.disconnect();
       }
@@ -8312,16 +8412,29 @@
           `프리셋 "${name}" 적용을 게임이 거부했습니다: ${confirmationFailureText}`
         );
       }
+      if (confirmed && M.uiLog) {
+        M.uiLog(
+          `✓ 프리셋 "${name}" 장비 적용 확인: ` +
+          M.formatBossEquipmentFingerprint(confirmedEquipment)
+        );
+      }
       if (!confirmed && attempt < attempts) {
-        if (M.uiLog) M.uiLog(`↻ 프리셋 "${name}" 적용 확인 실패 (${attempt}/${attempts}) - 다시 적용`);
+        const actualEquipment = M.readLiveBossEquipmentFingerprint();
+        if (M.uiLog) {
+          M.uiLog(
+            `↻ 프리셋 "${name}" 장비 확인 실패 (${attempt}/${attempts}) ` +
+            `(기대: ${M.formatBossEquipmentFingerprint(expectedEquipment)}, ` +
+            `현재: ${M.formatBossEquipmentFingerprint(actualEquipment)}) - 다시 적용`
+          );
+        }
         await M.humanPause(500, 900);
       }
     }
     if (!confirmed && requireConfirmation) {
-      throw new Error(`프리셋 "${name}" 적용을 ${attempts}회 시도했지만 확인하지 못함`);
+      throw new Error(`프리셋 "${name}" 장비 적용을 ${attempts}회 시도했지만 확인하지 못함`);
     }
     if (confirmed) M.currentBossPreset = name;
-    if (M.uiLog && !confirmed) M.uiLog(`(참고) 프리셋 "${name}" 적용 확인 토스트를 못 봤음 - 계속 진행`);
+    if (M.uiLog && !confirmed) M.uiLog(`(참고) 프리셋 "${name}" 장비 적용을 확인하지 못해 공격하지 않습니다.`);
     return confirmed;
   };
 
