@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.9-stable
+// @version      1.13.10-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5895,17 +5895,58 @@
   // "입장"이라는 정확히 같은 텍스트가 페이지 상단 탭(심층 던전/입장/기록/랭킹...)에도
   // 존재해서 Core.findButtonByText('입장')이 탭을 먼저 찾아버리는 문제가 있었다.
   // 탭(role="tab" 또는 MuiTab 클래스)을 제외한 진짜 버튼만 찾는 전용 헬퍼.
+  Modules.deepdungeon.ENTER_CLICKABLE_SELECTOR = 'button, [role="button"], a';
+
+  Modules.deepdungeon.normalizeControlText = function (el) {
+    return (el.textContent || '').replace(/\s+/g, ' ').trim();
+  };
+
+  // 상단 탭을 "제외"하는 방식은 탭 판별이 어긋나면 진짜 입장 버튼까지 걸러버린다.
+  // 대신 "취소 / 특성 없이 입장 / 입장"이 함께 들어있는 모달 컨테이너를 먼저 찾아
+  // 그 안에서만 정확히 "입장"인 컨트롤을 고른다. 모달 안에는 상단 탭이 없으므로
+  // 오인할 여지가 없다. 게임이 버튼을 <button>이 아닌 div[role=button]/a 로
+  // 렌더링하는 경우도 있어 후보 셀렉터도 함께 넓힌다.
   Modules.deepdungeon.findEnterConfirmButton = function () {
+    const SELECTOR = this.ENTER_CLICKABLE_SELECTOR;
+    const norm = (el) => this.normalizeControlText(el);
+
+    const containers = Core.gameElements('*').filter((el) => {
+      const texts = [...el.querySelectorAll(SELECTOR)].map(norm);
+      return texts.includes('특성 없이 입장') && texts.includes('입장');
+    });
+
+    if (containers.length) {
+      const modal = containers.reduce((a, b) =>
+        a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b
+      );
+      const hit = [...modal.querySelectorAll(SELECTOR)].find(
+        (el) => norm(el) === '입장' && Core.isElementVisible(el)
+      );
+      if (hit) return hit;
+    }
+
+    // 폴백: 기존 방식(상단 탭 제외)에 후보 셀렉터만 넓힌 형태.
     const topEntryTab = this.findTopNavigationTab('입장');
     return (
-      Core.allButtons().find(
-        (b) =>
-          b.textContent.trim() === '입장' &&
-          b !== topEntryTab &&
-          b.getAttribute('role') !== 'tab' &&
-          !/MuiTab/.test(b.className)
+      Core.gameElements(SELECTOR).find(
+        (el) =>
+          norm(el) === '입장' &&
+          el !== topEntryTab &&
+          el.getAttribute('role') !== 'tab' &&
+          !/MuiTab/.test(el.className || '') &&
+          Core.isElementVisible(el)
       ) || null
     );
+  };
+
+  // 실패 시 원인 추적용: 화면에 보이는 클릭 가능한 컨트롤의 텍스트를 덤프한다.
+  Modules.deepdungeon.dumpVisibleControls = function (limit = 40) {
+    return Core.gameElements(this.ENTER_CLICKABLE_SELECTOR)
+      .filter((el) => Core.isElementVisible(el))
+      .map((el) => this.normalizeControlText(el))
+      .filter((text) => text && text.length <= 20)
+      .slice(0, limit)
+      .join(' | ');
   };
 
   // 로비 화면에는 세 가지 경우가 있다:
@@ -5961,7 +6002,10 @@
       { attempts: 5, waits: [1000, 2000, 3000, 4000, 5000] }
     );
     if (!confirmBtn) {
-      Core.log('deepdungeon', '특성 선택 화면의 "입장" 버튼을 찾지 못했습니다.');
+      Core.log(
+        'deepdungeon',
+        `특성 선택 화면의 "입장" 버튼을 찾지 못했습니다. 화면 컨트롤: ${this.dumpVisibleControls()}`
+      );
       return false;
     }
     confirmBtn.click();
