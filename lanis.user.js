@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.6-stable
+// @version      1.13.9-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8173,6 +8173,30 @@
     return null;
   };
 
+  // 보스 진입이 실패했을 때 "왜" 실패했는지 로그만 보고 알 수 있게 현재 화면
+  // 상태를 요약한다. 기존에는 "전투 화면 진입 확인 실패" 한 줄만 남아서, 확인
+  // 모달을 못 눌러서 실패한 건지 / 눌렀는데 렌더가 늦은 건지 구분이 불가능했다.
+  M.describeOpenDialogs = () => {
+    const dialogs = M.queryAll('[role="dialog"], [role="presentation"]').filter(M.isVisible);
+    if (!dialogs.length) return '열린 모달 없음';
+    const texts = dialogs.map(
+      (d) =>
+        [...d.querySelectorAll('button')]
+          .filter(M.isVisible)
+          .map((b) => `"${b.textContent.trim()}"`)
+          .join(',') || '(버튼 없음)'
+    );
+    return `열린 모달 ${dialogs.length}개 버튼: ${texts.join(' | ')}`;
+  };
+
+  M.describeBattleEntryState = (bossLabel) =>
+    [
+      `path=${location.pathname}`,
+      `보스이름=${M.findLeafByExactText(bossLabel) ? 'O' : 'X'}`,
+      `턴진행버튼=${M.findButtonByText('턴 진행5턴') ? 'O' : 'X'}`,
+      M.describeOpenDialogs(),
+    ].join(' / ');
+
   // --- 프리셋 -----------------------------------------------------------------
   M.findBossPresetPanelTab = () => {
     const candidates = M.queryAll('button').filter(
@@ -9667,6 +9691,52 @@
     return { targetElement, currentElement };
   };
 
+  // 다음에 발생하는 POST /api/personal-boss/start 호출의 응답 status만
+  // 딱 한 번 가로채 반환한다. window.fetch를 아주 짧게(최대 timeoutMs)만
+  // 감싸고 바로 원복하므로 다른 코드의 fetch 동작에 영향을 주지 않는다.
+  // ⚠ 실전 확인: 이 사이트는 이 API 호출에 fetch가 아니라 XMLHttpRequest를
+  // 사용한다(axios 기본 어대터로 추정). fetch만 감쓰면 절대 못 잡으므로
+  // fetch와 XHR을 모두 감싼다.
+  M.captureNextStartResponseStatus = (timeoutMs = 4000) => {
+    return new Promise((resolve) => {
+      let settled = false;
+      const origFetch = window.fetch;
+      const OrigXHR = window.XMLHttpRequest;
+      const origOpen = OrigXHR.prototype.open;
+      const origSend = OrigXHR.prototype.send;
+      const restore = () => {
+        window.fetch = origFetch;
+        OrigXHR.prototype.open = origOpen;
+        OrigXHR.prototype.send = origSend;
+      };
+      const finish = (status) => {
+        if (settled) return;
+        settled = true;
+        restore();
+        resolve(status);
+      };
+      window.fetch = function (input, init) {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const result = origFetch.apply(this, arguments);
+        if (url.includes('/api/personal-boss/start')) {
+          result.then((res) => finish(res.status)).catch(() => finish(null));
+        }
+        return result;
+      };
+      OrigXHR.prototype.open = function (method, url, ...rest) {
+        this.__isStartCall = typeof url === 'string' && url.includes('/api/personal-boss/start');
+        return origOpen.call(this, method, url, ...rest);
+      };
+      OrigXHR.prototype.send = function (...args) {
+        if (this.__isStartCall) {
+          this.addEventListener('loadend', () => finish(this.status));
+        }
+        return origSend.apply(this, args);
+      };
+      setTimeout(() => finish(null), timeoutMs);
+    });
+  };
+
   M.enterBossBattle = async (bossLabel) => {
     M.throwIfStopped();
     // 일반/HARD 탭이 있으면 일반 탭 보장 (지금 다루는 보스는 모두 일반 모드)
@@ -9705,23 +9775,46 @@
       await M.sleep(500);
     }
 
-    if (btnText === '도전하기') {
-      const confirmBtn = M.findConfirmInOpenDialog(['도전', '확인']);
+    // ⚠ 확인 모달은 카드 버튼 클릭 직후 500ms 안에 항상 뜨지는 않는다. 기존
+    // 코드는 고정 500ms 뒤 딱 한 번만 찾고, 못 찾으면 로그도 없이 그냥 빠져
+    // 나갔다. 그러면 "도전 버튼은 눌렀는데 확인은 안 누른" 상태로 목록에 남고,
+    // 호출자는 "전투 화면 진입 확인 실패"로 보고해 큐가 통째로 멈춘다(실전 증상).
+    // 모달을 waitFor로 기다리고, 무엇을 눌렀는지/못 찾았는지 로그에 남긴다.
+    if (btnText === '도전하기' || btnText === '재도전') {
+      const candidates = btnText === '재도전'
+        ? ['재도전', '도전', '도전하기', '확인']
+        : ['도전', '도전하기', '확인'];
+      const confirmBtn = await M.waitFor(() => M.findConfirmInOpenDialog(candidates), 6000, 200);
       if (confirmBtn) {
         M.throwIfStopped();
+        if (M.uiLog) M.uiLog(`   확인 모달 "${confirmBtn.textContent.trim()}" 클릭`);
+        // ⚠ 실전 확인된 사실: 다른 보스 도전이 이미 "진행 중"인 상태에서 새
+        // 보스의 확인 모달을 눌러도, 화면은 아무 에러 표시 없이 그냥 목록에
+        // 남는다. 실제로는 서버가 POST /api/personal-boss/start 를 400으로
+        // 거부한 것인데, 프론트가 이걸 토스트/모달로 알려주지 않아서 기존
+        // 코드는 "전투 화면 진입 확인 실패"라는 애매한 메시지만 남겼다.
+        // 확인 클릭과 동시에 fetch를 잠깐 가로채서 실제 응답 상태코드를
+        // 직접 확인한다 - 그래야 진짜 원인(동시 진행 제한)을 정확히 로그로
+        // 남기고, 무의미한 재시도 대신 바로 명확한 이유로 실패 처리한다.
+        const startStatus = M.captureNextStartResponseStatus(4000);
         confirmBtn.click();
-        await M.sleep(1200);
+        const status = await startStatus;
+        if (status === 400) {
+          throw new Error(
+            `"${bossLabel}" 도전 시작이 서버에 의해 거부됨(400) - 다른 보스 도전이 ` +
+              `이미 진행 중이라 새 보스를 시작할 수 없는 것으로 보임. 그 보스를 ` +
+              `완료하거나 포기한 뒤 다시 시도해야 함`
+          );
+        } else if (typeof status === 'number' && status >= 400) {
+          throw new Error(`"${bossLabel}" 도전 시작 API 오류 (status ${status})`);
+        }
+      } else if (M.uiLog) {
+        M.uiLog(`   ⚠ "${btnText}" 클릭 후 6초간 확인 모달을 못 찾음 - ${M.describeOpenDialogs()}`);
       }
-    } else if (btnText === '재도전') {
-      const confirmBtn = M.findConfirmInOpenDialog(['재도전', '도전', '확인']);
-      if (confirmBtn) {
-        M.throwIfStopped();
-        confirmBtn.click();
-        await M.sleep(1200);
-      }
-    } else {
-      await M.sleep(800); // 계속하기는 보통 바로 진입
+    } else if (M.uiLog) {
+      M.uiLog(`   "${btnText}" 클릭 - 확인 모달 없이 바로 진입 대기`);
     }
+    // 실제 진입 여부는 호출자가 waitFor로 확인한다(여기서 고정 sleep 안 함).
   };
 
   M.abandonCurrentBossAttempt = async () => {
@@ -9854,16 +9947,46 @@
               };
             }
           }
+          // ⚠ 서버가 보스별 동시 진행이 아니라 "계정당 진행 중 도전 1개"만
+          // 허용하는 것으로 실전에서 확인됨(예: 지하의 망령을 진행 중인 채로
+          // 공허의 황제를 시작하면 확인 모달까지는 뜨지만 서버가 400으로
+          // 거부, 화면은 조용히 목록에 남음). 미리 다른 보스 카드가
+          // "계속하기" 상태인지 확인해서, 무의미한 재시도 대신 바로 명확한
+          // 이유로 큐를 멈춘다.
+          const otherInProgress = Object.values(BOSS_REGISTRY)
+            .map((e) => e.label)
+            .filter((l) => l !== entry.label)
+            .find((l) => {
+              const b = M.findBossCardActionButton(l);
+              return b && b.textContent.trim() === '계속하기';
+            });
+          if (otherInProgress) {
+            if (M.uiLog) {
+              M.uiLog(
+                `⛔ "${otherInProgress}" 도전이 이미 진행 중이라 "${entry.label}"을(를) ` +
+                  `시작할 수 없음 (서버는 동시에 하나만 허용). 먼저 "${otherInProgress}"를 ` +
+                  `완료하거나 포기해야 함`
+              );
+            }
+            localStorage.removeItem(PENDING_KEY);
+            return { entered: false, cleared: false, blockedByOtherBoss: otherInProgress };
+          }
           if (M.uiLog) M.uiLog(`🔎 "${entry.label}" 속성 확인 중...`);
           await M.ensureElementForBoss(entry.label);
           if (M.uiLog) M.uiLog(`🧭 "${entry.label}" 카드 찾는 중...`);
           await M.enterBossBattle(entry.label);
-          await M.sleep(500);
-          if (M.isInBattleScreen(entry.label)) {
+          // 기존엔 sleep(500) 뒤 딱 한 번만 확인해서, SPA 렌더가 조금만 느려도
+          // 그 자리에서 "진입 실패"로 단정하고 큐를 통째로 중단했다. 같은 일을
+          // 하는 일일 수호자 경로는 이미 waitFor로 10초를 기다리고 있어서 이 큐
+          // 경로만 유독 취약했다. 동일하게 폴링 방식으로 맞춘다.
+          const entered = await M.waitFor(() => M.isInBattleScreen(entry.label), 12000, 250);
+          if (entered) {
             localStorage.removeItem(PENDING_KEY);
             return await runAndReport();
           }
-          if (M.uiLog) M.uiLog('⚠ 전투 화면 진입 확인 실패. 버튼을 다시 눌러줘.');
+          if (M.uiLog) {
+            M.uiLog('⚠ 전투 화면 진입 확인 실패(12초 대기). ' + M.describeBattleEntryState(entry.label));
+          }
         } catch (e) {
           if (M.uiLog) M.uiLog('⚠ ' + e.message);
         }
