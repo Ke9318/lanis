@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.10-stable
+// @version      1.13.12-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8372,14 +8372,21 @@
     return Object.values(fingerprint).every(Boolean) ? fingerprint : null;
   };
   M.findLiveBossPlayerCard = () => {
-    // 화면에 초상화(img[alt="head-back"])가 여러 장 있을 수 있다(동료 카드 등).
-    // 첫 번째 후보 하나만 위로 훑다가 라벨을 못 찾으면 그대로 포기하던 게
-    // "장비 읽기 실패"가 반복되는 원인이었다 - 실제로는 내 카드가 두 번째
-    // 이후 후보였을 뿐인데도 항상 null을 반환했다. 모든 후보를 순서대로
-    // 시도한다.
-    const portraits = M.queryAll('img[alt="head-back"]').filter((el) => el.isConnected);
-    for (const portrait of portraits) {
-      let node = portrait.parentElement;
+    // ⚠ 실전 확인: img[alt="head-back"]을 기준으로 카드를 찾던 방식은 게임
+    // UI가 바뀌면서 더 이상 해당 alt 값을 가진 이미지가 존재하지 않아(실전에서
+    // 확인됨: "armor"/"head"/"arm-overlay"로 바뀌어 있음) 항상 null을 반환해
+    // "장비 읽기 실패"가 반복되는 진짜 원인이었다. 게임 UI 이미지 alt값은 언제든
+    // 바뀌을 수 있으므로, 이미지가 아니라 페이지에 단 하나뿐인 "무기" 라벨을 직접
+    // 기준으로 삼고, 그 조상을 따라 올라가며 방어구/장신구/HP/MP가 다 모이는
+    // 지점을 찾는다(실전 확인: depth 3에서 모두 모임).
+    const weaponLabels = M.queryAll('*').filter(
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim() === '무기' &&
+        M.isVisible(el)
+    );
+    for (const label of weaponLabels) {
+      let node = label;
       for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
         const exactLabels = new Set(
           [...node.querySelectorAll('*')]
