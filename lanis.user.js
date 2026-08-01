@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.13-stable
+// @version      1.13.14-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5987,6 +5987,24 @@
 
   Modules.deepdungeon.stepOnce = async function () {
     const text = Core.bodyText();
+
+    // ⚠ 실전 확인: enterFreshRunIfNeeded()가 처음한 번 시도에서 입장
+    // 확정 버튼을 못 찾으면 경고만 남기고 그대로 진행하는데, 이 함수
+    // (stepOnce)에는 "0층 — 특성 선택" 화면을 인식하는 분기가 없어서, 화면에
+    // "입장" 버튼이 뜵히 보여도 아무것도 안 하고 6회(약 12초) 동안 대기만
+    // 하다 "화면을 인식하지 못함"으로 멈추는 사고가 실전에서 확인됨.
+    // 매 사이클마다 특성 선택 화면을 직접 감지해서 "입장"을 재시도한다.
+    if (this.readFloor() === null && (text.includes('특성 선택') || !!Core.findButtonByText('특성 없이 입장'))) {
+      const confirmBtn = this.findEnterConfirmButton();
+      if (!confirmBtn) {
+        Core.log('deepdungeon', '특성 선택 화면의 "입장" 버튼을 아직 찾지 못함 - 다음 사이클에서 재시도');
+        return false;
+      }
+      confirmBtn.click();
+      Core.log('deepdungeon', '특성 선택 화면에서 "입장" 버튼 클릭 (재시도)');
+      await Core.humanDelay(1000, 1800);
+      return true;
+    }
 
     if (text.includes('던전의 주인') && Core.findButtonByText('던전의 주인 도전')) {
       return await this.handleDungeonMaster();
