@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.14-stable
+// @version      1.13.15-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -662,13 +662,28 @@
   Core.findEquipmentOilRow = function () {
     return Core.gameElements('tr').find((row) => {
       if (!Core.isElementVisible(row)) return false;
-      const leaves = [...row.querySelectorAll('*')].filter(
-        (el) => el.children.length === 0
-      );
-      const hasExactOilName = leaves.some((el) => {
-        const text = el.textContent.replace(/\s+/g, ' ').trim();
-        return text === Core.EQUIPMENT_OIL_NAME ||
-          /^장비용 기름\s*[x×]\s*[\d,]+$/.test(text);
+      // ⚠ 실전 확인: 게임이 수량을 이름과 같은 <p> 안에 별도 <span>으로
+      // 붙이는 구조로 바뀌면서(예: <p>장비용 기름<span>x26</span></p>)
+      // 이름 요소가 자식(span)을 가지게 되어 기존 "리프(자식 없음)" 조건에
+      // 안 걸려 인벤토리에 26개가 반히 보여도 영구히 못 찾는 문제가 있었다.
+      // 자식 엔리트를 제외한 "직접 텍스트 노드"만 모아 비교하는 방식을 추가해
+      // 이 구조에도 대응한다(기존 리프 기반 검사는 그대로 유지).
+      const allEls = [...row.querySelectorAll('*')];
+      const hasExactOilName = allEls.some((el) => {
+        if (el.children.length === 0) {
+          const text = el.textContent.replace(/\s+/g, ' ').trim();
+          if (
+            text === Core.EQUIPMENT_OIL_NAME ||
+            /^장비용 기름\s*[x×]\s*[\d,]+$/.test(text)
+          ) return true;
+        }
+        const ownText = [...el.childNodes]
+          .filter((n) => n.nodeType === Node.TEXT_NODE)
+          .map((n) => n.textContent)
+          .join('')
+          .replace(/\s+/g, ' ')
+          .trim();
+        return ownText === Core.EQUIPMENT_OIL_NAME;
       });
       if (!hasExactOilName) return false;
       const useButtons = [...row.querySelectorAll('button')].filter(
