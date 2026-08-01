@@ -2954,20 +2954,23 @@
   // 이번 전투에는 실제로 포션이 안 쓰였을 수 있다(패배로 이어짐). 그래서
   // "잔량 0" 체크뿐 아니라 "전투 후 HP/MP가 실제로 안 찼는지"까지 함께
   // 봐야 하고, 이 체크는 승리/패배 결과와 무관하게 항상 실행되어야 한다.
-  Modules.autohunt.checkPotionExhaustedAndStop = function () {
+  Modules.autohunt.checkPotionExhaustedAndStop = async function () {
     const expPotion = this.readExpPotionRemaining();
     if (expPotion !== null && expPotion <= 0) {
-      Core.notifyStopped('autohunt', '농축 경험의 물약 효과가 모두 소진되었습니다 — 정지합니다. 인벤토리에서 물약을 채워주세요.');
+      await Core.bankDepositAll('autohunt');
+      Core.notifyStopped('autohunt', '농축 경험의 물약 효과가 모두 소진되었습니다 — 은행에 입금 후 정지합니다. 인벤토리에서 물약을 채워주세요.');
       return true;
     }
     const mpPotionRemaining = this.readMpPotionRemaining();
     if (mpPotionRemaining !== null && mpPotionRemaining <= 0) {
-      Core.notifyStopped('autohunt', 'MP 포션이 모두 소진되었습니다 — 정지합니다. 인벤토리에서 포션을 채워주세요.');
+      await Core.bankDepositAll('autohunt');
+      Core.notifyStopped('autohunt', 'MP 포션이 모두 소진되었습니다 — 은행에 입금 후 정지합니다. 인벤토리에서 포션을 채워주세요.');
       return true;
     }
     const hpmp = this.readPlayerHPMP();
     if (hpmp && (hpmp.hp.cur < hpmp.hp.max || hpmp.mp.cur < hpmp.mp.max)) {
-      Core.notifyStopped('autohunt', '포션이 부족한 것으로 보입니다(전투 후 HP/MP가 가득 차지 않음) — 정지합니다.');
+      await Core.bankDepositAll('autohunt');
+      Core.notifyStopped('autohunt', '포션이 부족한 것으로 보입니다(전투 후 HP/MP가 가득 차지 않음) — 은행에 입금 후 정지합니다.');
       return true;
     }
     return false;
@@ -3231,14 +3234,14 @@
         // 패배는 포션이 안 먹혀서 회복이 안 된 결과일 수 있다. 원인 확인 없이
         // 바로 다음 사이클로 넘어가면 포션 없이 계속 패배만 반복할 수 있으므로,
         // 은행 입금 전에 반드시 포션 소진 여부부터 확인한다.
-        if (mod.checkPotionExhaustedAndStop()) break;
+        if (await mod.checkPotionExhaustedAndStop()) break;
         Core.log('autohunt', '은행에 남은 골드를 모두 입금한 뒤 다시 사냥을 이어갑니다.');
         await Core.bankDepositAll('autohunt');
         await Core.sleep(600);
         continue;
       }
 
-      if (mod.checkPotionExhaustedAndStop()) break;
+      if (await mod.checkPotionExhaustedAndStop()) break;
 
       await mod.checkAndDepositGold();
       await Core.sleep(1000 + Math.random() * 1400);
@@ -8369,21 +8372,28 @@
     return Object.values(fingerprint).every(Boolean) ? fingerprint : null;
   };
   M.findLiveBossPlayerCard = () => {
-    const portrait = M.queryAll('img[alt="head-back"]').find((el) => el.isConnected);
-    let node = portrait && portrait.parentElement;
-    for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
-      const exactLabels = new Set(
-        [...node.querySelectorAll('*')]
-          .filter((el) => el.children.length === 0)
-          .map((el) => el.textContent.trim())
-      );
-      if (
-        exactLabels.has('무기') &&
-        exactLabels.has('방어구') &&
-        exactLabels.has('장신구') &&
-        exactLabels.has('HP') &&
-        exactLabels.has('MP')
-      ) return node;
+    // 화면에 초상화(img[alt="head-back"])가 여러 장 있을 수 있다(동료 카드 등).
+    // 첫 번째 후보 하나만 위로 훑다가 라벨을 못 찾으면 그대로 포기하던 게
+    // "장비 읽기 실패"가 반복되는 원인이었다 - 실제로는 내 카드가 두 번째
+    // 이후 후보였을 뿐인데도 항상 null을 반환했다. 모든 후보를 순서대로
+    // 시도한다.
+    const portraits = M.queryAll('img[alt="head-back"]').filter((el) => el.isConnected);
+    for (const portrait of portraits) {
+      let node = portrait.parentElement;
+      for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+        const exactLabels = new Set(
+          [...node.querySelectorAll('*')]
+            .filter((el) => el.children.length === 0)
+            .map((el) => el.textContent.trim())
+        );
+        if (
+          exactLabels.has('무기') &&
+          exactLabels.has('방어구') &&
+          exactLabels.has('장신구') &&
+          exactLabels.has('HP') &&
+          exactLabels.has('MP')
+        ) return node;
+      }
     }
     return null;
   };
