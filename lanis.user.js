@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.11-stable
+// @version      1.13.10-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2950,6 +2950,29 @@
     return parseInt(m[1].replace(/,/g, ''), 10);
   };
 
+  // 포션 재고(잔량 수치)는 남아 있어도, 일일 사용 한도 등 다른 이유로
+  // 이번 전투에는 실제로 포션이 안 쓰였을 수 있다(패배로 이어짐). 그래서
+  // "잔량 0" 체크뿐 아니라 "전투 후 HP/MP가 실제로 안 찼는지"까지 함께
+  // 봐야 하고, 이 체크는 승리/패배 결과와 무관하게 항상 실행되어야 한다.
+  Modules.autohunt.checkPotionExhaustedAndStop = function () {
+    const expPotion = this.readExpPotionRemaining();
+    if (expPotion !== null && expPotion <= 0) {
+      Core.notifyStopped('autohunt', '농축 경험의 물약 효과가 모두 소진되었습니다 — 정지합니다. 인벤토리에서 물약을 채워주세요.');
+      return true;
+    }
+    const mpPotionRemaining = this.readMpPotionRemaining();
+    if (mpPotionRemaining !== null && mpPotionRemaining <= 0) {
+      Core.notifyStopped('autohunt', 'MP 포션이 모두 소진되었습니다 — 정지합니다. 인벤토리에서 포션을 채워주세요.');
+      return true;
+    }
+    const hpmp = this.readPlayerHPMP();
+    if (hpmp && (hpmp.hp.cur < hpmp.hp.max || hpmp.mp.cur < hpmp.mp.max)) {
+      Core.notifyStopped('autohunt', '포션이 부족한 것으로 보입니다(전투 후 HP/MP가 가득 차지 않음) — 정지합니다.');
+      return true;
+    }
+    return false;
+  };
+
   Modules.autohunt.detectResultState = function () {
     const text = Core.bodyText();
     if (/장비\s*내구도\s*부족/.test(text)) return 'durability';
@@ -3204,29 +3227,18 @@
       }
 
       if (result === 'defeat') {
-        Core.log('autohunt', '패배 감지 → 은행에 남은 골드를 모두 입금한 뒤 다시 사냥을 이어갑니다.');
+        Core.log('autohunt', '패배 감지 → 포션 소진 여부 확인 중...');
+        // 패배는 포션이 안 먹혀서 회복이 안 된 결과일 수 있다. 원인 확인 없이
+        // 바로 다음 사이클로 넘어가면 포션 없이 계속 패배만 반복할 수 있으므로,
+        // 은행 입금 전에 반드시 포션 소진 여부부터 확인한다.
+        if (mod.checkPotionExhaustedAndStop()) break;
+        Core.log('autohunt', '은행에 남은 골드를 모두 입금한 뒤 다시 사냥을 이어갑니다.');
         await Core.bankDepositAll('autohunt');
         await Core.sleep(600);
         continue;
       }
 
-      const postExpPotion = mod.readExpPotionRemaining();
-      if (postExpPotion !== null && postExpPotion <= 0) {
-        Core.notifyStopped('autohunt', '농축 경험의 물약 효과가 모두 소진되었습니다 — 정지합니다. 인벤토리에서 물약을 채워주세요.');
-        break;
-      }
-
-      const mpPotionRemaining = mod.readMpPotionRemaining();
-      if (mpPotionRemaining !== null && mpPotionRemaining <= 0) {
-        Core.notifyStopped('autohunt', 'MP 포션이 모두 소진되었습니다 — 정지합니다. 인벤토리에서 포션을 채워주세요.');
-        break;
-      }
-
-      const hpmp = mod.readPlayerHPMP();
-      if (hpmp && (hpmp.hp.cur < hpmp.hp.max || hpmp.mp.cur < hpmp.mp.max)) {
-        Core.notifyStopped('autohunt', '포션이 부족한 것으로 보입니다(전투 후 HP/MP가 가득 차지 않음) — 정지합니다.');
-        break;
-      }
+      if (mod.checkPotionExhaustedAndStop()) break;
 
       await mod.checkAndDepositGold();
       await Core.sleep(1000 + Math.random() * 1400);
@@ -5895,58 +5907,17 @@
   // "입장"이라는 정확히 같은 텍스트가 페이지 상단 탭(심층 던전/입장/기록/랭킹...)에도
   // 존재해서 Core.findButtonByText('입장')이 탭을 먼저 찾아버리는 문제가 있었다.
   // 탭(role="tab" 또는 MuiTab 클래스)을 제외한 진짜 버튼만 찾는 전용 헬퍼.
-  Modules.deepdungeon.ENTER_CLICKABLE_SELECTOR = 'button, [role="button"], a';
-
-  Modules.deepdungeon.normalizeControlText = function (el) {
-    return (el.textContent || '').replace(/\s+/g, ' ').trim();
-  };
-
-  // 상단 탭을 "제외"하는 방식은 탭 판별이 어긋나면 진짜 입장 버튼까지 걸러버린다.
-  // 대신 "취소 / 특성 없이 입장 / 입장"이 함께 들어있는 모달 컨테이너를 먼저 찾아
-  // 그 안에서만 정확히 "입장"인 컨트롤을 고른다. 모달 안에는 상단 탭이 없으므로
-  // 오인할 여지가 없다. 게임이 버튼을 <button>이 아닌 div[role=button]/a 로
-  // 렌더링하는 경우도 있어 후보 셀렉터도 함께 넓힌다.
   Modules.deepdungeon.findEnterConfirmButton = function () {
-    const SELECTOR = this.ENTER_CLICKABLE_SELECTOR;
-    const norm = (el) => this.normalizeControlText(el);
-
-    const containers = Core.gameElements('*').filter((el) => {
-      const texts = [...el.querySelectorAll(SELECTOR)].map(norm);
-      return texts.includes('특성 없이 입장') && texts.includes('입장');
-    });
-
-    if (containers.length) {
-      const modal = containers.reduce((a, b) =>
-        a.querySelectorAll('*').length < b.querySelectorAll('*').length ? a : b
-      );
-      const hit = [...modal.querySelectorAll(SELECTOR)].find(
-        (el) => norm(el) === '입장' && Core.isElementVisible(el)
-      );
-      if (hit) return hit;
-    }
-
-    // 폴백: 기존 방식(상단 탭 제외)에 후보 셀렉터만 넓힌 형태.
     const topEntryTab = this.findTopNavigationTab('입장');
     return (
-      Core.gameElements(SELECTOR).find(
-        (el) =>
-          norm(el) === '입장' &&
-          el !== topEntryTab &&
-          el.getAttribute('role') !== 'tab' &&
-          !/MuiTab/.test(el.className || '') &&
-          Core.isElementVisible(el)
+      Core.allButtons().find(
+        (b) =>
+          b.textContent.trim() === '입장' &&
+          b !== topEntryTab &&
+          b.getAttribute('role') !== 'tab' &&
+          !/MuiTab/.test(b.className)
       ) || null
     );
-  };
-
-  // 실패 시 원인 추적용: 화면에 보이는 클릭 가능한 컨트롤의 텍스트를 덤프한다.
-  Modules.deepdungeon.dumpVisibleControls = function (limit = 40) {
-    return Core.gameElements(this.ENTER_CLICKABLE_SELECTOR)
-      .filter((el) => Core.isElementVisible(el))
-      .map((el) => this.normalizeControlText(el))
-      .filter((text) => text && text.length <= 20)
-      .slice(0, limit)
-      .join(' | ');
   };
 
   // 로비 화면에는 세 가지 경우가 있다:
@@ -6002,10 +5973,7 @@
       { attempts: 5, waits: [1000, 2000, 3000, 4000, 5000] }
     );
     if (!confirmBtn) {
-      Core.log(
-        'deepdungeon',
-        `특성 선택 화면의 "입장" 버튼을 찾지 못했습니다. 화면 컨트롤: ${this.dumpVisibleControls()}`
-      );
+      Core.log('deepdungeon', '특성 선택 화면의 "입장" 버튼을 찾지 못했습니다.');
       return false;
     }
     confirmBtn.click();
