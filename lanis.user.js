@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.12-stable
+// @version      1.13.13-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -10714,6 +10714,17 @@
       M.uiLog(`▶ 보스 도전 시작 (선택: ${checked.length}개)`);
       try {
         await M.startBossQueue(checked);
+        // ⚠ 실전 확인: 이 "보스 도전" 버튼 경로는 startBossQueue만 호출하고 끝나서,
+        // 보상 자동 수령(M.claimBossRewardsAndVerify)이 "일일" 탭의
+        // runDailySelectedBosses 경로에서만 호출되고 여기서는 전혀 호출되지
+        // 않았다(실전 확인됨 - 보스를 다 처치해도 보상이 자동으로 안 들어옴).
+        // 보상 수령 실패는 처치 자체의 실패로 보지 않고 로그만 남긴다.
+        try {
+          await M.claimBossRewardsAndVerify();
+          M.uiLog('✅ 보상 자동 수령 확인 완료');
+        } catch (rewardError) {
+          M.uiLog('⚠ 보상 자동 수령 확인 실패(보스 처치 자체는 완료됨): ' + rewardError.message);
+        }
       } catch (e) {
         M.uiLog('⚠ 오류: ' + e.message);
       } finally {
