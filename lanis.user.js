@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.10-stable
+// @version      1.13.11-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8937,12 +8937,19 @@
     // 반환해서, 호출부가 M.waitForValidState 같은 걸로 정상값이 나올 때까지
     // 기다릴 수 있게 한다. NaN이 섞이면 "보스가 죽었다"고 오판할 수 있어
     // 반드시 걸러야 함.
+    // ⚠ 실전 확인: HP/MP 라벨과 값 사이에 장식용 요소(aria-hidden '#')가
+    // 끼어들어 있으면 접두사만 잘라내는 방식은 숫자 앞에 '#'가 남아
+    // parseInt가 NaN을 내버린다(실전 확인됨). 주변 장식이 무엇이든 상관없이
+    // 숫자/숫자 패턴만 직접 정규식으로 추출한다.
     const parse = (el) => {
       if (!el || !el.parentElement) return null;
-      const t = el.parentElement.textContent.replace(/^HP|^MP/, '').trim();
-      const nums = t.split('/').map((s) => parseInt(s.replace(/,/g, ''), 10));
-      if (nums.length < 2 || Number.isNaN(nums[0]) || Number.isNaN(nums[1])) return null;
-      return { cur: nums[0], max: nums[1] };
+      const raw = el.parentElement.textContent;
+      const m = raw.match(/([\d,]+)\s*\/\s*([\d,]+)/);
+      if (!m) return null;
+      const cur = parseInt(m[1].replace(/,/g, ''), 10);
+      const max = parseInt(m[2].replace(/,/g, ''), 10);
+      if (Number.isNaN(cur) || Number.isNaN(max)) return null;
+      return { cur, max };
     };
     const playerHp = parse(hpLabels[0]);
     const playerMp = parse(mpLabels[0]);
