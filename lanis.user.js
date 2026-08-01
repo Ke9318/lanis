@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.15-stable
+// @version      1.13.16-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5863,9 +5863,18 @@
       // 새 화면은 상단 메뉴를 일반 button으로 렌더링한다. 단순히 "입장"이라는
       // 글자만 찾으면 특성 선택창의 실제 입장 버튼을 오인하므로, 같은 컨테이너에
       // 기록·랭킹·보상 등 상단 메뉴가 3개 이상 함께 있는 경우만 탭으로 인정한다.
+      // ⚠ 실전 확인: 특성 선택 모달이 React Portal로 <body> 바로
+      // 밑에 렌더링되면서, 이 확인 버튼의 조상이 다음 6단계 안에 <body>까지
+      // 올라가는 사고가 있었다. <body>는 페이지의 모든 요소를 포함하므로
+      // 상단 탭 라벨 5개가 항상 "형제 컨트롬"로 잡혀 확인 버튼을 탭으로
+      // 오판하는 버그가 있었다(실전 확인됨). <body>/<html>에 도달하면
+      // 그 이상 올라가지 않는다.
       for (
         let node = control.parentElement, depth = 0;
-        node && depth < 6;
+        node &&
+        depth < 6 &&
+        node !== document.body &&
+        node !== document.documentElement;
         node = node.parentElement, depth++
       ) {
         const siblingControls = [
