@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.16-stable
+// @version      1.13.19-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2805,6 +2805,9 @@
       goldThreshold: 1000000,
       minEnergy: 100,
       ignoreProtectionOff: false,
+      // ⚠ 유료 "x50" 일괄 사냥 기능이 없는 캐릭터용: 한 번에 한 전투만 진행하고,
+      // 각 전투 후 매번 지도 아이템(레어맵)을 확인/사용해 레어맵이 있으면 바로 들어간다.
+      singleBattleMode: false,
     },
   };
 
@@ -2849,12 +2852,17 @@
     floor,
     shouldCancel = Core.defaultShouldCancel
   ) {
-    if (this.findHuntX50Button(groundSuffix)) {
+    // ⚠ 1전투 모드에서는 x50 버튼이 아니라 단일 전투 버튼을 기준으로 확인한다.
+    const findBtn = () =>
+      this.config.singleBattleMode
+        ? this.findSingleBattleButton(groundSuffix)
+        : this.findHuntX50Button(groundSuffix);
+    if (findBtn()) {
       if (floor) {
         const floorSelected = await this.selectFloor(floor, shouldCancel);
         if (!floorSelected) return false;
       }
-      return !!this.findHuntX50Button(groundSuffix);
+      return !!findBtn();
     }
     try {
       await Core.clickNavMenuSuffix('전투', groundSuffix, shouldCancel);
@@ -2869,7 +2877,7 @@
       if (!floorSelected) return false;
     }
     return !!(await Core.waitFor(
-      () => this.findHuntX50Button(groundSuffix),
+      () => findBtn(),
       8000,
       300,
       shouldCancel
@@ -2931,6 +2939,108 @@
       : 'not_found';
   };
 
+  // ⚠ x50 유료 기능이 없는 캐릭터는 사냥터 버튼에 "50" 접미사 없이 사냥터
+  // 이름만 뜬다(예: "숲"). 그 버튼 하나만 누르면 매번 단 한 번의 전투만 진행된다.
+  Modules.autohunt.findSingleBattleButton = function (groundSuffix = this.config.groundSuffix) {
+    return (
+      Core.allButtons().find((b) => b.textContent.trim() === groundSuffix) || null
+    );
+  };
+
+  Modules.autohunt.clickSingleBattle = async function () {
+    const btn = await Core.waitFor(() => this.findSingleBattleButton(this.config.groundSuffix), 6000);
+    if (!btn) {
+      Core.log('autohunt', '오류: "1전투" 사냥 버튼을 찾지 못했습니다.');
+      return 'not_found';
+    }
+    if (btn.disabled) return 'disabled';
+    return (await Core.safeClick(() => this.findSingleBattleButton(this.config.groundSuffix), {
+      beforeMin: 500,
+      beforeMax: 1300,
+    }))
+      ? 'clicked'
+      : 'not_found';
+  };
+
+  // ⚠ 사용자 확인: 이 1전투 모드는 순수히 사냥만 해야 하며, "지도 아이템"을
+  // 절대 사용(소모)해서는 안 된다. 지도 아이콘/다이얼로그는 "레어맵 생성" 전용
+  // 매크로(Modules.raremap.useTopMapItem)에서만 쓰는 것이고, 자동사냥은 이미 화면에 자연스럽게
+  // 떠 있는 레어맵 버튼이 있는지만 순수하게 확인해서 진입한다(버튼 클릭 외에
+  // 다른 상호작용 없음).
+  //
+  // Modules.raremap.getMineContainer/findRareButtonIn은 "광산"으로 고정되어
+  // 있어 다른 사냥터에는 쓸 수 없어서, 현재 사냥터 이름을 기준으로 일반화한다.
+  Modules.autohunt.findGroundContainer = function (groundSuffix) {
+    const anchor = document.querySelector('[data-tour="battle-start-button"]');
+    if (!anchor) return null;
+    let el = anchor;
+    let base = null;
+    for (let i = 0; i < 6; i++) {
+      el = el.parentElement;
+      if (!el) return base;
+      const groundButtons = Array.from(el.querySelectorAll('button.MuiButton-fullWidth')).filter(
+        (b) => b.textContent.trim() === groundSuffix
+      );
+      if (groundButtons.length >= 1) {
+        base = el;
+        if (this.findExistingRareMapButtonIn(el, groundSuffix)) return el;
+      }
+    }
+    return base;
+  };
+
+  Modules.autohunt.findExistingRareMapButtonIn = function (container, groundSuffix) {
+    const buttons = Array.from(container.querySelectorAll('button.MuiButton-fullWidth'));
+    return buttons.find((b) => {
+      const t = b.textContent.trim();
+      if (!t) return false;
+      if (t === groundSuffix) return false;
+      if (Modules.raremap.EXCLUDE_TEXTS.some((ex) => t.includes(ex))) return false;
+      if (/^\d+\s*층$/.test(t)) return false;
+      return true;
+    }) || null;
+  };
+
+  Modules.autohunt.findExistingRareMapButton = function (groundSuffix) {
+    const container = this.findGroundContainer(groundSuffix);
+    if (!container) return null;
+    return this.findExistingRareMapButtonIn(container, groundSuffix);
+  };
+
+  // 이미 떠 있는 레어맵을 순서대로 모두 진입해 클리어한다. 지도 아이템은
+  // 절대 사용하지 않는다.
+  Modules.autohunt.checkAndEnterExistingRareMapIfAny = async function () {
+    let count = 0;
+    let unchangedCount = 0;
+    while (this.running && !this.stopRequested && count < 20) {
+      const rareBtn = this.findExistingRareMapButton(this.config.groundSuffix);
+      if (!rareBtn) break;
+      const beforeText = rareBtn.textContent.trim();
+      Core.log('autohunt', `레어맵 발견: "${beforeText}" → 진입 (지도 아이템 미사용, 자연 발생분만)`);
+      const clicked = await Core.safeClick(
+        () => this.findExistingRareMapButton(this.config.groundSuffix),
+        { beforeMin: 600, beforeMax: 1300 }
+      );
+      if (!clicked) break;
+      const changed = await Core.waitFor(() => {
+        const next = this.findExistingRareMapButton(this.config.groundSuffix);
+        return !next || next.textContent.trim() !== beforeText ? true : null;
+      }, 10000, 400);
+      if (!changed) {
+        unchangedCount++;
+        Core.log('autohunt', `동일 레어맵 버튼이 그대로 남아 있습니다 (${unchangedCount}/3).`);
+        if (unchangedCount >= 3) {
+          Core.log('autohunt', '레어맵 확인을 안전을 위해 중단합니다.');
+          break;
+        }
+        continue;
+      }
+      unchangedCount = 0;
+      count++;
+    }
+    return count;
+  };
+
   Modules.autohunt.readEnergy = function () {
     const el = this.leafTextEls().find((e) => /^[\d,]+\/\s*2000$/.test(e.textContent.trim()));
     if (!el) return null;
@@ -2982,11 +3092,17 @@
       Core.notifyStopped('autohunt', 'MP 포션이 모두 소진되었습니다 — 은행에 입금 후 정지합니다. 인벤토리에서 포션을 채워주세요.');
       return true;
     }
-    const hpmp = this.readPlayerHPMP();
-    if (hpmp && (hpmp.hp.cur < hpmp.hp.max || hpmp.mp.cur < hpmp.mp.max)) {
-      await Core.bankDepositAll('autohunt');
-      Core.notifyStopped('autohunt', '포션이 부족한 것으로 보입니다(전투 후 HP/MP가 가득 차지 않음) — 은행에 입금 후 정지합니다.');
-      return true;
+    // ⚠ 사용자 확인: 1전투 모드는 x50과 달리 전투 후 HP/MP가 가득
+    // 차지 않아도 정상이다(포션이 매 전투마다 자동으로 풀회복을 보장하는 게
+    // 아니기 때문). 이 HP/MP 추론 체크는 x50 모드에서만 쓰고, 1전투
+    // 모드에서는 건너뛰고 위의 명시적인 "잔량 수치" 체크만 신뢰한다.
+    if (!this.config.singleBattleMode) {
+      const hpmp = this.readPlayerHPMP();
+      if (hpmp && (hpmp.hp.cur < hpmp.hp.max || hpmp.mp.cur < hpmp.mp.max)) {
+        await Core.bankDepositAll('autohunt');
+        Core.notifyStopped('autohunt', '포션이 부족한 것으로 보입니다(전투 후 HP/MP가 가득 차지 않음) — 은행에 입금 후 정지합니다.');
+        return true;
+      }
     }
     return false;
   };
@@ -3194,7 +3310,9 @@
       }
 
       const previousResultText = Core.bodyText();
-      const okClick = await mod.clickHuntX50();
+      const okClick = mod.config.singleBattleMode
+        ? await mod.clickSingleBattle()
+        : await mod.clickHuntX50();
       if (okClick === 'disabled') {
         Core.notifyCompleted('autohunt', '행동력 제한에 도달해 사냥 버튼이 비활성화되었습니다.');
         break;
@@ -3259,6 +3377,13 @@
       if (await mod.checkPotionExhaustedAndStop()) break;
 
       await mod.checkAndDepositGold();
+
+      // ⚠ 1전투 모드일 때만: 매 전투 후 레어맵 지도 아이템을 확인해서
+      // 있으면 바로 사용해 레어맵으로 진입하고, 없으면 다음 사이클에서 다시 1전투한다.
+      if (mod.config.singleBattleMode) {
+        await mod.checkAndEnterExistingRareMapIfAny();
+      }
+
       await Core.sleep(1000 + Math.random() * 1400);
     }
 
@@ -6015,7 +6140,7 @@
     // ⚠ 실전 확인: enterFreshRunIfNeeded()가 처음한 번 시도에서 입장
     // 확정 버튼을 못 찾으면 경고만 남기고 그대로 진행하는데, 이 함수
     // (stepOnce)에는 "0층 — 특성 선택" 화면을 인식하는 분기가 없어서, 화면에
-    // "입장" 버튼이 뜵히 보여도 아무것도 안 하고 6회(약 12초) 동안 대기만
+    // "입장" 버튼이 뻔히 보여도 아무것도 안 하고 6회(약 12초) 동안 대기만
     // 하다 "화면을 인식하지 못함"으로 멈추는 사고가 실전에서 확인됨.
     // 매 사이클마다 특성 선택 화면을 직접 감지해서 "입장"을 재시도한다.
     if (this.readFloor() === null && (text.includes('특성 선택') || !!Core.findButtonByText('특성 없이 입장'))) {
@@ -7023,7 +7148,7 @@
     Core.updateModuleButtons();
   }
 
-  const AUTOHUNT_PERSIST_KEYS = ['originalElement', 'groundSuffix', 'floor', 'goldThreshold', 'minEnergy', 'ignoreProtectionOff'];
+  const AUTOHUNT_PERSIST_KEYS = ['originalElement', 'groundSuffix', 'floor', 'goldThreshold', 'minEnergy', 'ignoreProtectionOff', 'singleBattleMode'];
 
   function buildAutohuntTab(container) {
     const mod = Modules.autohunt;
@@ -7130,6 +7255,22 @@
     protRow.appendChild(protLabel);
     container.appendChild(protRow);
 
+    const singleRow = document.createElement('div');
+    singleRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
+    const singleCheck = document.createElement('input');
+    singleCheck.type = 'checkbox';
+    singleCheck.checked = mod.config.singleBattleMode;
+    singleCheck.addEventListener('change', (e) => {
+      mod.config.singleBattleMode = e.target.checked;
+      Core.saveModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
+    });
+    const singleLabel = document.createElement('span');
+    singleLabel.textContent = '50연속전투 없는 캐릭터용: 1전투씩 진행 + 매 전투 후 레어맵 자동 확인/진입';
+    singleLabel.style.cssText = 'font-size:11px; color:#ccc;';
+    singleRow.appendChild(singleCheck);
+    singleRow.appendChild(singleLabel);
+    container.appendChild(singleRow);
+
     const btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
     const startBtn = document.createElement('button');
@@ -7156,7 +7297,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [elementSelect, groundSelect, floorSelect, goldInput, energyInput, protCheck];
+    refs.inputs = [elementSelect, groundSelect, floorSelect, goldInput, energyInput, protCheck, singleCheck];
   }
 
   const RAREMAP_PERSIST_KEYS = ['maxCycles'];
