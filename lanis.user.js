@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.19-stable
+// @version      1.13.26-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -275,6 +275,22 @@
     return document.hidden || el.getClientRects().length > 0;
   };
 
+  // ⚠ 사용자 제보: 아이템/포션 사용 확인 팝업을 닫고 바로 다음
+  // 단계로 넘어가면, 닫히는 애니메이션이나 MUI의 aria-hidden 제거가
+  // 다 지나기 전에 다음 화면 조작이 시작될 수 있다. 그러면 배경(상단 네비
+  // 포함)이 여전히 aria-hidden 처리된 채로 남아 있어, 바로 다음에 찾는 버튼이
+  // "보이지 않는" 것으로 판정되는 간헐적 오류가 있었다(재전직 모듈에서 실전
+  // 확인됨). 모든 다이얼로그 사용 후에는 이 함수로 실제로 닫혔는지 확인하고 넘어가야
+  // 한다.
+  Core.waitForNoOpenDialog = async function (timeoutMs = 8000) {
+    return Core.waitFor(() => {
+      const openDialogs = [...document.querySelectorAll('[role="dialog"]')].filter(
+        (d) => Core.isElementVisible(d)
+      );
+      return openDialogs.length === 0 ? true : null;
+    }, timeoutMs, 300);
+  };
+
   Core.safeClick = async function (
     target,
     {
@@ -326,6 +342,10 @@
     itemText,
     shouldCancel = Core.defaultShouldCancel
   ) {
+    // ⚠ 직전에 닫힌 다이얼로그가 아직 닫히는 중이라면(aria-hidden이
+    // 배경에 일시적으로 남아 있을 수 있음), 상단 메뉴 버튼이 잘못 "보이지
+    // 않는" 것으로 판정될 수 있다. 짧게만 확인하고 넘어간다(없으면 즉시 통과).
+    await Core.waitForNoOpenDialog(3000);
     const navBtn = await Core.waitFor(
       () => Core.findButtonByText(navLabel),
       15000,
@@ -355,6 +375,7 @@
     suffixText,
     shouldCancel = Core.defaultShouldCancel
   ) {
+    await Core.waitForNoOpenDialog(3000);
     const navBtn = await Core.waitFor(
       () => Core.findButtonByText(navLabel),
       15000,
@@ -2068,6 +2089,45 @@
     return m ? parseInt(m[1], 10) : null;
   };
 
+  // ⚠ 사용자 요청(2026-08): 황력의 포션/농축 경험의 물약 팝업을 자동으로
+  // 클릭해 사용하는 로직이 게임 UI 변경마다 계속 깨져서 반복적으로
+  // 멈춤. 자동 "사용" 클릭은 완전히 제거하고, 잔량만 확인해 부족하면
+  // 로그로 알리고 정지한다(실제 보충은 사용자가 직접 한다). 아래
+  // refillEnergyIfNeeded/refillExpPotion(팝업 자동 클릭 함수)은 더 이상 호출되지
+  // 않으며, 코드는 참고용으로만 남겨둔다.
+  Modules.rejob.checkExpPotionAndStopIfLow = function (potionRemaining) {
+    // ⚠ 버그 수정: potionRemaining은 인벤토리 개수가 아니라 "농축 경험의
+    // 물약 효과 (5배): N회 남음" 문구를 파싱한 값이다. 버프가 다 떨어지면 이
+    // 문구 자체가 화면에서 사라져 null이 된다. 이전에 null을 "문제없음"으로
+    // 처리해 버프가 완전히 끝난 상태에서도 정지 없이 계속 대대적으로 돕는 사고가
+    // 실전에서 확인됨. null도 0과 동일하게 "부족"으로 취급해 정지한다.
+    if (potionRemaining === null || potionRemaining === undefined || potionRemaining <= 0) {
+      Core.notifyStopped(
+        'rejob',
+        `농축 경험의 물약 5배 효과가 소진된 것으로 보입니다(잔여: ${potionRemaining ?? '확인 안됨(문구 없음)'}). ` +
+          '자동 사용은 비활성화되어 있으니 직접 사용 후 다시 시작해주세요.'
+      );
+      return false;
+    }
+    if (potionRemaining < 50) {
+      Core.log('rejob', `농축 경험의 물약 효과 잔여 ${potionRemaining}회(50회 미만) - 자동 사용은 비활성화되어 있음, 곧 소진되니 직접 사용해두세요.`);
+    }
+    return true;
+  };
+
+  Modules.rejob.checkEnergyAndStopIfLow = function () {
+    const energy = this.parseEnergy();
+    if (energy === null) return true;
+    if (energy <= 100) {
+      Core.notifyStopped(
+        'rejob',
+        `행동력이 ${energy}로 부족합니다(기준 100). 활력의 포션 자동 사용은 비활성화되어 있으니 직접 충전 후 다시 시작해주세요.`
+      );
+      return false;
+    }
+    return true;
+  };
+
   Modules.rejob.refillEnergyIfNeeded = async function () {
     const mod = this;
     const energy = mod.parseEnergy();
@@ -2162,25 +2222,42 @@
       );
       return;
     }
-    if (!(await Core.safeClick(() => findTargetUseButton(), {
-      beforeMin: mod.config.clickDelay[0],
-      beforeMax: mod.config.clickDelay[1],
-    }))) {
-      Core.notifyStopped('rejob', '활력의 포션 "사용" 버튼이 클릭 직전에 사라졌습니다.');
+    // ⚠ 실전 확인: 이 "사용" 버튼을 단 한 번만 클릭하고 수량 확인
+    // 팝업이 안 뜵면 아무 처리 없이(else 분기 자체가 없음) 조용히
+    // 다음 단계로 넘어가던 적이 있었다. 클릭이 실제로 안 먹혔을 때도
+    // 감지하지 못해 결국 상단 메뉴 클릭까지 실패하는 것이 실전에서 확인됨.
+    let qtyDialogEl = null;
+    let selectionDialogClosed = false;
+    for (let attempt = 1; attempt <= 4 && !qtyDialogEl && !selectionDialogClosed; attempt++) {
+      if (!(await Core.safeClick(() => findTargetUseButton(), {
+        beforeMin: mod.config.clickDelay[0],
+        beforeMax: mod.config.clickDelay[1],
+      }))) {
+        Core.notifyStopped('rejob', '활력의 포션 "사용" 버튼이 클릭 직전에 사라졌습니다.');
+        return false;
+      }
+      qtyDialogEl = await Core.retryStep('수량 확인 팝업 컨테이너 찾기', () => {
+        const marker = [...document.querySelectorAll('*')].find((el) => {
+          if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
+          return el.textContent.trim() === '사용할 개수';
+        });
+        if (!marker) return null;
+        return marker.closest('[role="dialog"]') || marker.closest('.MuiDialogContent-root') || marker.parentElement;
+      }, { attempts: 2, waits: [1000, 2000] });
+      if (qtyDialogEl) break;
+      selectionDialogClosed = !dialogEl.isConnected || !Core.isElementVisible(dialogEl);
+      if (!selectionDialogClosed) {
+        Core.log('rejob', `활력의 포션 선택 팝업이 그대로 남아 있어 "사용" 버튼을 다시 클릭합니다 (${attempt}/4).`);
+      }
+    }
+    if (!qtyDialogEl && !selectionDialogClosed) {
+      Core.notifyStopped('rejob', '"활력의 포션 사용" 선택 팝업이 여러 번 클릭해도 닫히지 않았습니다.');
       return false;
     }
-
-    const qtyDialogEl = await Core.retryStep('수량 확인 팝업 컨테이너 찾기', () => {
-      const marker = [...document.querySelectorAll('*')].find((el) => {
-        if (el.closest('#lrm-panel') || el.closest('#lrm-banner')) return false;
-        return el.textContent.trim() === '사용할 개수';
-      });
-      if (!marker) return null;
-      // 버그 수정: "사용할 개수" 라벨(<p>) 자체는 자식이 없어(childCount=0) "가장 작은 컨테이너 찾기" 방식으로는
-      // 항상 이 라벨 자신이 선택되어버려 그 안에 input/button이 하나도 없었음(실제 입력칸/버튼은 role="dialog" 조상에 있음).
-      // → 텍스트 매칭이 아니라 실제 다이얼로그 조상(role="dialog")을 직접 찾도록 변경.
-      return marker.closest('[role="dialog"]') || marker.closest('.MuiDialogContent-root') || marker.parentElement;
-    });
+    if (!qtyDialogEl) {
+      Core.log('rejob', '수량 확인 팝업 없이 선택 팝업이 닫힘 (바로 소모되는 케이스로 추정)');
+      await Core.waitForNoOpenDialog();
+    }
 
     if (qtyDialogEl) {
       const qtyInput = qtyDialogEl.querySelector('input[type="number"]');
@@ -2209,6 +2286,8 @@
           Core.notifyStopped('rejob', '수량 확인 팝업의 "사용" 버튼이 클릭 직전에 사라졌습니다.');
           return false;
         }
+        // ⚠ 위와 같은 이유로 팝업이 실제로 닫힐는지 확인한다.
+        await Core.waitForNoOpenDialog();
         mod.energyRefillStreak += 1;
         Core.log('rejob', useQty !== null ? `활력의 포션 ${useQty}개 사용 완료` : '활력의 포션 사용 완료');
       } else {
@@ -2279,7 +2358,15 @@
     enabled.click();
     await mod.clickDelayWait();
 
-    const successToast = await Core.retryStep('전직 완료 확인', () => (Core.bodyText().includes('전직 완료') ? true : null));
+    // ⚠ 실전 확인: 이 확인창은 보통 1초 안에 뜵지만, 서버 응답이 느린 때는
+    // 기존 재시도 예산(기본값 약 20초)을 넘어 실패로 보고되는 것이 실전에서 확인됨.
+    // 실제로는 전직이 이미 성공해 있을 가능성이 높으니(본도 후 상태를 되돌리면 더
+    // 위험하다), 포기하기 전에 더 오래, 더 자주 확인한다(최대 약 45초).
+    const successToast = await Core.retryStep(
+      '전직 완료 확인',
+      () => (Core.bodyText().includes('전직 완료') ? true : null),
+      { attempts: 6, waits: [1000, 2000, 3000, 5000, 8000, 12000] }
+    );
     if (!successToast) {
       Core.notifyStopped('rejob', '전직 완료 확인을 못했습니다 (여러 번 재시도 후에도 실패).');
       return false;
@@ -2601,16 +2688,48 @@
         const qtyInput = qtyDialogEl.querySelector('input[type="number"]');
         if (qtyInput) {
           const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          nativeSetter.call(qtyInput, 1);
-          qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
-          await mod.clickDelayWait();
+          let qtyConfirmedAs1 = false;
+          for (let setAttempt = 1; setAttempt <= 3 && !qtyConfirmedAs1; setAttempt++) {
+            nativeSetter.call(qtyInput, 1);
+            qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
+            qtyInput.dispatchEvent(new Event('change', { bubbles: true }));
+            await mod.clickDelayWait();
+            qtyConfirmedAs1 = qtyInput.value === '1' || qtyInput.value === 1;
+            if (!qtyConfirmedAs1) {
+              Core.log('rejob', `수량 입력칸이 아직 1로 안 바뀜(현재: "${qtyInput.value}") - 재시도 (${setAttempt}/3)`);
+            }
+          }
+          if (!qtyConfirmedAs1) {
+            const cancelBtn = [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
+            if (cancelBtn) cancelBtn.click();
+            Core.notifyStopped(
+              'rejob',
+              `농축 경험의 물약 수량을 1로 확정하지 못해(현재 값: "${qtyInput.value}") 안전을 위해 확인 없이 취소하고 정지합니다.`
+            );
+            return false;
+          }
         }
         const qtyConfirmBtn = await Core.retryStep('수량 확인 팝업의 "사용" 버튼 찾기', () =>
           [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용') || null
         );
         if (qtyConfirmBtn) {
+          const finalInput = qtyDialogEl.querySelector('input[type="number"]');
+          if (finalInput && finalInput.value !== '1' && finalInput.value !== 1) {
+            const cancelBtn = [...qtyDialogEl.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
+            if (cancelBtn) cancelBtn.click();
+            Core.notifyStopped(
+              'rejob',
+              `확인 직전 최종 점검에서 수량이 "1"이 아님("${finalInput.value}")을 발견해 확인 없이 취소하고 정지합니다.`
+            );
+            return false;
+          }
           qtyConfirmBtn.click();
           await mod.clickDelayWait();
+          // ⚠ 팝업이 실제로 닫힐는지 확인하지 않고 넘어가면, 닫히는
+          // 애니메이션 중 배경이 일시적으로 aria-hidden 처리된 채 남아
+          // 있을 수 있다(다음 사이클의 "칵리" 메뉴 클릭이 가끔 실패하는
+          // 원인으로 추정됨).
+          await Core.waitForNoOpenDialog();
           confirmClicked = true;
         }
       } else {
@@ -2629,6 +2748,7 @@
         if (confirmBtn) {
           confirmBtn.click();
           await mod.clickDelayWait();
+          await Core.waitForNoOpenDialog();
           confirmClicked = true;
         }
       }
@@ -2738,29 +2858,34 @@
       const idx = mod.TIERS.findIndex((t) => t.short === result.tierUsed.short);
       mod.nextTierIndexOverride = Math.max(0, idx - 1);
       mod.skipRejobThisCycle = true;
-      if (result.potionRemaining === null || result.potionRemaining < 50) {
-        await mod.refillExpPotion();
-      }
-      if (!mod.running) return;
+      // ⚠ 사용자 요청: 황력의 포션/농축 경험의 물약 팝업 자동 클릭이
+      // 게임 UI가 바뀌끔마다 계속 깨져서 반복적으로 멈춤. 자동 "사용" 클릭은
+      // 완전히 제거하고, 잔량만 확인해 부족하면 로그로 알리고 정지한다
+      // (실제 사용은 사용자가 직접 한다).
       if (result.gold !== null && result.gold > 1000000) {
         await Core.bankDepositAll('rejob');
       }
-      // 버그 수정: 사망(레벨 100 미달) 판정의 실제 원인이 사냥터가 너무 강해서가 아니라
-      // 행동력(에너지) 고갈로 전투가 중간에 끊긴 경우일 수 있음. 성공 분기에서만 행동력을 보충하면
-      // 이 경우 행동력이 계속 낮은 채로 방치되어 다음 사냥도 계속 실패하는 문제가 있었음.
-      await mod.refillEnergyIfNeeded();
+      if (!mod.running) return;
+      if (!mod.checkExpPotionAndStopIfLow(result.potionRemaining)) return;
+      if (!mod.running) return;
+      if (!mod.checkEnergyAndStopIfLow()) return;
       return;
     }
     mod.skipRejobThisCycle = false;
     if (!mod.running) return;
 
-    if (result.potionRemaining === null || result.potionRemaining < 50) {
-      const refilled = await mod.refillExpPotion();
-      if (!refilled) return;
+    // ⚠ 사용자 확인: 물약/행동력 체크가 정지를 유발하면서 입금보다 먼저
+    // 실행되면, 입금(finishCycleCommon 안에 있음)까지 도달하기 전에 멈춰버려 골드가
+    // 은행에 안 들어가는 문제가 실전에서 확인됨. 입금을 먼저 처리해 이 문제를 막는다.
+    if (result.gold !== null && result.gold > 1000000) {
+      await Core.bankDepositAll('rejob');
     }
     if (!mod.running) return;
 
-    await mod.refillEnergyIfNeeded();
+    if (!mod.checkExpPotionAndStopIfLow(result.potionRemaining)) return;
+    if (!mod.running) return;
+
+    if (!mod.checkEnergyAndStopIfLow()) return;
     if (!mod.running) return;
 
     await mod.finishCycleCommon(result);
