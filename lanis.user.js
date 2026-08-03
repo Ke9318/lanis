@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.26-stable
+// @version      1.13.29-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -283,8 +283,15 @@
   // 확인됨). 모든 다이얼로그 사용 후에는 이 함수로 실제로 닫혔는지 확인하고 넘어가야
   // 한다.
   Core.waitForNoOpenDialog = async function (timeoutMs = 8000) {
+    // ⚠ 실전 확인(진단 스크립트로 직접 잡음): "캐릭" 상단 메뉴 드롭다운이 열려 있는
+    // 동안은 MUI가 버튼 자체에 aria-hidden="true"를 걸어버려(메뉴가 정상적으로
+    // 열려 있는 동안은 정상), 만약 메뉴 항목 클릭이 제대로 없어졌거나 페이지
+    // 전환이 실패해 메뉴가 안 닫힌 채 남으면, 다음 사이클에서 "캐릭"을 다시
+    // 찾을 때 계속 aria-hidden으로 외면에 걸린다. 그런데 이 드롭다운 컴테이너는
+    // role="dialog"가 아니라 role="menu"/"presentation"이라 기존 체크(오직 dialog만 보던)가
+    // 이 상황을 전혀 놓치고 있었다. 이제 dialog/menu/presentation 모두 확인한다.
     return Core.waitFor(() => {
-      const openDialogs = [...document.querySelectorAll('[role="dialog"]')].filter(
+      const openDialogs = [...document.querySelectorAll('[role="dialog"], [role="menu"], [role="presentation"]')].filter(
         (d) => Core.isElementVisible(d)
       );
       return openDialogs.length === 0 ? true : null;
@@ -342,28 +349,36 @@
     itemText,
     shouldCancel = Core.defaultShouldCancel
   ) {
-    // ⚠ 직전에 닫힌 다이얼로그가 아직 닫히는 중이라면(aria-hidden이
-    // 배경에 일시적으로 남아 있을 수 있음), 상단 메뉴 버튼이 잘못 "보이지
-    // 않는" 것으로 판정될 수 있다. 짧게만 확인하고 넘어간다(없으면 즉시 통과).
-    await Core.waitForNoOpenDialog(3000);
-    const navBtn = await Core.waitFor(
-      () => Core.findButtonByText(navLabel),
-      15000,
-      300,
-      shouldCancel
-    );
-    if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
-    if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), {
-      beforeMin: 500,
-      beforeMax: 1000,
-      shouldCancel,
-    }))) {
-      throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
-    }
+    // ⚠ 실전 확인(진단 스크립트로 직접 잡음): 이전 사이클에서 상단 메뉴가 안
+    // 닫힌 채 남아있으면, 그 동안 동작하는 MUI 메뉴 트리거(이 경우 "${navLabel}")
+    // 자체가 aria-hidden="true"로 가려져 버려(정상적인 메뉴-열림 동작), 그 버튼을
+    // 다시 찾는 건 언제까지나 실패한다. 그리고 합성 클릭/ESC로는 MUI의
+    // ClickAwayListener가 메뉴를 절대 닫지 않는다(실전 확인됨 - isTrusted 이벤트만
+    // 반응). 대신 메뉴 항목(itemText) 자체는 메뉴가 열려있는 동안에도 정상적으로
+    // 클릭 가능함을 실전에서 확인했다. 그래서 먼저 원하는 메뉴 항목이 이미
+    // 화면에 뜵지(이전 사이클의 메뉴가 안 닫힌 상태) 확인하고, 뜵으면 "${navLabel}"를
+    // 아예 누르지 않고 바로 항목을 클릭한다.
     const findItem = () => [...document.querySelectorAll('[role="menuitem"]')].find(
       (el) => el.textContent.trim() === itemText && Core.isElementVisible(el)
     ) || null;
-    const item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
+    let item = findItem();
+    if (!item) {
+      const navBtn = await Core.waitFor(
+        () => Core.findButtonByText(navLabel),
+        15000,
+        300,
+        shouldCancel
+      );
+      if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
+      if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), {
+        beforeMin: 500,
+        beforeMax: 1000,
+        shouldCancel,
+      }))) {
+        throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
+      }
+      item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
+    }
     if (!item) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
     if (!(await Core.safeClick(findItem, { shouldCancel }))) {
       throw new Error(`메뉴 항목 "${itemText}"가 클릭 직전에 사라짐`);
@@ -375,25 +390,28 @@
     suffixText,
     shouldCancel = Core.defaultShouldCancel
   ) {
-    await Core.waitForNoOpenDialog(3000);
-    const navBtn = await Core.waitFor(
-      () => Core.findButtonByText(navLabel),
-      15000,
-      300,
-      shouldCancel
-    );
-    if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
-    if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), {
-      beforeMin: 500,
-      beforeMax: 1000,
-      shouldCancel,
-    }))) {
-      throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
-    }
+    // ⚠ clickNavMenuExact와 동일한 이유로 메뉴 항목이 이미 열려있는지 먼저 확인한다.
     const findItem = () => [...document.querySelectorAll('[role="menuitem"]')].find(
       (el) => el.textContent.trim().endsWith(suffixText) && Core.isElementVisible(el)
     ) || null;
-    const item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
+    let item = findItem();
+    if (!item) {
+      const navBtn = await Core.waitFor(
+        () => Core.findButtonByText(navLabel),
+        15000,
+        300,
+        shouldCancel
+      );
+      if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
+      if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), {
+        beforeMin: 500,
+        beforeMax: 1000,
+        shouldCancel,
+      }))) {
+        throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
+      }
+      item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
+    }
     if (!item) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
     if (!(await Core.safeClick(findItem, { shouldCancel }))) {
       throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
