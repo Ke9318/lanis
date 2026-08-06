@@ -361,8 +361,7 @@
     const findItem = () => [...document.querySelectorAll('[role="menuitem"]')].find(
       (el) => el.textContent.trim() === itemText && Core.isElementVisible(el)
     ) || null;
-    let item = findItem();
-    if (!item) {
+    const openFresh = async () => {
       const navBtn = await Core.waitFor(
         () => Core.findButtonByText(navLabel),
         15000,
@@ -377,12 +376,17 @@
       }))) {
         throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
       }
-      item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
-    }
-    if (!item) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
-    if (!(await Core.safeClick(findItem, { shouldCancel }))) {
-      throw new Error(`메뉴 항목 "${itemText}"가 클릭 직전에 사라짐`);
-    }
+      const item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
+      if (!item) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
+      if (!(await Core.safeClick(findItem, { shouldCancel }))) {
+        throw new Error(`메뉴 항목 "${itemText}"가 클릭 직전에 사라짐`);
+      }
+    };
+    // 이전 화면 전환 중 남아있던 메뉴 항목은 클릭하는 순간 스스로 닫혀
+    // 사라질 수 있다. 그 첫 시도가 실패해도 곧장 예외를 던지지 않고,
+    // "캐릭" 버튼을 새로 눌러 메뉴를 여는 정상 경로로 재시도한다.
+    if (findItem() && (await Core.safeClick(findItem, { shouldCancel }))) return;
+    await openFresh();
   };
 
   Core.clickNavMenuSuffix = async function (
@@ -394,8 +398,7 @@
     const findItem = () => [...document.querySelectorAll('[role="menuitem"]')].find(
       (el) => el.textContent.trim().endsWith(suffixText) && Core.isElementVisible(el)
     ) || null;
-    let item = findItem();
-    if (!item) {
+    const openFresh = async () => {
       const navBtn = await Core.waitFor(
         () => Core.findButtonByText(navLabel),
         15000,
@@ -410,12 +413,16 @@
       }))) {
         throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
       }
-      item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
-    }
-    if (!item) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
-    if (!(await Core.safeClick(findItem, { shouldCancel }))) {
-      throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
-    }
+      const item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
+      if (!item) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
+      if (!(await Core.safeClick(findItem, { shouldCancel }))) {
+        throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
+      }
+    };
+    // clickNavMenuExact와 동일한 이유로, 재사용하려던 메뉴 항목의 첫 클릭이
+    // 실패해도 곧장 실패 처리하지 않고 메뉴를 새로 열어 재시도한다.
+    if (findItem() && (await Core.safeClick(findItem, { shouldCancel }))) return;
+    await openFresh();
   };
 
   // ---------------- 공용 프리셋 적용 (던전·자동사냥·심층던전 공용) ----------------
@@ -12388,14 +12395,17 @@
       return { log, cleared: false, retryRequired: true };
     }
 
-    await M.applyBossPreset('방깎');
-    await M.martialRecover(hpThreshold, push);
-    await M.clickTurn(10);
-    await M.applyBossPreset('딜');
+    // 방깎 10턴 -> 공격/집중 스크롤 -> 딜 5턴을 보스가 죽을 때까지 반복한다.
+    // 스크롤은 15장 한도라 7회 반복(14장) 후 1장만 남는데,
+    // useScrollsWithinLimit이 남은 장수만큼만 앞에서부터 골라 쓰므로 8회차엔
+    // 자동으로 "공격" 한 장만 쓰고("집중"은 제외) 5턴 공격으로 이어진다.
     let state = await M.getValidHpMpNumbers();
     let scrollsUsed = 0;
     for (let r = 1; state.boss.hp.cur > 0 && r <= maxDealRounds; r++) {
+      await M.applyBossPreset('방깎');
       await M.martialRecover(hpThreshold, push);
+      await M.clickTurn(10);
+
       if (M.canUseMoreBattleScrolls(scrollsUsed, 15)) {
         try {
           scrollsUsed = await M.useScrollsWithinLimit(['공격', '집중'], scrollsUsed);
@@ -12404,9 +12414,13 @@
           scrollsUsed = 15;
         }
       }
+
+      await M.applyBossPreset('딜');
+      await M.martialRecover(hpThreshold, push);
       await M.clickTurn(5);
+
       state = await M.getValidHpMpNumbers();
-      push(`[딜 ${r}] bossHp=${state.boss.hp.cur}`);
+      push(`[딜 ${r}] bossHp=${state.boss.hp.cur}, 스크롤 ${scrollsUsed}/15`);
     }
     const cleared = state.boss.hp.cur <= 0;
     if (cleared) await M.closeClearPopupIfAny();
