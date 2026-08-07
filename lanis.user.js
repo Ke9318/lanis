@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.33-stable
+// @version      1.13.34-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -10358,17 +10358,17 @@
     const startHistoryLength = history.length;
     const targetElement = M.getBossElementFromList(bossLabel);
     if (!targetElement) throw new Error(`"${bossLabel}"의 오늘 속성을 읽지 못함`);
+    // ⚠ 사용자 확인(2026-08): 캐시 키에 bossLabel까지 포함돼 있어서, 오늘
+    // 선택한 여러 보스가 전부 같은 속성(예: 전부 "별")이어도 보스가 바뀌면
+    // 매번 "내 정보"→(불일치 시 인벤토리)를 다시 왕복하는 낭비가 있었다.
+    // 오늘 이미 이 속성으로 검증됐다면(다른 보스 차례에 확인한 것이라도)
+    // 그대로 재사용하도록 속성 기준으로만 캐시한다.
     const cacheKey = 'lrm-boss-element-verified';
     try {
       const cached = JSON.parse(sessionStorage.getItem(cacheKey) || 'null');
       const today = new Date().toLocaleDateString('en-CA');
-      if (
-        cached &&
-        cached.date === today &&
-        cached.bossLabel === bossLabel &&
-        cached.element === targetElement
-      ) {
-        if (M.uiLog) M.uiLog(`속성 확인 생략: "${bossLabel}" ${targetElement} 속성은 이번 탭에서 이미 검증됨`);
+      if (cached && cached.date === today && cached.element === targetElement) {
+        if (M.uiLog) M.uiLog(`속성 확인 생략: 오늘 ${targetElement} 속성은 이미 검증됨("${cached.bossLabel}" 확인 시)`);
         return { targetElement, currentElement: targetElement, cached: true };
       }
     } catch (e) {}
