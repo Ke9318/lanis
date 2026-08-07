@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.31-stable
+// @version      1.13.32-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -10113,45 +10113,60 @@
 
   M.useElementStone = async (element) => {
     M.throwIfStopped();
-    await M.openCharacterMenuItem('인벤토리');
-    const consumableTab = await M.waitFor(
-      () => M.queryAll('[role="tab"], button')
-        .find((el) => el.textContent.trim() === '소모품' && M.isVisible(el)),
-      8000
-    );
-    if (!consumableTab) throw new Error('인벤토리 소모품 탭 못찾음');
-    await M.humanPause(600, 1100);
-    M.throwIfStopped();
-    consumableTab.click();
-    await M.humanPause(750, 1300);
-
     const stoneName = `${element}의 돌`;
-    let useButton = null;
-    // 돌 이름에는 수량이 붙어 렌더링되고(예: "빛의 돌x14"), 소모품은
-    // 여러 페이지로 나뉜다. 정확한 leaf 텍스트 검색 대신 행 단위로 찾고
-    // 발견될 때까지 다음 페이지를 순회한다.
-    for (let page = 1; page <= 20 && !useButton; page++) {
-      const row = M.queryAll('tr').find((tr) =>
-        tr.textContent.includes(stoneName) && M.isVisible(tr)
+
+    // 인벤토리 소모품 탭에서 "{돌}의 돌" 행을 찾아 사용 버튼을 반환한다.
+    // 못 찾으면 null. 페이지네이션까지 뒤진다.
+    const findUseButtonInInventory = async () => {
+      await M.openCharacterMenuItem('인벤토리');
+      const consumableTab = await M.waitFor(
+        () => M.queryAll('[role="tab"], button')
+          .find((el) => el.textContent.trim() === '소모품' && M.isVisible(el)),
+        8000
       );
-      if (row) {
-        useButton = [...row.querySelectorAll('button')].find((button) =>
-          ['사용', '사용하기'].includes(button.textContent.trim()) && M.isVisible(button)
-        ) || null;
-        break;
-      }
-      const next = M.queryAll('button').find((button) =>
-        button.getAttribute('aria-label') === 'Go to next page' &&
-        !button.disabled &&
-        M.isVisible(button)
-      );
-      if (!next) break;
-      await M.humanPause(500, 900);
+      if (!consumableTab) throw new Error('인벤토리 소모품 탭 못찾음');
+      await M.humanPause(600, 1100);
       M.throwIfStopped();
-      next.click();
-      await M.humanPause(650, 1100);
+      consumableTab.click();
+      await M.humanPause(750, 1300);
+
+      let useButton = null;
+      for (let page = 1; page <= 20 && !useButton; page++) {
+        const row = M.queryAll('tr').find((tr) =>
+          tr.textContent.includes(stoneName) && M.isVisible(tr)
+        );
+        if (row) {
+          useButton = [...row.querySelectorAll('button')].find((button) =>
+            ['사용', '사용하기'].includes(button.textContent.trim()) && M.isVisible(button)
+          ) || null;
+          break;
+        }
+        const next = M.queryAll('button').find((button) =>
+          button.getAttribute('aria-label') === 'Go to next page' &&
+          !button.disabled &&
+          M.isVisible(button)
+        );
+        if (!next) break;
+        await M.humanPause(500, 900);
+        M.throwIfStopped();
+        next.click();
+        await M.humanPause(650, 1100);
+      }
+      return useButton;
+    };
+
+    let useButton = await findUseButtonInInventory();
+
+    // ⚠ 사용자 확인(2026-08): 인벤토리에 없으면 그냥 멈추던 것을, Core에 이미
+    // 만들어둔 마을 이동+상점 구매 로직(Core.buyElementStoneAtTown)을 그대로
+    // 재사용해 사 온 뒤 다시 찾도록 확장. 보스 모듈도 자동사냥과 동일한
+    // 마을/상점 흐름을 그대로 쓴다(별도 구현 불필요).
+    if (!useButton) {
+      if (M.uiLog) M.uiLog(`인벤토리에 "${stoneName}"이 없음 → 상점에서 구매 시도`);
+      await Core.buyElementStoneAtTown(element, 'boss');
+      useButton = await findUseButtonInInventory();
     }
-    if (!useButton) throw new Error(`"${stoneName}" 사용 버튼 못찾음`);
+    if (!useButton) throw new Error(`상점 구매 후에도 "${stoneName}" 사용 버튼 못찾음`);
     // 돌 이름과 수량을 확인한 뒤 사용하는 시간.
     await M.humanPause(900, 1600);
     M.throwIfStopped();
