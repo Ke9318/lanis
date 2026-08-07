@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.34-stable
+// @version      1.13.37-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -1320,6 +1320,41 @@
     return true;
   };
 
+  // ⚠ 사용자 요청(2026-08): "캐릭 → 내 정보"에 있는 "HP 건강도"/"MP 건강도"가
+  // 100%가 아니면 경고를 띄운다. 자동사냥 시작 시 속성 확인(ensureCharacterElement)이
+  // 이미 이 페이지(/status)에 들어가므로, 그 타이밍에 같이 확인한다(별도 이동 불필요).
+  Core.readHealthPercentages = function () {
+    const text = Core.bodyText();
+    const hpMatch = text.match(/HP\s*건강도:\s*(\d+)%/);
+    const mpMatch = text.match(/MP\s*건강도:\s*(\d+)%/);
+    return {
+      hp: hpMatch ? parseInt(hpMatch[1], 10) : null,
+      mp: mpMatch ? parseInt(mpMatch[1], 10) : null,
+    };
+  };
+
+  // notifyStopped/notifyCompleted와 달리 모듈을 정지시키지 않는, 경고 전용
+  // 배너. 실행은 계속하되 사용자에게 강하게 알려야 하는 상황(HP/MP 건강도
+  // 저하 등)에 쓴다.
+  Core.warnBanner = function (moduleId, msg) {
+    Core.log(moduleId, `⚠ ${msg}`);
+    Core.showBanner(moduleId, msg, false);
+    Core.playStopSound();
+  };
+
+  Core.checkHealthAndWarn = function (moduleId) {
+    const { hp, mp } = Core.readHealthPercentages();
+    const problems = [];
+    if (hp !== null && hp < 100) problems.push(`HP 건강도 ${hp}%`);
+    if (mp !== null && mp < 100) problems.push(`MP 건강도 ${mp}%`);
+    if (problems.length > 0) {
+      Core.warnBanner(moduleId, `${problems.join(', ')} - 100%가 아닙니다. 확인이 필요합니다.`);
+    } else if (hp !== null && mp !== null) {
+      Core.log(moduleId, 'HP/MP 건강도 확인: 100% (정상)');
+    }
+    return { hp, mp };
+  };
+
   Core.ensureCharacterElement = async function (targetElement, moduleId) {
     if (!Core.ELEMENT_OPTIONS.includes(targetElement)) {
       throw new Error(`지원하지 않는 목표 속성입니다: ${targetElement}`);
@@ -1328,6 +1363,7 @@
     await Core.goToCharacterPage('내 정보', '/status');
     let currentElement = await Core.waitFor(() => Core.readCharacterElementOnStatus(), 8000, 250);
     if (!currentElement) throw new Error('내 정보에서 현재 캐릭터 속성을 읽지 못했습니다.');
+    Core.checkHealthAndWarn(moduleId);
 
     if (currentElement === targetElement) {
       Core.log(moduleId, `속성 확인 완료: ${targetElement} (변경 불필요)`);
@@ -1611,12 +1647,10 @@
     raremap: '레어맵',
     dungeon: '던전',
     arena: '아레나',
-    identify: '아이템',
     deepdungeon: '심층던전',
     boss: '보스',
   };
-  const moduleDisplayLabel = (moduleId) =>
-    moduleId === 'dismantle' ? '분해' : (MODULE_LABELS[moduleId] || moduleId);
+  const moduleDisplayLabel = (moduleId) => MODULE_LABELS[moduleId] || moduleId;
 
   const Modules = {};
 
@@ -1646,571 +1680,6 @@
     config: {
       targetBattles: 10,
     },
-  };
-
-  // -------------------------- 미감정 장비 감정 --------------------------
-  Modules.identify = {
-    id: 'identify',
-    running: false,
-    stopRequested: false,
-    runId: 0,
-    loopPromise: null,
-    cycleCount: 0,
-    categoryCounts: {
-      무기: 0,
-      방어구: 0,
-      장신구: 0,
-    },
-  };
-
-  // -------------------------- 봉인 장비 분해 --------------------------
-  Modules.dismantle = {
-    id: 'dismantle',
-    running: false,
-    stopRequested: false,
-    runId: 0,
-    loopPromise: null,
-    cycleCount: 0,
-    categoryCounts: {
-      무기: 0,
-      방어구: 0,
-      장신구: 0,
-    },
-  };
-
-  Modules.arena.saveConfig = function () {
-    try {
-      localStorage.setItem(ARENA_CONFIG_KEY, JSON.stringify(this.config));
-    } catch (e) {}
-  };
-
-  Modules.arena.loadConfig = function () {
-    try {
-      const saved = JSON.parse(localStorage.getItem(ARENA_CONFIG_KEY) || '{}');
-      const value = parseInt(saved.targetBattles, 10);
-      if (Number.isFinite(value) && value >= 1 && value <= 200) this.config.targetBattles = value;
-    } catch (e) {}
-  };
-
-  Modules.arena.todayKey = function () {
-    return new Date().toLocaleDateString('en-CA');
-  };
-
-  Modules.arena.isWeekend = function () {
-    const day = new Date().getDay();
-    return day === 0 || day === 6;
-  };
-
-  Modules.arena.saveResume = function () {
-    try {
-      localStorage.setItem(ARENA_RESUME_KEY, JSON.stringify({
-        running: true,
-        date: this.todayKey(),
-        targetBattles: this.config.targetBattles,
-      }));
-    } catch (e) {}
-  };
-
-  Modules.arena.clearResume = function () {
-    try { localStorage.removeItem(ARENA_RESUME_KEY); } catch (e) {}
-  };
-
-  Modules.arena.goToArena = async function () {
-    if (location.pathname.replace(/\/$/, '') !== '/arena') {
-      await Core.clickNavMenuExact('전투', '아레나');
-    }
-    const arrived = await Core.waitFor(
-      () => location.pathname.replace(/\/$/, '') === '/arena' &&
-        Core.bodyText().includes('오늘 전투 횟수'),
-      15000,
-      300
-    );
-    if (!arrived) throw new Error('아레나 화면 진입을 확인하지 못했습니다.');
-  };
-
-  Modules.arena.readTodayBattleCount = function () {
-    const marker = Core.gameElements('*').find((el) =>
-      el.children.length === 0 && el.textContent.trim() === '오늘 전투 횟수'
-    );
-    if (!marker) return null;
-    let node = marker.parentElement;
-    for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
-      const match = (node.textContent || '').match(/오늘 전투 횟수\s*(\d+)\s*회/);
-      if (match) return parseInt(match[1], 10);
-    }
-    return null;
-  };
-
-  Modules.arena.waitForEnabledStart = async function () {
-    return await Core.waitFor(() => {
-      const button = Core.findButtonByText('전투 시작');
-      return button && !button.disabled ? button : null;
-    }, 90000, 500);
-  };
-
-  Modules.arena.handleResultIfPresent = async function () {
-    const findBack = () =>
-      Core.findButtonByText('아레나로 돌아가기') ||
-      Core.findButtonByText('돌아가기');
-    const back = findBack();
-    if (!back) return false;
-    if (!(await Core.safeClick(findBack, {
-      beforeMin: 700,
-      beforeMax: 1200,
-      afterMin: 800,
-      afterMax: 1300,
-    }))) throw new Error('아레나 결과창의 "돌아가기" 버튼 클릭에 실패했습니다.');
-    await Core.waitFor(() => Core.bodyText().includes('오늘 전투 횟수'), 15000, 300);
-    return true;
-  };
-
-  Modules.arena.mainLoop = async function () {
-    const mod = this;
-    mod.cycleCount = 0;
-    const clickIntervalMs = 35000;
-    let lastAttemptAt = 0;
-    mod.loadConfig();
-    if (!mod.isWeekend()) {
-      mod.clearResume();
-      Core.notifyStopped('arena', '아레나는 토요일과 일요일에만 자동 실행할 수 있습니다.');
-      return;
-    }
-    const target = Math.max(1, Math.min(200, parseInt(mod.config.targetBattles, 10) || 10));
-    mod.config.targetBattles = target;
-    mod.saveConfig();
-    mod.saveResume();
-    await mod.goToArena();
-
-    // 전투 도중 새로고침되었을 경우 결과창부터 정리한다.
-    await mod.handleResultIfPresent();
-
-    while (!mod.stopRequested) {
-      const before = mod.readTodayBattleCount();
-      if (before === null) throw new Error('아레나의 오늘 전투 횟수를 읽지 못했습니다.');
-      mod.cycleCount = before;
-      Core.updateModuleButtons();
-      if (before >= target) {
-        mod.clearResume();
-        Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (설정 ${target}회)`);
-        return;
-      }
-
-      const remainingInterval = Math.max(0, clickIntervalMs - (Date.now() - lastAttemptAt));
-      if (remainingInterval > 0) {
-        Core.log('arena', `다음 클릭까지 ${Math.ceil(remainingInterval / 1000)}초 대기`);
-        if (!(await Core.interruptibleSleep(
-          remainingInterval,
-          () => mod.stopRequested || !mod.running
-        ))) return;
-      }
-      Core.log('arena', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}/${target}회`);
-      const startButton = await mod.waitForEnabledStart();
-      if (!startButton) throw new Error('90초 안에 아레나 "전투 시작" 버튼이 활성화되지 않았습니다.');
-      if (mod.stopRequested) return;
-      if (!(await Core.safeClick(() => {
-        const button = Core.findButtonByText('전투 시작');
-        return button && !button.disabled ? button : null;
-      }, { beforeMin: 700, beforeMax: 1300 }))) {
-        throw new Error('아레나 "전투 시작" 버튼 클릭에 실패했습니다.');
-      }
-      lastAttemptAt = Date.now();
-
-      const resultBack = await Core.waitFor(
-        () => Core.findButtonByText('아레나로 돌아가기') || Core.findButtonByText('돌아가기'),
-        15000,
-        500
-      );
-      if (!resultBack) {
-        Core.log('arena', '⚠ 전투 시작 클릭 후 결과 화면이 나타나지 않음 — 클릭 누락으로 판단, 35초 후 재시도');
-        continue;
-      }
-      await mod.handleResultIfPresent();
-      const incremented = await Core.waitFor(() => {
-        const count = mod.readTodayBattleCount();
-        return count !== null && count > before ? count : null;
-      }, 15000, 300);
-      if (incremented === null) throw new Error('전투 후 오늘 전투 횟수 증가를 확인하지 못했습니다.');
-      mod.cycleCount = incremented;
-      Core.log('arena', `아레나 전투 완료: 오늘 ${incremented}/${target}회`);
-    }
-  };
-
-  Modules.identify.goToInventory = async function () {
-    if (location.pathname.replace(/\/$/, '') !== '/inventory') {
-      await Core.clickNavMenuExact('캐릭', '인벤토리');
-    }
-    const arrived = await Core.waitFor(
-      () =>
-        location.pathname.replace(/\/$/, '') === '/inventory' &&
-        Core.gameElements('h5, h6').some((el) => el.textContent.trim() === '보유 아이템'),
-      15000,
-      250
-    );
-    if (!arrived) throw new Error('캐릭 인벤토리 화면 진입을 확인하지 못했습니다.');
-  };
-
-  Modules.identify.getOwnedEquipmentTable = function () {
-    const tables = Core.gameElements('table').filter((table) => {
-      const headers = [...table.querySelectorAll('th')].map((th) => th.textContent.trim());
-      return headers.includes('행동') &&
-        headers.some((text) => text.includes('아이템')) &&
-        headers.some((text) => text.includes('위력/무게'));
-    });
-    return tables.length === 1 ? tables[0] : null;
-  };
-
-  Modules.identify.selectCategory = async function (category) {
-    const findTab = () => Core.gameElements('[role="tab"]').find(
-      (tab) => tab.textContent.trim() === category
-    ) || null;
-    const tab = await Core.waitFor(findTab, 8000, 200);
-    if (!tab) throw new Error(`인벤토리 "${category}" 탭을 찾지 못했습니다.`);
-    if (tab.getAttribute('aria-selected') !== 'true') {
-      if (!(await Core.safeClick(findTab, {
-        beforeMin: 550,
-        beforeMax: 950,
-        afterMin: 350,
-        afterMax: 650,
-      }))) {
-        throw new Error(`인벤토리 "${category}" 탭 클릭에 실패했습니다.`);
-      }
-    }
-    const selected = await Core.waitFor(() => {
-      const current = findTab();
-      return current && current.getAttribute('aria-selected') === 'true' ? current : null;
-    }, 5000, 200);
-    if (!selected) throw new Error(`인벤토리 "${category}" 탭 전환을 확인하지 못했습니다.`);
-  };
-
-  Modules.identify.selectBlindOnly = async function () {
-    const getFilters = () => Core.gameElements('[role="group"] button')
-      .filter((button) => /^show(Normal|Sealed|Unsealed|Blind)$/.test(button.getAttribute('aria-label') || ''));
-    const isBlindOnly = () => {
-      const filters = getFilters();
-      if (filters.length !== 4) return false;
-      return filters.every((button) => {
-        const isBlind = button.getAttribute('aria-label') === 'showBlind';
-        return (button.getAttribute('aria-pressed') === 'true') === isBlind;
-      });
-    };
-    if (isBlindOnly()) return;
-    const blindButton = getFilters().find(
-      (button) => button.getAttribute('aria-label') === 'showBlind'
-    );
-    if (!blindButton) throw new Error('인벤토리 미감정 필터를 찾지 못했습니다.');
-    if (!(await Core.safeClick(
-      () => getFilters().find((button) => button.getAttribute('aria-label') === 'showBlind') || null,
-      { beforeMin: 500, beforeMax: 900, afterMin: 350, afterMax: 650 }
-    ))) {
-      throw new Error('인벤토리 미감정 필터 클릭에 실패했습니다.');
-    }
-    const filtered = await Core.waitFor(() => (isBlindOnly() ? true : null), 5000, 200);
-    if (!filtered) throw new Error('미감정 필터만 활성화된 상태를 확인하지 못했습니다.');
-  };
-
-  Modules.identify.getIdentifyTargets = function () {
-    const table = this.getOwnedEquipmentTable();
-    if (!table) return [];
-    return [...table.querySelectorAll('tbody tr')].map((row) => {
-      const cells = [...row.querySelectorAll('td')];
-      const button = [...row.querySelectorAll('button')].find(
-        (candidate) => candidate.textContent.trim() === '감정'
-      ) || null;
-      const isBlindRow = cells.some((cell) => cell.textContent.trim() === '-/-');
-      return button && isBlindRow && button.isConnected ? { row, button } : null;
-    }).filter(Boolean);
-  };
-
-  Modules.identify.findIdentifyDialog = function () {
-    return Core.gameElements('[role="dialog"]').find((dialog) =>
-      [...dialog.querySelectorAll('h1, h2, h3, h4, h5, h6')]
-        .some((heading) => heading.textContent.trim() === '아이템 감정')
-    ) || null;
-  };
-
-  Modules.identify.identifyOne = async function (category) {
-    const targets = this.getIdentifyTargets();
-    if (targets.length === 0) return false;
-    const targetButton = targets[0].button;
-    if (!(await Core.safeClick(
-      () => targetButton.isConnected && targetButton.textContent.trim() === '감정'
-        ? targetButton
-        : null,
-      { beforeMin: 550, beforeMax: 1000, afterMin: 150, afterMax: 300 }
-    ))) {
-      throw new Error(`${category}: 감정 대상 버튼 클릭에 실패했습니다.`);
-    }
-
-    const dialog = await Core.waitFor(() => this.findIdentifyDialog(), 5000, 150);
-    if (!dialog) throw new Error(`${category}: "아이템 감정" 확인창이 나타나지 않았습니다.`);
-    const getConfirm = () => {
-      const currentDialog = this.findIdentifyDialog();
-      if (!currentDialog) return null;
-      const buttons = [...currentDialog.querySelectorAll('button')]
-        .filter((button) => button.textContent.trim() === '확인');
-      return buttons.length === 1 ? buttons[0] : null;
-    };
-    if (!(await Core.safeClick(getConfirm, {
-      beforeMin: 500,
-      beforeMax: 900,
-      afterMin: 300,
-      afterMax: 550,
-    }))) {
-      throw new Error(`${category}: 아이템 감정 확인창의 "확인" 버튼을 정확히 찾지 못했습니다.`);
-    }
-
-    const completed = await Core.waitFor(
-      () =>
-        !this.findIdentifyDialog() &&
-        (!targetButton.isConnected || targetButton.textContent.trim() !== '감정')
-          ? true
-          : null,
-      8000,
-      200
-    );
-    if (!completed) {
-      throw new Error(`${category}: 감정 후 확인창 닫힘과 대상 행 제거를 확인하지 못했습니다.`);
-    }
-    return true;
-  };
-
-  Modules.identify.mainLoop = async function () {
-    const categories = ['무기', '방어구', '장신구'];
-    this.cycleCount = 0;
-    this.categoryCounts = { 무기: 0, 방어구: 0, 장신구: 0 };
-    await this.goToInventory();
-
-    for (const category of categories) {
-      if (!this.running || this.stopRequested) return;
-      await this.selectCategory(category);
-      await this.selectBlindOnly();
-      Core.log('identify', `${category} 미감정 아이템 확인 시작`);
-
-      for (let safety = 0; safety < 1000; safety++) {
-        if (!this.running || this.stopRequested) return;
-        const targets = this.getIdentifyTargets();
-        if (targets.length === 0) break;
-        await this.identifyOne(category);
-        this.categoryCounts[category] += 1;
-        this.cycleCount += 1;
-        Core.log('identify', `${category} 감정 완료: ${this.categoryCounts[category]}개`);
-        Core.updateModuleButtons();
-      }
-      if (this.getIdentifyTargets().length > 0) {
-        throw new Error(`${category}: 안전 제한 1000회에 도달해 감정을 중단했습니다.`);
-      }
-      Core.log('identify', `${category} 미감정 아이템 없음 확인`);
-    }
-
-    const detail = `무기 ${this.categoryCounts.무기}개, 방어구 ${this.categoryCounts.방어구}개, 장신구 ${this.categoryCounts.장신구}개`;
-    Core.moduleResults.identify = { ok: true, message: detail, at: Date.now() };
-    Core.notifyCompleted('identify', `미감정 장비 감정 완료 (${detail})`);
-  };
-
-  Modules.dismantle.goToDismantle = async function () {
-    if (location.pathname.replace(/\/$/, '') !== '/blacksmith') {
-      await Core.clickNavMenuExact('마을', '대장간');
-    }
-    const arrived = await Core.waitFor(
-      () =>
-        location.pathname.replace(/\/$/, '') === '/blacksmith' &&
-        Core.gameElements('[role="tab"]').some((tab) => tab.textContent.trim() === '분해'),
-      15000,
-      250
-    );
-    if (!arrived) throw new Error('마을 대장간 화면 진입을 확인하지 못했습니다.');
-
-    const findDismantleTab = () => Core.gameElements('[role="tab"]').find(
-      (tab) => tab.textContent.trim() === '분해'
-    ) || null;
-    const dismantleTab = findDismantleTab();
-    if (!dismantleTab) throw new Error('대장간의 "분해" 탭을 찾지 못했습니다.');
-    if (dismantleTab.getAttribute('aria-selected') !== 'true') {
-      if (!(await Core.safeClick(findDismantleTab, {
-        beforeMin: 550,
-        beforeMax: 950,
-        afterMin: 400,
-        afterMax: 700,
-      }))) {
-        throw new Error('대장간의 "분해" 탭 클릭에 실패했습니다.');
-      }
-    }
-    const ready = await Core.waitFor(
-      () => Core.gameElements('h1, h2, h3, h4, h5, h6')
-        .some((heading) => heading.textContent.trim() === '장비 분해'),
-      8000,
-      200
-    );
-    if (!ready) throw new Error('"장비 분해" 화면 전환을 확인하지 못했습니다.');
-  };
-
-  Modules.dismantle.getDismantleTable = function () {
-    const tables = Core.gameElements('table').filter((table) => {
-      const headers = [...table.querySelectorAll('th')].map((th) => th.textContent.trim());
-      return headers.length === 4 &&
-        headers[0] === '아이템' &&
-        headers[1] === '위력/무게' &&
-        headers[2] === '속성' &&
-        headers[3] === '분해';
-    });
-    return tables.length === 1 ? tables[0] : null;
-  };
-
-  Modules.dismantle.selectCategory = async function (category) {
-    const findTab = () => Core.gameElements('[role="tab"]').find(
-      (tab) => tab.textContent.trim() === category
-    ) || null;
-    const tab = await Core.waitFor(findTab, 8000, 200);
-    if (!tab) throw new Error(`장비 분해의 "${category}" 탭을 찾지 못했습니다.`);
-    if (tab.getAttribute('aria-selected') !== 'true') {
-      if (!(await Core.safeClick(findTab, {
-        beforeMin: 550,
-        beforeMax: 950,
-        afterMin: 400,
-        afterMax: 700,
-      }))) {
-        throw new Error(`장비 분해의 "${category}" 탭 클릭에 실패했습니다.`);
-      }
-    }
-    const selected = await Core.waitFor(() => {
-      const current = findTab();
-      return current &&
-        current.getAttribute('aria-selected') === 'true' &&
-        this.getDismantleTable()
-        ? current
-        : null;
-    }, 6000, 200);
-    if (!selected) throw new Error(`장비 분해의 "${category}" 탭 전환을 확인하지 못했습니다.`);
-  };
-
-  Modules.dismantle.getDismantleTargets = function () {
-    const table = this.getDismantleTable();
-    if (!table) return [];
-    return [...table.querySelectorAll('tbody tr')].map((row) => {
-      const cells = [...row.querySelectorAll('td')];
-      const buttons = [...row.querySelectorAll('button')]
-        .filter((button) => button.textContent.trim() === '분해');
-      if (cells.length !== 4 || buttons.length !== 1 || !buttons[0].isConnected) return null;
-      return {
-        row,
-        button: buttons[0],
-        itemName: cells[0].textContent.trim(),
-        fingerprint: row.textContent.replace(/\s+/g, ' ').trim(),
-      };
-    }).filter(Boolean);
-  };
-
-  Modules.dismantle.findDismantleDialogs = function () {
-    return Core.gameElements('[role="dialog"]').filter((dialog) =>
-      [...dialog.querySelectorAll('h1, h2, h3, h4, h5, h6')]
-        .some((heading) => heading.textContent.trim() === '장비 분해')
-    );
-  };
-
-  Modules.dismantle.findDialogButton = function (requireFinalWarning) {
-    const dialogs = this.findDismantleDialogs();
-    const dialog = dialogs.find((candidate) => {
-      const isFinal = (candidate.textContent || '').includes('정말 분해하시겠습니까?');
-      return requireFinalWarning ? isFinal : !isFinal;
-    });
-    if (!dialog) return null;
-    const buttons = [...dialog.querySelectorAll('button')]
-      .filter((button) => button.textContent.trim() === '분해');
-    return buttons.length === 1 ? buttons[0] : null;
-  };
-
-  Modules.dismantle.dismantleOne = async function (category) {
-    const targets = this.getDismantleTargets();
-    if (targets.length === 0) return false;
-    const target = targets[0];
-    Core.log('dismantle', `${category} "${target.itemName}" 분해 확인 시작`);
-
-    if (!(await Core.safeClick(
-      () => target.button.isConnected && target.button.textContent.trim() === '분해'
-        ? target.button
-        : null,
-      { beforeMin: 600, beforeMax: 1050, afterMin: 180, afterMax: 320 }
-    ))) {
-      throw new Error(`${category} "${target.itemName}": 목록의 분해 버튼 클릭에 실패했습니다.`);
-    }
-
-    const firstConfirm = await Core.waitFor(
-      () => this.findDialogButton(false),
-      5000,
-      150
-    );
-    if (!firstConfirm) {
-      throw new Error(`${category} "${target.itemName}": 첫 번째 장비 분해 확인창을 찾지 못했습니다.`);
-    }
-    if (!(await Core.safeClick(
-      () => this.findDialogButton(false),
-      { beforeMin: 550, beforeMax: 950, afterMin: 200, afterMax: 350 }
-    ))) {
-      throw new Error(`${category} "${target.itemName}": 첫 번째 확인창의 분해 버튼 클릭에 실패했습니다.`);
-    }
-
-    const finalConfirm = await Core.waitFor(
-      () => this.findDialogButton(true),
-      5000,
-      150
-    );
-    if (!finalConfirm) {
-      throw new Error(`${category} "${target.itemName}": 최종 분해 경고창을 찾지 못했습니다.`);
-    }
-    if (!(await Core.safeClick(
-      () => this.findDialogButton(true),
-      { beforeMin: 650, beforeMax: 1100, afterMin: 350, afterMax: 650 }
-    ))) {
-      throw new Error(`${category} "${target.itemName}": 최종 경고창의 분해 버튼 클릭에 실패했습니다.`);
-    }
-
-    const completed = await Core.waitFor(
-      () =>
-        this.findDismantleDialogs().length === 0 &&
-        !target.button.isConnected
-          ? true
-          : null,
-      8000,
-      200
-    );
-    if (!completed) {
-      throw new Error(
-        `${category} "${target.itemName}": 확인창 닫힘과 원래 분해 행 제거를 확인하지 못했습니다.`
-      );
-    }
-    return true;
-  };
-
-  Modules.dismantle.mainLoop = async function () {
-    const categories = ['무기', '방어구', '장신구'];
-    this.cycleCount = 0;
-    this.categoryCounts = { 무기: 0, 방어구: 0, 장신구: 0 };
-    await this.goToDismantle();
-
-    for (const category of categories) {
-      if (!this.running || this.stopRequested) return;
-      await this.selectCategory(category);
-      Core.log('dismantle', `${category} 봉인 장비 확인 시작`);
-
-      for (let safety = 0; safety < 1000; safety++) {
-        if (!this.running || this.stopRequested) return;
-        const targets = this.getDismantleTargets();
-        if (targets.length === 0) break;
-        await this.dismantleOne(category);
-        this.categoryCounts[category] += 1;
-        this.cycleCount += 1;
-        Core.log('dismantle', `${category} 분해 완료: ${this.categoryCounts[category]}개`);
-        Core.updateModuleButtons();
-      }
-      if (this.getDismantleTargets().length > 0) {
-        throw new Error(`${category}: 안전 제한 1000회에 도달해 분해를 중단했습니다.`);
-      }
-      Core.log('dismantle', `${category} 분해할 봉인 장비 없음 확인`);
-    }
-
-    const detail = `무기 ${this.categoryCounts.무기}개, 방어구 ${this.categoryCounts.방어구}개, 장신구 ${this.categoryCounts.장신구}개`;
-    Core.moduleResults.dismantle = { ok: true, message: detail, at: Date.now() };
-    Core.notifyCompleted('dismantle', `봉인 장비 분해 완료 (${detail})`);
   };
 
   // -------------------------- 모듈 1: 재전직 --------------------------
@@ -6824,14 +6293,12 @@
     raremap: {},
     dungeon: {},
     arena: {},
-    identify: {},
-    dismantle: {},
     deepdungeon: {},
   };
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
-    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'identify', 'dismantle', 'deepdungeon'].forEach((id) => {
+    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'deepdungeon'].forEach((id) => {
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
@@ -6846,10 +6313,6 @@
           ? `오늘 클리어 ${mod.cycleCount}개`
           : id === 'arena'
           ? `오늘 전투 ${mod.cycleCount}/${mod.config.targetBattles}회`
-          : id === 'identify'
-          ? `감정 ${mod.cycleCount}개`
-          : id === 'dismantle'
-          ? `분해 ${mod.cycleCount}개`
           : id === 'deepdungeon'
           ? `던전의 주인 도전 ${mod.cycleCount}회`
           : `사이클 ${mod.cycleCount}`;
@@ -7886,139 +7349,6 @@
     refs.inputs = [countInput];
   }
 
-  function buildItemTab(container) {
-    const sectionStyle =
-      'border:1px solid #444; border-radius:5px; padding:8px; margin-bottom:9px; background:#171717;';
-
-    const identifySection = document.createElement('div');
-    identifySection.style.cssText = sectionStyle;
-    const identifyTitle = document.createElement('div');
-    identifyTitle.textContent = '미감정 장비 감정';
-    identifyTitle.style.cssText = 'font-weight:bold; color:#eee; margin-bottom:5px;';
-    identifySection.appendChild(identifyTitle);
-
-    const refs = UIRefs.identify;
-    const description = document.createElement('div');
-    description.textContent =
-      '캐릭 인벤토리에서 미감정 필터만 선택하고 무기 → 방어구 → 장신구 순서로 모든 미감정 장비를 감정합니다.';
-    description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin:5px 0 9px;';
-    identifySection.appendChild(description);
-
-    const safety = document.createElement('div');
-    safety.textContent =
-      '※ 보유 장비 테이블의 -/- 행에 있는 "감정" 버튼과 "아이템 감정" 확인창 내부의 확인 버튼만 누릅니다.';
-    safety.style.cssText = 'font-size:10px; color:#f5a623; line-height:1.45; margin-bottom:8px;';
-    identifySection.appendChild(safety);
-
-    const btnRow = document.createElement('div');
-    btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
-    const startBtn = document.createElement('button');
-    startBtn.textContent = '감정 시작';
-    startBtn.style.cssText = btnStyle('#2e7d32');
-    const stopBtn = document.createElement('button');
-    stopBtn.textContent = '정지';
-    stopBtn.style.cssText = btnStyle('#c62828');
-    stopBtn.disabled = true;
-    const statusEl = document.createElement('span');
-    statusEl.textContent = '대기중';
-    statusEl.style.cssText = 'margin-left:4px; font-size:11px;';
-    startBtn.addEventListener('click', () => Core.startModule('identify'));
-    stopBtn.addEventListener('click', () => Core.requestStopModule('identify'));
-    btnRow.append(startBtn, stopBtn);
-    identifySection.append(btnRow, statusEl);
-    container.appendChild(identifySection);
-
-    refs.startBtn = startBtn;
-    refs.stopBtn = stopBtn;
-    refs.statusEl = statusEl;
-    refs.inputs = [];
-
-    const dismantleSection = document.createElement('div');
-    dismantleSection.style.cssText = sectionStyle;
-    const dismantleTitle = document.createElement('div');
-    dismantleTitle.textContent = '봉인 장비 분해';
-    dismantleTitle.style.cssText = 'font-weight:bold; color:#eee; margin-bottom:5px;';
-    dismantleSection.appendChild(dismantleTitle);
-
-    const dismantleDescription = document.createElement('div');
-    dismantleDescription.textContent =
-      '대장간 분해 화면에서 무기 → 방어구 → 장신구 순서로 인벤토리에 남은 봉인 장비를 모두 분해합니다.';
-    dismantleDescription.style.cssText =
-      'font-size:11px; color:#ccc; line-height:1.5; margin:5px 0 7px;';
-    dismantleSection.appendChild(dismantleDescription);
-
-    const dismantleWarning = document.createElement('div');
-    dismantleWarning.textContent =
-      '⚠ 분해한 장비는 되돌릴 수 없습니다. 보관할 장비를 반드시 창고로 옮긴 뒤 실행하세요.';
-    dismantleWarning.style.cssText =
-      'font-size:10px; color:#ff8a80; line-height:1.45; margin-bottom:8px;';
-    dismantleSection.appendChild(dismantleWarning);
-
-    const dismantleRefs = UIRefs.dismantle;
-    const dismantleBtnRow = document.createElement('div');
-    dismantleBtnRow.style.cssText =
-      'display:flex; gap:6px; margin-top:6px; align-items:center;';
-    const dismantleStartBtn = document.createElement('button');
-    dismantleStartBtn.textContent = '분해 시작';
-    dismantleStartBtn.style.cssText = btnStyle('#ef6c00');
-    const dismantleStopBtn = document.createElement('button');
-    dismantleStopBtn.textContent = '정지';
-    dismantleStopBtn.style.cssText = btnStyle('#c62828');
-    dismantleStopBtn.disabled = true;
-    const dismantleStatusEl = document.createElement('span');
-    dismantleStatusEl.textContent = '대기중';
-    dismantleStatusEl.style.cssText = 'margin-left:4px; font-size:11px;';
-    dismantleStartBtn.addEventListener('click', () => Core.startModule('dismantle'));
-    dismantleStopBtn.addEventListener('click', () => Core.requestStopModule('dismantle'));
-    dismantleBtnRow.append(dismantleStartBtn, dismantleStopBtn);
-    dismantleSection.append(dismantleBtnRow, dismantleStatusEl);
-    container.appendChild(dismantleSection);
-
-    dismantleRefs.startBtn = dismantleStartBtn;
-    dismantleRefs.stopBtn = dismantleStopBtn;
-    dismantleRefs.statusEl = dismantleStatusEl;
-    dismantleRefs.inputs = [];
-  }
-
-  const DEEPDUNGEON_CONFIG_KEY = 'lrm-deepdungeon-config';
-
-  Modules.deepdungeon.saveConfig = function () {
-    try {
-      localStorage.setItem(
-        DEEPDUNGEON_CONFIG_KEY,
-        JSON.stringify({
-          originalElement: this.config.originalElement,
-          tokenShopThreshold: this.config.tokenShopThreshold,
-          emergencyHpPercent: this.config.emergencyHpPercent,
-          bossPreFloorHpPercent: this.config.bossPreFloorHpPercent,
-          hpDropTriggerPercent: this.config.hpDropTriggerPercent,
-          wanderingSoulFloorThreshold: this.config.wanderingSoulFloorThreshold,
-          targetAC: this.config.targetAC,
-          targetDefense: this.config.targetDefense,
-          retryIfWeeklyDamageUnder1M: this.config.retryIfWeeklyDamageUnder1M,
-          jobMode: this.config.jobMode,
-        })
-      );
-    } catch (e) {
-      /* localStorage 사용 불가 환경이면 조용히 무시 */
-    }
-  };
-
-  Modules.deepdungeon.loadConfigIntoSelf = function () {
-    try {
-      const raw = localStorage.getItem(DEEPDUNGEON_CONFIG_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw);
-      Object.keys(saved).forEach((k) => {
-        if (typeof saved[k] === 'number' || typeof saved[k] === 'boolean' || typeof saved[k] === 'string') {
-          this.config[k] = saved[k];
-        }
-      });
-    } catch (e) {
-      /* 저장된 값이 손상됐으면 기본값 그대로 사용 */
-    }
-  };
-
   // 심층던전 탭 - 일반 던전 모듈과는 완전히 다른 화면/로직이라 설정값도 별도로
   // 관리한다 (labelEl/inputStyle/btnStyle 등 UI 헬퍼는 위에서 공용으로 이미 정의됨).
   function buildDeepDungeonTab(container) {
@@ -8308,7 +7638,6 @@
     buildRaremapTab(tabContents.raremap);
     buildDungeonTab(tabContents.dungeon);
     buildArenaTab(tabContents.arena);
-    buildItemTab(tabContents.identify);
     buildDeepDungeonTab(tabContents.deepdungeon);
     buildBossTab(tabContents.boss);
     buildDailyTab(tabContents.daily);
