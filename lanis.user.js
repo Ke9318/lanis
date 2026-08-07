@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.39-stable
+// @version      1.13.40-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -1680,6 +1680,15 @@
     config: {
       targetBattles: 10,
     },
+  };
+
+  // ⚠ 버그 수정(2026-08): 일일 시퀀스의 아레나 단계 검증이 이 함수를 호출하고
+  // 있었는데, Modules.arena에는 애초에 정의된 적이 없어 "일일 실행"이 아레나
+  // 단계에서 매번 크래시했다. 아레나 화면 자체에 "오늘 N회" 같은 명시적
+  // 문구가 없어 페이지에서 정확히 파싱할 방법이 없으므로, 세션 내 누적
+  // 실행 횟수(cycleCount)로 대체한다(새로고침 시 초기화되는 한계는 있음).
+  Modules.arena.readTodayBattleCount = function () {
+    return this.cycleCount || 0;
   };
 
   // -------------------------- 모듈 1: 재전직 --------------------------
@@ -6239,7 +6248,6 @@
     mod.running = false;
     if (Core.activeModuleId === moduleId) Core.activeModuleId = null;
     Core.log(moduleId, '사용자 요청으로 정지합니다...');
-    if (moduleId === 'arena') Modules.arena.clearResume();
     Core.updateModuleButtons();
   };
 
@@ -7756,7 +7764,6 @@
     // 연속 실행되며, 실제 새로고침/탭 재실행이 발생했다면 안전하게 중단한다.
     // 오래된 running 상태를 복구하면 동일 단계(특히 보스)를 처음부터 다시
     // 실행해 무한 재도전할 수 있으므로 모두 폐기한다.
-    Modules.arena.clearResume();
     sessionStorage.removeItem(DAILY_AUTH_KEY);
     const staleDaily = Modules.daily.loadState();
     if (staleDaily) {
