@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.37-stable
+// @version      1.13.39-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -7297,7 +7297,6 @@
   function buildArenaTab(container) {
     const mod = Modules.arena;
     const refs = UIRefs.arena;
-    mod.loadConfig();
 
     container.appendChild(labelEl('오늘 실행할 총 전투 횟수'));
     const countInput = document.createElement('input');
@@ -7310,7 +7309,6 @@
       const value = Math.max(1, Math.min(200, parseInt(countInput.value, 10) || 10));
       mod.config.targetBattles = value;
       countInput.value = value;
-      mod.saveConfig();
       Core.updateModuleButtons();
     });
     container.appendChild(countInput);
@@ -7354,7 +7352,6 @@
   function buildDeepDungeonTab(container) {
     const mod = Modules.deepdungeon;
     const refs = UIRefs.deepdungeon;
-    mod.loadConfigIntoSelf();
 
     container.appendChild(labelEl('원래 속성 (시작 전 자동 확인·변경)'));
     const elementSelect = document.createElement('select');
@@ -7373,7 +7370,6 @@
     });
     elementSelect.addEventListener('change', (e) => {
       mod.config.originalElement = e.target.value;
-      mod.saveConfig();
     });
     container.appendChild(elementSelect);
 
@@ -7408,7 +7404,6 @@
 
     jobSelect.addEventListener('change', (e) => {
       mod.config.jobMode = e.target.value;
-      mod.saveConfig();
       renderJobDescription();
     });
 
@@ -7419,7 +7414,6 @@
     tokenInput.style.cssText = inputStyle();
     tokenInput.addEventListener('change', (e) => {
       mod.config.tokenShopThreshold = parseInt(e.target.value, 10) || 500;
-      mod.saveConfig();
     });
     container.appendChild(tokenInput);
 
@@ -7430,7 +7424,6 @@
     emergInput.style.cssText = inputStyle();
     emergInput.addEventListener('change', (e) => {
       mod.config.emergencyHpPercent = parseInt(e.target.value, 10) || 30;
-      mod.saveConfig();
     });
     container.appendChild(emergInput);
 
@@ -7441,7 +7434,6 @@
     bossPreInput.style.cssText = inputStyle();
     bossPreInput.addEventListener('change', (e) => {
       mod.config.bossPreFloorHpPercent = parseInt(e.target.value, 10) || 50;
-      mod.saveConfig();
     });
     container.appendChild(bossPreInput);
 
@@ -7452,7 +7444,6 @@
     acInput.style.cssText = inputStyle();
     acInput.addEventListener('change', (e) => {
       mod.config.targetAC = parseInt(e.target.value, 10) || 0;
-      mod.saveConfig();
     });
     container.appendChild(acInput);
 
@@ -7463,7 +7454,6 @@
     defInput.style.cssText = inputStyle();
     defInput.addEventListener('change', (e) => {
       mod.config.targetDefense = parseInt(e.target.value, 10) || 0;
-      mod.saveConfig();
     });
     container.appendChild(defInput);
 
@@ -7474,7 +7464,6 @@
     retryCheck.checked = mod.config.retryIfWeeklyDamageUnder1M;
     retryCheck.addEventListener('change', (e) => {
       mod.config.retryIfWeeklyDamageUnder1M = e.target.checked;
-      mod.saveConfig();
     });
     const retryLabel = document.createElement('span');
     retryLabel.textContent = '누적 데미지 100만 이하시 재도전 ("기록" 탭의 주간 누적 데미지 기준)';
@@ -7719,7 +7708,7 @@
   function init() {
     if (document.getElementById('lrm-panel')) return;
     buildPanel();
-    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 아이템 / 심층던전 / 보스 / 일일)');
+    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 보스 / 일일)');
     if (Core.wasDiscarded) {
       const state = Modules.daily.loadState();
       let auth = null;
