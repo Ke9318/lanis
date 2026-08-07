@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.30-stable
+// @version      1.13.31-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -615,10 +615,10 @@
     await Core.humanDelay(700, 1300);
   };
 
-  Core.useElementStone = async function (targetElement, moduleId) {
+  // 인벤토리 소모품 탭을 열어 targetElement의 돌 "사용" 버튼을 찾는다.
+  // 페이지네이션까지 뒤진다. 못 찾으면 null.
+  Core.findElementStoneUseButton = async function (targetElement) {
     const stoneName = `${targetElement}의 돌`;
-    await Core.goToCharacterPage('인벤토리', '/inventory');
-
     const consumableTab = await Core.waitFor(
       () =>
         Core.gameElements('[role="tab"], button').find(
@@ -654,7 +654,25 @@
       if (!next) break;
       if (!(await Core.safeClick(next, { beforeMin: 500, beforeMax: 900, afterMin: 650, afterMax: 1100 }))) break;
     }
-    if (!useButton) throw new Error(`인벤토리에서 "${stoneName}"을 찾지 못했습니다.`);
+    return useButton;
+  };
+
+  Core.useElementStone = async function (targetElement, moduleId) {
+    const stoneName = `${targetElement}의 돌`;
+    await Core.goToCharacterPage('인벤토리', '/inventory');
+
+    let useButton = await Core.findElementStoneUseButton(targetElement);
+
+    // ⚠ 사용자 요청(2026-08): 인벤토리에 없으면 그냥 멈추던 것을, 속성에 맞는
+    // 마을로 이동해 상점에서 사 온 뒤 다시 찾도록 확장. 실전 확인된 구매 흐름
+    // (마을 이동 → 아이템 상점 → 기타 탭 → 구매 → 확인)을 그대로 재사용함.
+    if (!useButton) {
+      Core.log(moduleId, `인벤토리에 "${stoneName}"이 없음 → 상점에서 구매 시도`);
+      await Core.buyElementStoneAtTown(targetElement, moduleId);
+      await Core.goToCharacterPage('인벤토리', '/inventory');
+      useButton = await Core.findElementStoneUseButton(targetElement);
+    }
+    if (!useButton) throw new Error(`상점 구매 후에도 인벤토리에서 "${stoneName}"을 찾지 못했습니다.`);
 
     if (!(await Core.safeClick(useButton, { beforeMin: 900, beforeMax: 1600 }))) {
       throw new Error(`"${stoneName}" 사용 버튼이 클릭 직전에 사라졌습니다.`);
@@ -668,6 +686,160 @@
       throw new Error(`"${stoneName}" 사용을 확정하지 못했습니다.`);
     }
     Core.log(moduleId, `${stoneName} 1개 사용 완료`);
+  };
+
+  // ⚠ 사용자 요청(2026-08): 속성의 돌이 인벤토리에 없으면 그냥 멈추던 것을,
+  // 속성에 맞는 마을로 이동해 상점에서 사 오는 로직으로 확장한다. 실전 확인된
+  // 매핑(번대 대기 화면에서 각 마을을 직접 클릭해 속성을 확인함):
+  //   불=베곤, 물=피렌트, 번개=심포니아, 바람=카웬, 별=포트스미스,
+  //   빛=에렌시아, 어둠=데자브
+  Core.ELEMENT_TO_TOWN = {
+    불: '베곤',
+    물: '피렌트',
+    번개: '심포니아',
+    바람: '카웬',
+    별: '포트스미스',
+    빛: '에렌시아',
+    어둠: '데자브',
+  };
+
+  // 현재 위치한 마을 이름을 읽는다. 이동 없이 관찰만 한다(/town-move 페이지에
+  // 가야 한다). 특정 페이지에 있을 필요 없이 한 곳에서 바로 불러서 읽을 수
+  // 있도록, 상태를 복원하지 않고 /town-move로 잠시 갔다 오는 방식을 쓴다.
+  Core.readCurrentTown = async function (moduleId) {
+    if (location.pathname.replace(/\/$/, '') !== '/town-move') {
+      await Core.clickNavMenuExact('마을', '마을 이동');
+      const arrived = await Core.waitFor(
+        () => location.pathname.replace(/\/$/, '') === '/town-move',
+        10000,
+        250
+      );
+      if (!arrived) throw new Error('마을 이동 화면으로 진입하지 못했습니다.');
+    }
+    // ⚠ 실전 확인: "현재 위치는 X (a, b) 입니다." 문구는 안내 문장과 한
+    // <p> 안에 <br>로 붙어 있어(리프 노드가 아님), leaf 기준 검색으로는
+    // 못 찾는다. includes로 후보를 찾고 그중 가장 작은(자식 적은) 요소의
+    // textContent에서 정규식으로 직접 추출한다.
+    const match = await Core.waitFor(() => {
+      const candidates = Core.gameElements('*').filter((e) => e.textContent.includes('현재 위치는'));
+      if (!candidates.length) return null;
+      const smallest = candidates.reduce(
+        (best, el) =>
+          !best || el.querySelectorAll('*').length < best.querySelectorAll('*').length ? el : best,
+        null
+      );
+      return smallest.textContent.match(/현재 위치는\s*(\S+)\s*\(/);
+    }, 8000, 250);
+    if (!match) throw new Error('현재 위치 텍스트를 찾지 못했습니다.');
+    return match[1];
+  };
+
+  // 지도에서 마을 하나를 클릭해 상세 패널을 열고, "이 마을로 이동" 버튼을
+  // 누른다. /town-move에 이미 있다는 것이 전제이므로, readCurrentTown 호출
+  // 직후에만 쓰이도록 설계함.
+  Core.clickTownOnMap = async function (townName) {
+    const candidates = Core.gameElements('*').filter(
+      (e) => e.textContent.trim() === townName
+    );
+    // 가장 작은(자식 수가 적은) 후보가 실제 라벨 요소임.
+    const labelEl = candidates.reduce(
+      (best, el) =>
+        !best || el.querySelectorAll('*').length < best.querySelectorAll('*').length ? el : best,
+      null
+    );
+    if (!labelEl) throw new Error(`지도에서 마을 "${townName}"을 찾지 못했습니다.`);
+    // 실전 확인: 라벨(span) 자체가 아니라 그 조상(depth 2) 노드가 클릭 가능함.
+    let clickTarget = labelEl;
+    for (let i = 0; i < 2 && clickTarget.parentElement; i++) clickTarget = clickTarget.parentElement;
+    if (!(await Core.safeClick(() => clickTarget, { beforeMin: 400, beforeMax: 800 }))) {
+      throw new Error(`마을 "${townName}" 클릭에 실패했습니다.`);
+    }
+    const moveBtn = await Core.waitFor(
+      () => Core.findButtonByText('이 마을로 이동'),
+      6000,
+      250
+    );
+    if (!moveBtn) throw new Error(`"${townName}" 상세 패널에서 "이 마을로 이동" 버튼을 찾지 못했습니다.`);
+    if (!(await Core.safeClick(() => Core.findButtonByText('이 마을로 이동'), { beforeMin: 500, beforeMax: 1000 }))) {
+      throw new Error(`"${townName}"(으)로 이동 버튼 클릭에 실패했습니다.`);
+    }
+    const arrived = await Core.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/game',
+      10000,
+      250
+    );
+    if (!arrived) throw new Error(`"${townName}"(으)로 이동 후 도착 확인 실패`);
+    await Core.humanDelay(500, 1000);
+  };
+
+  // 목표 속성에 필요한 마을에 지금 있는지 확인하고, 아니면 이동한다.
+  Core.ensureCurrentTownForElement = async function (targetElement, moduleId) {
+    const requiredTown = Core.ELEMENT_TO_TOWN[targetElement];
+    if (!requiredTown) throw new Error(`속성 "${targetElement}"에 대응하는 마을 정보가 없습니다.`);
+    const current = await Core.readCurrentTown(moduleId);
+    if (current === requiredTown) {
+      Core.log(moduleId, `마을 위치 확인 완료: ${current} (이동 불필요)`);
+      return true;
+    }
+    Core.log(moduleId, `마을 위치 불일치: 현재 ${current} / 필요 ${requiredTown}(${targetElement} 속성) → 이동`);
+    await Core.clickTownOnMap(requiredTown);
+    const verify = await Core.readCurrentTown(moduleId);
+    if (verify !== requiredTown) {
+      throw new Error(`마을 이동 검증 실패: 현재 ${verify} / 목표 ${requiredTown}`);
+    }
+    Core.log(moduleId, `마을 이동 완료: ${requiredTown}`);
+    return true;
+  };
+
+  // 해당 속성의 돌을 파는 마을(ELEMENT_TO_TOWN)로 이동해 아이템 상점 "기타"
+  // 탭에서 구매한다. 이미 그 마을에 있으면 이동을 생략한다
+  // (ensureCurrentTownForElement가 자체적으로 판단함).
+  Core.buyElementStoneAtTown = async function (targetElement, moduleId) {
+    const stoneName = `${targetElement}의 돌`;
+    await Core.ensureCurrentTownForElement(targetElement, moduleId);
+
+    await Core.clickNavMenuExact('마을', '아이템 상점');
+    const arrivedShop = await Core.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/shop',
+      10000,
+      250
+    );
+    if (!arrivedShop) throw new Error('아이템 상점으로 진입하지 못했습니다.');
+
+    const otherTab = await Core.waitFor(
+      () => Core.findButtonByText('기타'),
+      8000,
+      250
+    );
+    if (!otherTab) throw new Error('아이템 상점 "기타" 탭을 찾지 못했습니다.');
+    if (!(await Core.safeClick(() => Core.findButtonByText('기타'), { beforeMin: 500, beforeMax: 900 }))) {
+      throw new Error('아이템 상점 "기타" 탭 클릭에 실패했습니다.');
+    }
+
+    const findRow = () =>
+      Core.gameElements('tr').find(
+        (tr) =>
+          tr.textContent.includes(stoneName) &&
+          [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '구매') &&
+          Core.isElementVisible(tr)
+      ) || null;
+    const row = await Core.waitFor(findRow, 8000, 250);
+    if (!row) throw new Error(`상점 "기타" 탭에서 "${stoneName}"을 찾지 못했습니다.`);
+    const buyBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '구매');
+    if (!(await Core.safeClick(() => buyBtn, { beforeMin: 500, beforeMax: 900 }))) {
+      throw new Error(`"${stoneName}" 구매 버튼 클릭에 실패했습니다.`);
+    }
+
+    const confirmBtn = await Core.waitFor(
+      () => Core.findButtonInDialog('아이템 구매 확인', '구매') || Core.findButtonInDialog(stoneName, '구매'),
+      6000,
+      250
+    );
+    if (!confirmBtn) throw new Error(`"${stoneName}" 구매 확인창을 찾지 못했습니다.`);
+    if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 600, beforeMax: 1100, afterMin: 1000, afterMax: 1600 }))) {
+      throw new Error(`"${stoneName}" 구매를 확정하지 못했습니다.`);
+    }
+    Core.log(moduleId, `${stoneName} 상점에서 구매 완료 (${Core.ELEMENT_TO_TOWN[targetElement]})`);
   };
 
   // ---------------- 장비용 기름 자동 사용 (자동사냥) ----------------
@@ -3380,6 +3552,12 @@
     await Core.applyCommonPreset('사냥', 'autohunt');
     Core.log('autohunt', `시작 전 원래 속성(${mod.config.originalElement}) 확인`);
     await Core.ensureCharacterElement(mod.config.originalElement, 'autohunt');
+    // ⚠ 사용자 확인(2026-08): 보스/던전과 달리 자동사냥은 "사냥을 시작한 마을의
+    // 속성"과 "캐릭터 속성"이 일치해야 버프를 받는다. 마을 위치는 상관없는
+    // 던전과 혼동하기 쉬운 지점이므로, 캐릭터 속성 확인 직후 마을 위치도 함께
+    // 확인해서 다르면 이동한다.
+    Core.log('autohunt', `시작 전 마을 위치(${Core.ELEMENT_TO_TOWN[mod.config.originalElement]}) 확인`);
+    await Core.ensureCurrentTownForElement(mod.config.originalElement, 'autohunt');
     Core.log(
       'autohunt',
       `매크로 시작: 사냥터=${mod.config.groundSuffix}${mod.config.floor ? ' ' + mod.config.floor + '층' : ''}, 입금 기준=${mod.config.goldThreshold.toLocaleString()}G, 최소 행동력=${mod.config.minEnergy}`
