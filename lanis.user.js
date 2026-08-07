@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.32-stable
+// @version      1.13.33-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -9125,7 +9125,7 @@
               const isExplicitNotice =
                 explicitNotices.includes(candidate) ||
                 (candidate === el && text.length > 0 && text.length <= 300);
-              const verdict = Core.classifyPresetApplyNotice(
+              const verdict = M.classifyPresetApplyNotice(
                 text,
                 name,
                 isExplicitNotice
@@ -10111,6 +10111,175 @@
     if (!arrived) throw new Error('개인 보스 목록 복귀 실패');
   };
 
+  // ⚠ 버그 수정(2026-08): 이 파일은 두 개의 독립된 IIFE로 구성되어 있고,
+  // Core는 첫 번째 IIFE(자동사냥 등)의 지역 변수라서 두 번째 IIFE인 보스
+  // 모듈(M)에서는 절대 접근할 수 없다(실전 확인: "Core is not defined"로
+  // 매번 실패해 보스 전투 자체가 진행되지 않았음). Core.buyElementStoneAtTown
+  // 등을 그대로 재사용하려 했던 이전 시도가 이 스코프 문제 때문에 실패했으므로,
+  // 보스 모듈 자체에 동일한 로직을 독립적으로 구현한다.
+  // ⚠ 버그 수정(2026-08): applyBossPreset이 내부에서 Core.classifyPresetApplyNotice를
+  // 호출하고 있었는데, 이 역시 Core가 없는 스코프에서 실행되어 매번
+  // ReferenceError로 실패하고 있었다(보스 전투 전 장비 프리셋 적용이 이
+  // 함수에 의존하므로, 이게 "보스가 전혀 진행되지 않는" 증상의 실제 원인일
+  // 가능성이 높다). 순수 함수라 로직을 그대로 복사해 온다.
+  M.classifyPresetApplyNotice = function (text, presetName, isExplicitNotice = false) {
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!normalized) return null;
+    const hasPresetContext =
+      normalized.includes(presetName) ||
+      normalized.includes('프리셋') ||
+      isExplicitNotice;
+    if (!hasPresetContext) return null;
+    if (
+      /(?:실패|오류|적용하지\s*못|불러오지\s*못|적용할\s*수\s*없)/.test(normalized)
+    ) return 'failure';
+    if (
+      /(?:적용했습니다|적용되었습니다|적용\s*완료|불러왔습니다|불러오기\s*완료)/.test(normalized)
+    ) return 'success';
+    return null;
+  };
+
+  M.ELEMENT_TO_TOWN = {
+    불: '베곤',
+    물: '피렌트',
+    번개: '심포니아',
+    바람: '카웬',
+    별: '포트스미스',
+    빛: '에렌시아',
+    어둠: '데자브',
+  };
+
+  M.readCurrentTown = async () => {
+    if (location.pathname.replace(/\/$/, '') !== '/town-move') {
+      const townBtn = await M.waitFor(() => M.findButtonByText('마을'), 8000);
+      if (!townBtn) throw new Error('"마을" 메뉴 버튼 못찾음');
+      townBtn.click();
+      await M.humanPause(500, 900);
+      const moveItem = await M.waitFor(
+        () => M.queryAll('[role="menuitem"]').find((el) => el.textContent.trim() === '마을 이동' && M.isVisible(el)),
+        8000
+      );
+      if (!moveItem) throw new Error('"마을 이동" 메뉴 항목 못찾음');
+      moveItem.click();
+      const arrived = await M.waitFor(
+        () => location.pathname.replace(/\/$/, '') === '/town-move',
+        10000,
+        250
+      );
+      if (!arrived) throw new Error('마을 이동 화면으로 진입하지 못했습니다.');
+    }
+    // 실전 확인: "현재 위치는 X (a, b) 입니다." 문구는 안내 문장과 한 <p>에
+    // <br>로 붙어 있어 리프 노드 검색으로는 못 찾는다. includes로 후보를
+    // 찾고 가장 작은(자식 적은) 요소의 textContent에서 정규식으로 추출한다.
+    const match = await M.waitFor(() => {
+      const candidates = M.queryAll('*').filter((e) => e.textContent.includes('현재 위치는'));
+      if (!candidates.length) return null;
+      const smallest = candidates.reduce(
+        (best, el) => (!best || el.querySelectorAll('*').length < best.querySelectorAll('*').length ? el : best),
+        null
+      );
+      return smallest.textContent.match(/현재 위치는\s*(\S+)\s*\(/);
+    }, 8000, 250);
+    if (!match) throw new Error('현재 위치 텍스트를 찾지 못했습니다.');
+    return match[1];
+  };
+
+  M.clickTownOnMap = async (townName) => {
+    const candidates = M.queryAll('*').filter((e) => e.textContent.trim() === townName);
+    const labelEl = candidates.reduce(
+      (best, el) => (!best || el.querySelectorAll('*').length < best.querySelectorAll('*').length ? el : best),
+      null
+    );
+    if (!labelEl) throw new Error(`지도에서 마을 "${townName}"을 찾지 못했습니다.`);
+    let clickTarget = labelEl;
+    for (let i = 0; i < 2 && clickTarget.parentElement; i++) clickTarget = clickTarget.parentElement;
+    await M.humanPause(400, 800);
+    M.throwIfStopped();
+    clickTarget.click();
+    const moveBtn = await M.waitFor(() => M.findButtonByText('이 마을로 이동'), 6000);
+    if (!moveBtn) throw new Error(`"${townName}" 상세 패널에서 "이 마을로 이동" 버튼을 찾지 못했습니다.`);
+    await M.humanPause(500, 1000);
+    M.throwIfStopped();
+    moveBtn.click();
+    const arrived = await M.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/game',
+      10000,
+      250
+    );
+    if (!arrived) throw new Error(`"${townName}"(으)로 이동 후 도착 확인 실패`);
+    await M.humanPause(500, 1000);
+  };
+
+  M.ensureCurrentTownForElement = async (targetElement) => {
+    const requiredTown = M.ELEMENT_TO_TOWN[targetElement];
+    if (!requiredTown) throw new Error(`속성 "${targetElement}"에 대응하는 마을 정보가 없습니다.`);
+    const current = await M.readCurrentTown();
+    if (current === requiredTown) {
+      if (M.uiLog) M.uiLog(`마을 위치 확인 완료: ${current} (이동 불필요)`);
+      return true;
+    }
+    if (M.uiLog) M.uiLog(`마을 위치 불일치: 현재 ${current} / 필요 ${requiredTown}(${targetElement} 속성) → 이동`);
+    await M.clickTownOnMap(requiredTown);
+    const verify = await M.readCurrentTown();
+    if (verify !== requiredTown) {
+      throw new Error(`마을 이동 검증 실패: 현재 ${verify} / 목표 ${requiredTown}`);
+    }
+    if (M.uiLog) M.uiLog(`마을 이동 완료: ${requiredTown}`);
+    return true;
+  };
+
+  M.buyElementStoneAtTown = async (targetElement) => {
+    const stoneName = `${targetElement}의 돌`;
+    await M.ensureCurrentTownForElement(targetElement);
+
+    const townBtn = await M.waitFor(() => M.findButtonByText('마을'), 8000);
+    if (!townBtn) throw new Error('"마을" 메뉴 버튼 못찾음');
+    townBtn.click();
+    await M.humanPause(500, 900);
+    const shopItem = await M.waitFor(
+      () => M.queryAll('[role="menuitem"]').find((el) => el.textContent.trim() === '아이템 상점' && M.isVisible(el)),
+      8000
+    );
+    if (!shopItem) throw new Error('"아이템 상점" 메뉴 항목 못찾음');
+    shopItem.click();
+    const arrivedShop = await M.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/shop',
+      10000,
+      250
+    );
+    if (!arrivedShop) throw new Error('아이템 상점으로 진입하지 못했습니다.');
+
+    const otherTab = await M.waitFor(() => M.findButtonByText('기타'), 8000);
+    if (!otherTab) throw new Error('아이템 상점 "기타" 탭을 찾지 못했습니다.');
+    await M.humanPause(500, 900);
+    M.throwIfStopped();
+    otherTab.click();
+
+    const row = await M.waitFor(
+      () => M.queryAll('tr').find(
+        (tr) =>
+          tr.textContent.includes(stoneName) &&
+          [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '구매') &&
+          M.isVisible(tr)
+      ) || null,
+      8000,
+      250
+    );
+    if (!row) throw new Error(`상점 "기타" 탭에서 "${stoneName}"을 찾지 못했습니다.`);
+    const buyBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '구매');
+    await M.humanPause(500, 900);
+    M.throwIfStopped();
+    buyBtn.click();
+
+    const confirmBtn = await M.waitFor(() => M.findConfirmInOpenDialog(['구매']), 6000);
+    if (!confirmBtn) throw new Error(`"${stoneName}" 구매 확인창을 찾지 못했습니다.`);
+    await M.humanPause(600, 1100);
+    M.throwIfStopped();
+    confirmBtn.click();
+    await M.humanPause(1000, 1600);
+    if (M.uiLog) M.uiLog(`${stoneName} 상점에서 구매 완료 (${M.ELEMENT_TO_TOWN[targetElement]})`);
+  };
+
   M.useElementStone = async (element) => {
     M.throwIfStopped();
     const stoneName = `${element}의 돌`;
@@ -10157,13 +10326,12 @@
 
     let useButton = await findUseButtonInInventory();
 
-    // ⚠ 사용자 확인(2026-08): 인벤토리에 없으면 그냥 멈추던 것을, Core에 이미
-    // 만들어둔 마을 이동+상점 구매 로직(Core.buyElementStoneAtTown)을 그대로
-    // 재사용해 사 온 뒤 다시 찾도록 확장. 보스 모듈도 자동사냥과 동일한
-    // 마을/상점 흐름을 그대로 쓴다(별도 구현 불필요).
+    // ⚠ 사용자 확인(2026-08): 인벤토리에 없으면 그냥 멈추던 것을, 위에서 보스
+    // 모듈 자체에 새로 구현한 마을 이동+상점 구매 로직으로 사 온 뒤 다시
+    // 찾도록 확장한다.
     if (!useButton) {
       if (M.uiLog) M.uiLog(`인벤토리에 "${stoneName}"이 없음 → 상점에서 구매 시도`);
-      await Core.buyElementStoneAtTown(element, 'boss');
+      await M.buyElementStoneAtTown(element);
       useButton = await findUseButtonInInventory();
     }
     if (!useButton) throw new Error(`상점 구매 후에도 "${stoneName}" 사용 버튼 못찾음`);
