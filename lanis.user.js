@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.44-stable
+// @version      1.13.46-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -615,6 +615,96 @@
     await Core.humanDelay(700, 1300);
   };
 
+  // ⚠ 사용자 요청(2026-08): 보스/던전 클리어 보상으로 쌓이는 "N의 보상
+  // (난이도)" 상자를 전부 사용한다. 인벤토리 소모품 카테고리 필터는 여러
+  // 개를 동시에 켤 수 있는 다중 토글이라(실전 확인됨), 이전에 다른 필터가
+  // 켜져 있으면 그 카테고리 아이템까지 섞여 보인다. "보상" 상자를 열면
+  // "상급 유물 상자" 같은 완전히 다른 카테고리("상자") 아이템이 나오므로,
+  // 반드시 "보상" 하나만 켜고 나머지는 전부 꺼서 엉뚱한 아이템의 "사용"을
+  // 누르지 않도록 한다.
+  Core.selectOnlyInventoryCategory = async function (categoryLabel, moduleId) {
+    const toggleLabels = ['연금', '책', '보상', '상자', '지도', '기타'];
+    for (const label of toggleLabels) {
+      const btn = Core.findButtonByText(label);
+      if (!btn) continue;
+      const pressed = btn.getAttribute('aria-pressed') === 'true';
+      const shouldBePressed = label === categoryLabel;
+      if (pressed !== shouldBePressed) {
+        if (!(await Core.safeClick(() => Core.findButtonByText(label), {
+          beforeMin: 300, beforeMax: 600, afterMin: 400, afterMax: 700,
+        }))) {
+          throw new Error(`인벤토리 필터 "${label}" 클릭에 실패했습니다.`);
+        }
+      }
+    }
+    Core.log(moduleId, `인벤토리 필터를 "${categoryLabel}"만 켜진 상태로 정렬 완료`);
+  };
+
+  Core.useAllRewardBoxes = async function (moduleId) {
+    await Core.goToCharacterPage('인벤토리', '/inventory');
+    const consumableTab = await Core.waitFor(
+      () => Core.gameElements('[role="tab"], button').find(
+        (el) => el.textContent.trim() === '소모품' && Core.isElementVisible(el)
+      ),
+      8000, 250
+    );
+    if (!consumableTab) throw new Error('인벤토리 소모품 탭을 찾지 못했습니다.');
+    if (!(await Core.safeClick(() => consumableTab, { beforeMin: 500, beforeMax: 900, afterMin: 600, afterMax: 1000 }))) {
+      throw new Error('소모품 탭을 열지 못했습니다.');
+    }
+
+    // 반드시 "보상"만 켜서, 상자를 열었을 때 생기는 "상급 유물 상자" 같은
+    // 다른 카테고리 아이템이 목록에 섞이지 않게 한다.
+    await Core.selectOnlyInventoryCategory('보상', moduleId);
+
+    let used = 0;
+    const maxAttempts = 50;
+    for (let i = 0; i < maxAttempts; i++) {
+      const row = Core.gameElements('tr').find(
+        (tr) =>
+          [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '사용') &&
+          Core.isElementVisible(tr)
+      );
+      if (!row) break;
+      const useBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
+      if (!(await Core.safeClick(() => useBtn, { beforeMin: 500, beforeMax: 900 }))) {
+        throw new Error('보상 상자 "사용" 버튼 클릭에 실패했습니다.');
+      }
+      const dialog = await Core.waitFor(() => {
+        const d = Core.gameElements('[role="dialog"]').find(
+          (el) => el.textContent.includes('아이템 사용 확인') && Core.isElementVisible(el)
+        );
+        return d || null;
+      }, 6000, 250);
+      if (!dialog) throw new Error('보상 상자 사용 확인창을 찾지 못했습니다.');
+
+      // 일부 상자는 한 번에 여러 개(최대 10개) 처리하는 수량 입력이 있을 수
+      // 있다(실전에서 개별 상자 1개씩만 보유해 직접 확인은 못 했으나, 방어적으로
+      // 처리). 입력칸이 있으면 최대치(10)로 맞춘다.
+      const qtyInput = dialog.querySelector('input[type="number"]');
+      if (qtyInput) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeSetter.call(qtyInput, 10);
+        qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
+        await Core.humanDelay(400, 700);
+      }
+
+      const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
+      if (!confirmBtn) throw new Error('보상 상자 사용 확인 버튼을 찾지 못했습니다.');
+      if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 600, beforeMax: 1100, afterMin: 900, afterMax: 1400 }))) {
+        throw new Error('보상 상자 사용을 확정하지 못했습니다.');
+      }
+      used++;
+      Core.log(moduleId, `보상 상자 사용 ${used}개째 완료`);
+    }
+    if (used > 0) {
+      Core.log(moduleId, `보상 상자 사용 완료: 총 ${used}개`);
+    } else {
+      Core.log(moduleId, '사용할 보상 상자가 없습니다.');
+    }
+    return used;
+  };
+
   // 인벤토리 소모품 탭을 열어 targetElement의 돌 "사용" 버튼을 찾는다.
   // 페이지네이션까지 뒤진다. 못 찾으면 null.
   Core.findElementStoneUseButton = async function (targetElement) {
@@ -789,6 +879,107 @@
     }
     Core.log(moduleId, `마을 이동 완료: ${requiredTown}`);
     return true;
+  };
+
+  // 속성과 무관하게 특정 마을로 고정 이동한다(예: 포션이 싼 데자브).
+  Core.ensureAtTown = async function (townName, moduleId) {
+    const current = await Core.readCurrentTown(moduleId);
+    if (current === townName) {
+      Core.log(moduleId, `마을 위치 확인 완료: ${current} (이동 불필요)`);
+      return true;
+    }
+    Core.log(moduleId, `마을 위치 불일치: 현재 ${current} / 필요 ${townName} → 이동`);
+    await Core.clickTownOnMap(townName);
+    const verify = await Core.readCurrentTown(moduleId);
+    if (verify !== townName) {
+      throw new Error(`마을 이동 검증 실패: 현재 ${verify} / 목표 ${townName}`);
+    }
+    Core.log(moduleId, `마을 이동 완료: ${townName}`);
+    return true;
+  };
+
+  // ⚠ 사용자 요청(2026-08): 포션은 아무 마을에서나 팔지만, 데자브에서만 싸게
+  // 살 수 있다. "초대형 {HP/MP}포션"(상점 "기타" 탭 맨 아래)을 최대 3개까지
+  // 시도하고, 살 수 있는 만큼만 산다(구매 확인창의 "보유 골드"는 은행+소지금
+  // 합산값이며 상점 구매 시 은행에서 자동 인출됨을 실전 확인함). 1개도 못
+  // 사면 한 단계 아래인 "최상급 {HP/MP}포션"으로 전환해 같은 방식으로 시도.
+  // 그것마저 1개도 못 사면 실패로 처리한다(호출부에서 정지 처리).
+  Core.buyPotionTier = async function (tierLabel, potionType, maxCount, moduleId) {
+    const itemName = `${tierLabel} ${potionType}포션`;
+    await Core.clickNavMenuExact('마을', '아이템 상점');
+    const arrivedShop = await Core.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/shop',
+      10000,
+      250
+    );
+    if (!arrivedShop) throw new Error('아이템 상점으로 진입하지 못했습니다.');
+
+    const otherTab = await Core.waitFor(() => Core.findButtonByText('기타'), 8000, 250);
+    if (!otherTab) throw new Error('아이템 상점 "기타" 탭을 찾지 못했습니다.');
+    if (!(await Core.safeClick(() => Core.findButtonByText('기타'), { beforeMin: 500, beforeMax: 900 }))) {
+      throw new Error('아이템 상점 "기타" 탭 클릭에 실패했습니다.');
+    }
+
+    let bought = 0;
+    for (let i = 0; i < maxCount; i++) {
+      const findRow = () =>
+        Core.gameElements('tr').find(
+          (tr) =>
+            tr.textContent.includes(itemName) &&
+            [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '구매') &&
+            Core.isElementVisible(tr)
+        ) || null;
+      const row = await Core.waitFor(findRow, 8000, 250);
+      if (!row) throw new Error(`상점 "기타" 탭에서 "${itemName}"을 찾지 못했습니다.`);
+      const buyBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '구매');
+      if (!(await Core.safeClick(() => buyBtn, { beforeMin: 500, beforeMax: 900 }))) {
+        throw new Error(`"${itemName}" 구매 버튼 클릭에 실패했습니다.`);
+      }
+
+      const dialog = await Core.waitFor(() => {
+        const d = Core.gameElements('[role="dialog"]').find(
+          (el) => el.textContent.includes('아이템 구매 확인') && Core.isElementVisible(el)
+        );
+        return d || null;
+      }, 6000, 250);
+      if (!dialog) throw new Error(`"${itemName}" 구매 확인창을 찾지 못했습니다.`);
+
+      const goldMatch = dialog.textContent.match(/보유\s*골드\s*([\d,]+)\s*G/);
+      const costMatch = dialog.textContent.match(/구매\s*비용[\s\S]*?-([\d,]+)\s*G/);
+      const gold = goldMatch ? parseInt(goldMatch[1].replace(/,/g, ''), 10) : null;
+      const cost = costMatch ? parseInt(costMatch[1].replace(/,/g, ''), 10) : null;
+
+      if (gold === null || cost === null || gold < cost) {
+        const cancelBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
+        if (cancelBtn) cancelBtn.click();
+        Core.log(
+          moduleId,
+          `"${itemName}" 구매 불가(보유 골드 ${gold ?? '읽기 실패'} < 비용 ${cost ?? '읽기 실패'}) - ${bought}개 구매 후 중단`
+        );
+        break;
+      }
+
+      const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '구매');
+      if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 600, beforeMax: 1100, afterMin: 900, afterMax: 1400 }))) {
+        throw new Error(`"${itemName}" 구매를 확정하지 못했습니다.`);
+      }
+      bought++;
+      Core.log(moduleId, `"${itemName}" ${bought}/${maxCount}개 구매 완료`);
+    }
+    return bought;
+  };
+
+  Core.buyEmergencyPotion = async function (potionType, moduleId) {
+    await Core.ensureAtTown('데자브', moduleId);
+    let bought = await Core.buyPotionTier('초대형', potionType, 3, moduleId);
+    if (bought === 0) {
+      Core.log(moduleId, `초대형 ${potionType}포션을 하나도 구매하지 못해 최상급으로 전환`);
+      bought = await Core.buyPotionTier('최상급', potionType, 3, moduleId);
+    }
+    if (bought === 0) {
+      throw new Error(`초대형/최상급 ${potionType}포션을 모두 하나도 구매하지 못했습니다(골드 부족으로 추정).`);
+    }
+    return bought;
   };
 
   // 해당 속성의 돌을 파는 마을(ELEMENT_TO_TOWN)로 이동해 아이템 상점 "기타"
@@ -3017,6 +3208,39 @@
     return parseInt(m[1].replace(/,/g, ''), 10);
   };
 
+  Modules.autohunt.readHpPotionRemaining = function () {
+    const m = Core.bodyText().match(/HP\s*포션:\s*[\d,]+\s*사용\s*\(([\d,]+)\s*남음\)/);
+    if (!m) return null;
+    return parseInt(m[1].replace(/,/g, ''), 10);
+  };
+
+  // 포션(HP/MP) 잔량이 0이 되었을 때, 그냥 정지하지 않고 데자브에서 사 온
+  // 뒤 원래 사냥터로 복귀해 계속 진행한다. 구매 자체가 실패하면(둘 다 골드
+  // 부족 등) 기존처럼 은행 입금 후 정지한다.
+  Modules.autohunt.recoverPotionAndResume = async function (potionType, label) {
+    const mod = this;
+    Core.log('autohunt', `${label} 소진 확인 - 데자브에서 구매 시도`);
+    try {
+      await Core.buyEmergencyPotion(potionType, 'autohunt');
+    } catch (e) {
+      await Core.bankDepositAll('autohunt');
+      Core.notifyStopped('autohunt', `${label} 구매에 실패해 정지합니다: ${e.message}`);
+      return false;
+    }
+    // 포션은 아무 마을에서나 파는 게 아니라 데자브 한정이므로, 구매 후에는
+    // 반드시 사냥용 속성 마을로 되돌아가야 버프를 받는다.
+    try {
+      await Core.ensureCurrentTownForElement(mod.config.originalElement, 'autohunt');
+      const okGround = await mod.ensureOnGround(mod.config.groundSuffix, mod.config.floor);
+      if (!okGround) throw new Error('사냥터 재진입 실패');
+    } catch (e) {
+      Core.notifyStopped('autohunt', `${label} 구매 후 원래 사냥터로 복귀하지 못해 정지합니다: ${e.message}`);
+      return false;
+    }
+    Core.log('autohunt', `${label} 구매 후 원래 사냥터로 복귀 완료 - 계속 진행`);
+    return true;
+  };
+
   // 포션 재고(잔량 수치)는 남아 있어도, 일일 사용 한도 등 다른 이유로
   // 이번 전투에는 실제로 포션이 안 쓰였을 수 있다(패배로 이어짐). 그래서
   // "잔량 0" 체크뿐 아니라 "전투 후 HP/MP가 실제로 안 찼는지"까지 함께
@@ -3030,9 +3254,13 @@
     }
     const mpPotionRemaining = this.readMpPotionRemaining();
     if (mpPotionRemaining !== null && mpPotionRemaining <= 0) {
-      await Core.bankDepositAll('autohunt');
-      Core.notifyStopped('autohunt', 'MP 포션이 모두 소진되었습니다 — 은행에 입금 후 정지합니다. 인벤토리에서 포션을 채워주세요.');
-      return true;
+      const recovered = await this.recoverPotionAndResume('MP', 'MP 포션');
+      return !recovered;
+    }
+    const hpPotionRemaining = this.readHpPotionRemaining();
+    if (hpPotionRemaining !== null && hpPotionRemaining <= 0) {
+      const recovered = await this.recoverPotionAndResume('HP', 'HP 포션');
+      return !recovered;
     }
     // ⚠ 사용자 확인: 1전투 모드는 x50과 달리 전투 후 HP/MP가 가득
     // 차지 않아도 정상이다(포션이 매 전투마다 자동으로 풀회복을 보장하는 게
@@ -6809,7 +7037,17 @@
       if (!boss || typeof boss.runDailySelectedBosses !== 'function') {
         throw new Error('보스 일일 실행 엔진을 찾지 못함');
       }
-      return await boss.runDailySelectedBosses();
+      const bossResult = await boss.runDailySelectedBosses();
+      // ⚠ 사용자 요청(2026-08): 보스(그리고 던전)를 잡고 나면 보상으로 쌓이는
+      // "N의 보상" 상자들을 전부 사용한다. 보상 상자 사용 자체가 실패해도
+      // 보스 처치라는 본 목표는 이미 달성된 것이므로, 여기서 에러가 나도
+      // 일일 시퀀스 전체를 멈추지 않고 로그만 남긴다.
+      try {
+        await Core.useAllRewardBoxes('boss');
+      } catch (e) {
+        Core.log('boss', `⚠ 보상 상자 자동 사용 실패(보스 처치 자체는 완료됨): ${e.message}`);
+      }
+      return bossResult;
     }
     if (step === 'autohunt') {
       await this.runCoreModule('autohunt');
@@ -6912,9 +7150,12 @@
       Core.showBanner('daily', '다른 작업이 실행 중입니다. 정지 후 다시 시작해주세요.');
       return;
     }
+    // ⚠ 사용자 요청(2026-08): 심층던전(주 1회)과 아레나(주말 한정)는 자주
+    // 열리지 않으므로 우선순위를 뒤로 미룬다. 던전 → 보스 → 사냥 → 심층던전
+    // → 아레나 순서로 실행한다.
     const steps = [
       'attendance',
-      ...['dungeon', 'arena', 'boss', 'autohunt', 'deepdungeon']
+      ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena']
         .filter((key) => mod.config[key]),
     ];
     if (
@@ -7762,17 +8003,17 @@
     Core.loadModuleConfig('daily', DAILY_CONFIG_KEYS);
 
     const intro = document.createElement('div');
-    intro.textContent = '출석체크를 먼저 수행한 뒤 체크한 작업을 던전 → 아레나 → 보스 → 자동사냥 → 심층던전 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
+    intro.textContent = '출석체크를 먼저 수행한 뒤 체크한 작업을 던전 → 보스 → 자동사냥 → 심층던전 → 아레나 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
     intro.style.cssText = 'color:#ccc; font-size:11px; line-height:1.5; margin-bottom:8px;';
     container.appendChild(intro);
 
     const inputs = [];
     [
       ['dungeon', '던전 — 입장 가능한 던전 모두 클리어'],
-      ['arena', '아레나 — 설정한 오늘 총 전투 횟수까지'],
       ['boss', '보스 — 선택한 보스 중 주간 보상이 남은 보스'],
       ['autohunt', '자동사냥 — 설정한 행동력 제한까지'],
       ['deepdungeon', '심층던전 — 주간 누적 피해 100만까지'],
+      ['arena', '아레나 — 설정한 오늘 총 전투 횟수까지'],
     ].forEach(([key, text]) => {
       const row = document.createElement('label');
       row.style.cssText = 'display:flex; align-items:flex-start; gap:7px; margin:7px 0; cursor:pointer;';
