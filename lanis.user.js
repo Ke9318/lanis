@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.46-stable
+// @version      1.13.47-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -10464,7 +10464,7 @@
           // 보상이 모두 달성된 보스라면 오늘 속성으로 바꿀 이유가 없으므로
           // 속성 확인/인벤토리 이동 자체를 생략한다.
           if (!ALLOW_CLEARED_BOSS_TEST) {
-            const rewardProgress = M.getWeeklyRewardProgress(entry.label);
+            const rewardProgress = await M.getWeeklyRewardProgress(entry.label);
             if (!rewardProgress) {
               throw new Error(`"${entry.label}" 주간 보상 상태를 읽지 못해 속성 변경 전에 안전하게 중단`);
             }
@@ -10660,13 +10660,19 @@
   // 약한 순서 (BOSS_REGISTRY 등록 순서와 동일)
   const BOSS_ORDER = ['fallenGuardian', 'voidEmperor', 'vineEnt', 'vineWraith'];
 
+  // ⚠ 버그 수정(2026-08): bossLabel 텍스트가 페이지에 최소 2곳(카드 제목과
+  // "이번 주 보상 보스" 요약 배지)에 나타나는데, 기존 코드는 findAllLeavesByExactText가
+  // 반환한 첫 번째 후보(요약 배지)에서 조건(액션 버튼 + 마일스톤 8개)이 먼저
+  // 만족되면 그 자리에서 return해버려, 실제로는 여러 카드를 아우르는 거대한
+  // 컨테이너를 "카드"로 오인했다(실전에서 914자짜리 전체 섹션이 반환되는 것을
+  // 확인함). 모든 후보를 다 모은 뒤 가장 작은(가장 좁은) 노드를 채택하도록 고친다.
   M.getBossCardContainer = (bossLabel) => {
     const milestoneLabels = ['클리어', '13%', '25%', '38%', '50%', '63%', '75%', '88%'];
+    const candidates = [];
     for (const heading of M.findAllLeavesByExactText(bossLabel)) {
       let node = heading.parentElement;
       for (let depth = 0; node && depth < 9; depth++, node = node.parentElement) {
-        const text = node.textContent || '';
-      const action = [...node.querySelectorAll('button')]
+        const action = [...node.querySelectorAll('button')]
           .find((button) =>
             M.isVisible(button) &&
             ['도전하기', '계속하기', '재도전'].includes(button.textContent.trim())
@@ -10674,50 +10680,60 @@
         const milestoneCount = milestoneLabels.filter((label) =>
           [...node.querySelectorAll('*')].some((el) => el.children.length === 0 && el.textContent.trim() === label)
         ).length;
-        if (action && milestoneCount >= 8) return node;
+        if (action && milestoneCount >= 8) {
+          candidates.push(node);
+          break;
+        }
       }
     }
-    return null;
+    if (!candidates.length) return null;
+    return candidates.reduce((best, node) =>
+      node.querySelectorAll('*').length < best.querySelectorAll('*').length ? node : best
+    );
   };
 
-  M.getWeeklyRewardProgress = (bossLabel) => {
-    const card = M.getBossCardContainer(bossLabel);
-    if (!card) return null;
-    // 행동 버튼의 "재도전"은 이 보스를 오늘 이미 처치했다는 게임 자체의
-    // 확정 상태다. 보상을 받은 뒤에는 달성 아이콘의 주황색이 회색으로
-    // 바뀌거나 테마별 색상값이 달라질 수 있으므로 색상만 세면 0/8로
-    // 오판해 이미 잡은 보스를 다시 잡는다.
-    const alreadyCleared = M.isBossAlreadyCleared(bossLabel);
-    const labels = ['클리어', '13%', '25%', '38%', '50%', '63%', '75%', '88%'];
-    let achieved = 0;
-    const details = [];
-    for (const label of labels) {
-      const leaf = [...card.querySelectorAll('*')]
-        .find((el) => el.children.length === 0 && el.textContent.trim() === label);
-      if (!leaf) {
-        details.push({ label, achieved: false });
-        continue;
-      }
-      const candidates = [leaf, leaf.previousElementSibling, leaf.parentElement,
-        leaf.parentElement && leaf.parentElement.previousElementSibling,
-        leaf.parentElement && leaf.parentElement.parentElement]
-        .filter(Boolean);
-      const orange = candidates.some((el) => {
-        const style = getComputedStyle(el);
-        const combined = `${style.color} ${style.borderColor} ${style.backgroundColor}`;
-        return /rgb\(255,\s*152,\s*0\)/.test(combined);
-      });
-      if (orange) achieved++;
-      details.push({ label, achieved: orange });
+  // ⚠ 버그 수정(2026-08, 사용자 실전 확인): "이 보스가 오늘 재도전 가능 상태인지"와
+  // "이번 주 단계별 보상을 다 받았는지"는 서로 다른 개념인데, 기존 코드는
+  // alreadyCleared(오늘 재도전 상태)만으로 exhausted를 판단했다. 실제로는 각
+  // 단계(12%~100% 8단계)마다 "주간 N/M회"라는 별도의 소진 카운트가 있고, 이건
+  // 마우스로 직접 hover해야만 뜨는 툴팁에만 있어 매크로 코드로는 못 읽는다
+  // (합성 mouseenter/pointerenter 이벤트로는 MUI Tooltip이 안 뜨는 것을 실전
+  // 확인함). 대신 게임이 실제로 쓰는 API(GET /api/personal-boss/list)가 이
+  // 정보를 weeklyTierLimits[bossId][tier] = {current, max, remaining} 형태로
+  // 그대로 제공하므로, 화면을 읽는 대신 이 API를 직접 호출해 정확한 값을 쓴다.
+  M.fetchBossApiData = async () => {
+    const now = Date.now();
+    if (M._bossApiCache && now - M._bossApiCache.at < 3000) {
+      return M._bossApiCache.data;
     }
+    const token = localStorage.getItem('token');
+    const res = await fetch('https://lanis.me/api/personal-boss/list', {
+      credentials: 'include',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(`보스 정보 API 호출 실패 (HTTP ${res.status})`);
+    const data = await res.json();
+    if (!data || data.success !== true || !Array.isArray(data.bosses) || !data.weeklyTierLimits) {
+      throw new Error('보스 정보 API 응답 형식이 예상과 다릅니다.');
+    }
+    M._bossApiCache = { at: now, data };
+    return data;
+  };
+
+  M.getWeeklyRewardProgress = async (bossLabel) => {
+    const data = await M.fetchBossApiData();
+    const bossEntry = data.bosses.find((b) => b.name === bossLabel);
+    if (!bossEntry) return null;
+    const tierLimits = data.weeklyTierLimits[bossEntry.id];
+    if (!tierLimits) return null;
+    const tierKeys = Object.keys(tierLimits);
+    const achieved = tierKeys.filter((k) => tierLimits[k].remaining <= 0).length;
+    const exhausted = tierKeys.every((k) => tierLimits[k].remaining <= 0);
     return {
-      // 로그에는 색상으로 실제 읽은 단계 수를 그대로 보여준다. 오늘 이미
-      // 처치했다는 재도전 상태는 중복 도전 방지용 exhausted에만 반영한다.
       achieved,
-      total: labels.length,
-      exhausted: alreadyCleared || achieved >= labels.length,
-      alreadyCleared,
-      details,
+      total: tierKeys.length,
+      exhausted,
+      tierLimits,
     };
   };
 
@@ -10853,10 +10869,11 @@
       const listReady = await M.waitForBossListReady(selected);
       if (!listReady) throw new Error('복구된 보스 큐 종료 후 목록 렌더링을 확인하지 못했습니다.');
       await M.claimBossRewardsAndVerify();
-      const failed = selected.filter((key) => {
-        const progress = M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label);
-        return !progress || !progress.exhausted;
-      });
+      const failedChecks = await Promise.all(selected.map(async (key) => {
+        const progress = await M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label);
+        return { key, ok: !!(progress && progress.exhausted) };
+      }));
+      const failed = failedChecks.filter((c) => !c.ok).map((c) => c.key);
       if (failed.length) {
         throw new Error(
           `복구 후에도 주간 보상 완료를 확인하지 못함: ${failed.map((key) => BOSS_REGISTRY[key].label).join(', ')}`
@@ -10875,11 +10892,11 @@
     await M.claimBossRewardsAndVerify();
     M.assertBossRunAuthorized(auth.id);
 
-    const progressBefore = selected.map((key) => ({
+    const progressBefore = await Promise.all(selected.map(async (key) => ({
       key,
       label: BOSS_REGISTRY[key].label,
-      progress: M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label),
-    }));
+      progress: await M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label),
+    })));
     const unreadable = progressBefore.filter((item) => !item.progress);
     if (unreadable.length) {
       throw new Error(`주간 보상 횟수를 읽지 못한 보스: ${unreadable.map((item) => item.label).join(', ')}`);
@@ -10920,10 +10937,11 @@
     M.assertBossRunAuthorized(auth.id);
     await M.claimBossRewardsAndVerify();
     M.assertBossRunAuthorized(auth.id);
-    const failed = remaining.filter((key) => {
-      const progress = M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label);
-      return !progress || !progress.exhausted;
-    });
+    const failedChecks2 = await Promise.all(remaining.map(async (key) => {
+      const progress = await M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label);
+      return { key, ok: !!(progress && progress.exhausted) };
+    }));
+    const failed = failedChecks2.filter((c) => !c.ok).map((c) => c.key);
     if (failed.length) {
       throw new Error(`처치 후에도 주간 보상 완료를 확인하지 못함: ${failed.map((key) => BOSS_REGISTRY[key].label).join(', ')}`);
     }
