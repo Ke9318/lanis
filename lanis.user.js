@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.41-stable
+// @version      1.13.44-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -1682,13 +1682,155 @@
     },
   };
 
-  // ⚠ 버그 수정(2026-08): 일일 시퀀스의 아레나 단계 검증이 이 함수를 호출하고
-  // 있었는데, Modules.arena에는 애초에 정의된 적이 없어 "일일 실행"이 아레나
-  // 단계에서 매번 크래시했다. 아레나 화면 자체에 "오늘 N회" 같은 명시적
-  // 문구가 없어 페이지에서 정확히 파싱할 방법이 없으므로, 세션 내 누적
-  // 실행 횟수(cycleCount)로 대체한다(새로고침 시 초기화되는 한계는 있음).
+  Modules.arena.saveConfig = function () {
+    try {
+      localStorage.setItem(ARENA_CONFIG_KEY, JSON.stringify(this.config));
+    } catch (e) {}
+  };
+
+  Modules.arena.loadConfig = function () {
+    try {
+      const saved = JSON.parse(localStorage.getItem(ARENA_CONFIG_KEY) || '{}');
+      const value = parseInt(saved.targetBattles, 10);
+      if (Number.isFinite(value) && value >= 1 && value <= 200) this.config.targetBattles = value;
+    } catch (e) {}
+  };
+
+  Modules.arena.todayKey = function () {
+    return new Date().toLocaleDateString('en-CA');
+  };
+
+  Modules.arena.isWeekend = function () {
+    const day = new Date().getDay();
+    return day === 0 || day === 6;
+  };
+
+  Modules.arena.saveResume = function () {
+    try {
+      localStorage.setItem(ARENA_RESUME_KEY, JSON.stringify({
+        running: true,
+        date: this.todayKey(),
+        targetBattles: this.config.targetBattles,
+      }));
+    } catch (e) {}
+  };
+
+  Modules.arena.clearResume = function () {
+    try { localStorage.removeItem(ARENA_RESUME_KEY); } catch (e) {}
+  };
+
+  Modules.arena.goToArena = async function () {
+    if (location.pathname.replace(/\/$/, '') !== '/arena') {
+      await Core.clickNavMenuExact('전투', '아레나');
+    }
+    const arrived = await Core.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/arena' &&
+        Core.bodyText().includes('오늘 전투 횟수'),
+      15000,
+      300
+    );
+    if (!arrived) throw new Error('아레나 화면 진입을 확인하지 못했습니다.');
+  };
+
   Modules.arena.readTodayBattleCount = function () {
-    return this.cycleCount || 0;
+    const marker = Core.gameElements('*').find((el) =>
+      el.children.length === 0 && el.textContent.trim() === '오늘 전투 횟수'
+    );
+    if (!marker) return null;
+    let node = marker.parentElement;
+    for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+      const match = (node.textContent || '').match(/오늘 전투 횟수\s*(\d+)\s*회/);
+      if (match) return parseInt(match[1], 10);
+    }
+    return null;
+  };
+
+  Modules.arena.waitForEnabledStart = async function () {
+    return await Core.waitFor(() => {
+      const button = Core.findButtonByText('전투 시작');
+      return button && !button.disabled ? button : null;
+    }, 90000, 500);
+  };
+
+  Modules.arena.handleResultIfPresent = async function () {
+    const findBack = () =>
+      Core.findButtonByText('아레나로 돌아가기') ||
+      Core.findButtonByText('돌아가기');
+    const back = findBack();
+    if (!back) return false;
+    if (!(await Core.safeClick(findBack, {
+      beforeMin: 700,
+      beforeMax: 1200,
+      afterMin: 800,
+      afterMax: 1300,
+    }))) throw new Error('아레나 결과창의 "돌아가기" 버튼 클릭에 실패했습니다.');
+    await Core.waitFor(() => Core.bodyText().includes('오늘 전투 횟수'), 15000, 300);
+    return true;
+  };
+
+  Modules.arena.mainLoop = async function () {
+    const mod = this;
+    mod.cycleCount = 0;
+    mod.loadConfig();
+    if (!mod.isWeekend()) {
+      mod.clearResume();
+      Core.notifyStopped('arena', '아레나는 토요일과 일요일에만 자동 실행할 수 있습니다.');
+      return;
+    }
+    const target = Math.max(1, Math.min(200, parseInt(mod.config.targetBattles, 10) || 10));
+    mod.config.targetBattles = target;
+    mod.saveConfig();
+    mod.saveResume();
+    await mod.goToArena();
+
+    // 전투 도중 새로고침되었을 경우 결과창부터 정리한다.
+    await mod.handleResultIfPresent();
+
+    while (!mod.stopRequested) {
+      const before = mod.readTodayBattleCount();
+      if (before === null) throw new Error('아레나의 오늘 전투 횟수를 읽지 못했습니다.');
+      mod.cycleCount = before;
+      Core.updateModuleButtons();
+      if (before >= target) {
+        mod.clearResume();
+        Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (설정 ${target}회)`);
+        return;
+      }
+
+      // ⚠ 사용자 요청(2026-08): 기존엔 마지막 공격 시각부터 고정 35초를 무조건
+      // 기다린 뒤에야 waitForEnabledStart로 진짜 쿨타임(버튼 활성화)을 확인하는
+      // 이중 구조였다. 결과창에서 "돌아가기"를 누르고 곧바로 이 자리로 돌아오므로,
+      // 고정 대기 없이 진짜 쿨타임 감지(0.5초 간격 폴링)만으로 버튼이 켜지는
+      // 즉시 공격하도록 단순화한다.
+      Core.log('arena', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}/${target}회`);
+      const startButton = await mod.waitForEnabledStart();
+      if (!startButton) throw new Error('90초 안에 아레나 "전투 시작" 버튼이 활성화되지 않았습니다.');
+      if (mod.stopRequested) return;
+      if (!(await Core.safeClick(() => {
+        const button = Core.findButtonByText('전투 시작');
+        return button && !button.disabled ? button : null;
+      }, { beforeMin: 700, beforeMax: 1300 }))) {
+        throw new Error('아레나 "전투 시작" 버튼 클릭에 실패했습니다.');
+      }
+
+      const resultBack = await Core.waitFor(
+        () => Core.findButtonByText('아레나로 돌아가기') || Core.findButtonByText('돌아가기'),
+        15000,
+        500
+      );
+      if (!resultBack) {
+        Core.log('arena', '⚠ 전투 시작 클릭 후 결과 화면이 나타나지 않음 — 클릭 누락으로 판단, 즉시 재시도');
+        continue;
+      }
+      await mod.handleResultIfPresent();
+      const incremented = await Core.waitFor(() => {
+        const count = mod.readTodayBattleCount();
+        return count !== null && count > before ? count : null;
+      }, 15000, 300);
+      if (incremented === null) throw new Error('전투 후 오늘 전투 횟수 증가를 확인하지 못했습니다.');
+      mod.cycleCount = incremented;
+      Core.log('arena', `아레나 전투 완료: 오늘 ${incremented}/${target}회`);
+    }
   };
 
   // -------------------------- 모듈 1: 재전직 --------------------------
@@ -6293,6 +6435,7 @@
     mod.running = false;
     if (Core.activeModuleId === moduleId) Core.activeModuleId = null;
     Core.log(moduleId, '사용자 요청으로 정지합니다...');
+    if (moduleId === 'arena') Modules.arena.clearResume();
     Core.updateModuleButtons();
   };
 
@@ -7350,6 +7493,7 @@
   function buildArenaTab(container) {
     const mod = Modules.arena;
     const refs = UIRefs.arena;
+    mod.loadConfig();
 
     container.appendChild(labelEl('오늘 실행할 총 전투 횟수'));
     const countInput = document.createElement('input');
@@ -7362,6 +7506,7 @@
       const value = Math.max(1, Math.min(200, parseInt(countInput.value, 10) || 10));
       mod.config.targetBattles = value;
       countInput.value = value;
+      mod.saveConfig();
       Core.updateModuleButtons();
     });
     container.appendChild(countInput);
@@ -7400,11 +7545,51 @@
     refs.inputs = [countInput];
   }
 
+  const DEEPDUNGEON_CONFIG_KEY = 'lrm-deepdungeon-config';
+
+  Modules.deepdungeon.saveConfig = function () {
+    try {
+      localStorage.setItem(
+        DEEPDUNGEON_CONFIG_KEY,
+        JSON.stringify({
+          originalElement: this.config.originalElement,
+          tokenShopThreshold: this.config.tokenShopThreshold,
+          emergencyHpPercent: this.config.emergencyHpPercent,
+          bossPreFloorHpPercent: this.config.bossPreFloorHpPercent,
+          hpDropTriggerPercent: this.config.hpDropTriggerPercent,
+          wanderingSoulFloorThreshold: this.config.wanderingSoulFloorThreshold,
+          targetAC: this.config.targetAC,
+          targetDefense: this.config.targetDefense,
+          retryIfWeeklyDamageUnder1M: this.config.retryIfWeeklyDamageUnder1M,
+          jobMode: this.config.jobMode,
+        })
+      );
+    } catch (e) {
+      /* localStorage 사용 불가 환경이면 조용히 무시 */
+    }
+  };
+
+  Modules.deepdungeon.loadConfigIntoSelf = function () {
+    try {
+      const raw = localStorage.getItem(DEEPDUNGEON_CONFIG_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      Object.keys(saved).forEach((k) => {
+        if (typeof saved[k] === 'number' || typeof saved[k] === 'boolean' || typeof saved[k] === 'string') {
+          this.config[k] = saved[k];
+        }
+      });
+    } catch (e) {
+      /* 저장된 값이 손상됐으면 기본값 그대로 사용 */
+    }
+  };
+
   // 심층던전 탭 - 일반 던전 모듈과는 완전히 다른 화면/로직이라 설정값도 별도로
   // 관리한다 (labelEl/inputStyle/btnStyle 등 UI 헬퍼는 위에서 공용으로 이미 정의됨).
   function buildDeepDungeonTab(container) {
     const mod = Modules.deepdungeon;
     const refs = UIRefs.deepdungeon;
+    mod.loadConfigIntoSelf();
 
     container.appendChild(labelEl('원래 속성 (시작 전 자동 확인·변경)'));
     const elementSelect = document.createElement('select');
@@ -7423,6 +7608,7 @@
     });
     elementSelect.addEventListener('change', (e) => {
       mod.config.originalElement = e.target.value;
+      mod.saveConfig();
     });
     container.appendChild(elementSelect);
 
@@ -7457,6 +7643,7 @@
 
     jobSelect.addEventListener('change', (e) => {
       mod.config.jobMode = e.target.value;
+      mod.saveConfig();
       renderJobDescription();
     });
 
@@ -7467,6 +7654,7 @@
     tokenInput.style.cssText = inputStyle();
     tokenInput.addEventListener('change', (e) => {
       mod.config.tokenShopThreshold = parseInt(e.target.value, 10) || 500;
+      mod.saveConfig();
     });
     container.appendChild(tokenInput);
 
@@ -7477,6 +7665,7 @@
     emergInput.style.cssText = inputStyle();
     emergInput.addEventListener('change', (e) => {
       mod.config.emergencyHpPercent = parseInt(e.target.value, 10) || 30;
+      mod.saveConfig();
     });
     container.appendChild(emergInput);
 
@@ -7487,6 +7676,7 @@
     bossPreInput.style.cssText = inputStyle();
     bossPreInput.addEventListener('change', (e) => {
       mod.config.bossPreFloorHpPercent = parseInt(e.target.value, 10) || 50;
+      mod.saveConfig();
     });
     container.appendChild(bossPreInput);
 
@@ -7497,6 +7687,7 @@
     acInput.style.cssText = inputStyle();
     acInput.addEventListener('change', (e) => {
       mod.config.targetAC = parseInt(e.target.value, 10) || 0;
+      mod.saveConfig();
     });
     container.appendChild(acInput);
 
@@ -7507,6 +7698,7 @@
     defInput.style.cssText = inputStyle();
     defInput.addEventListener('change', (e) => {
       mod.config.targetDefense = parseInt(e.target.value, 10) || 0;
+      mod.saveConfig();
     });
     container.appendChild(defInput);
 
@@ -7517,6 +7709,7 @@
     retryCheck.checked = mod.config.retryIfWeeklyDamageUnder1M;
     retryCheck.addEventListener('change', (e) => {
       mod.config.retryIfWeeklyDamageUnder1M = e.target.checked;
+      mod.saveConfig();
     });
     const retryLabel = document.createElement('span');
     retryLabel.textContent = '누적 데미지 100만 이하시 재도전 ("기록" 탭의 주간 누적 데미지 기준)';
@@ -7809,6 +8002,7 @@
     // 연속 실행되며, 실제 새로고침/탭 재실행이 발생했다면 안전하게 중단한다.
     // 오래된 running 상태를 복구하면 동일 단계(특히 보스)를 처음부터 다시
     // 실행해 무한 재도전할 수 있으므로 모두 폐기한다.
+    Modules.arena.clearResume();
     sessionStorage.removeItem(DAILY_AUTH_KEY);
     const staleDaily = Modules.daily.loadState();
     if (staleDaily) {
