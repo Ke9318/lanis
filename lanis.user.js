@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.40-stable
+// @version      1.13.41-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -3026,6 +3026,22 @@
     const mod = this;
     mod.cycleCount = 0;
     mod.protectionVerificationPending = false;
+
+    // ⚠ 사용자 요청(2026-08): 프리셋/속성(필요시 속성돌 소모)부터 맞추고 나서
+    // 행동력을 확인하던 순서를 반대로 바꾼다. 이미 행동력이 기준 이하로
+    // 소진된 상태(예: 일부 사냥을 끝내고 일일을 다시 돌리는 경우)에서
+    // 시작하면, 실제로는 한 사이클도 못 돌면서 속성돌만 낭비하는 문제가
+    // 있었다. 행동력 표시는 어느 화면에서나 바로 읽을 수 있으므로, 프리셋/
+    // 속성을 건드리기 전에 먼저 확인한다.
+    const startEnergy = mod.readEnergy();
+    if (startEnergy !== null && startEnergy < mod.config.minEnergy) {
+      Core.notifyCompleted(
+        'autohunt',
+        `시작 전 행동력이 이미 ${startEnergy}로 기준(${mod.config.minEnergy}) 이하라 사냥 없이 정지합니다.`
+      );
+      return;
+    }
+
     Core.log('autohunt', '시작 전 공용 프리셋 "사냥" 적용');
     await Core.applyCommonPreset('사냥', 'autohunt');
     Core.log('autohunt', `시작 전 원래 속성(${mod.config.originalElement}) 확인`);
@@ -4478,13 +4494,37 @@
   Modules.dungeon.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = mod.loadClearCount();
+    Core.log('dungeon', `던전 자동클리어 시작 (오늘 이미 클리어한 던전: ${mod.cycleCount}개)`);
+
+    // ⚠ 사용자 요청(2026-08): 프리셋/속성 확인(필요시 속성돌 소모)을 먼저 하고
+    // 나서 "오늘 할 던전이 남았는지"를 확인하던 순서를, 반대로 바꾼다. 이미
+    // 오늘 할 게 없는 상태에서 일일을 돌리면 실제로는 아무것도 안 하면서
+    // 속성돌만 낭비하는 문제가 있었다. 이제 "할 일이 있는지"부터 확인하고,
+    // 있을 때만 프리셋/속성을 맞춘다.
+    const resumeDungeon = mod.detectResumeDungeon();
+    let queue = [];
+    if (!resumeDungeon) {
+      await mod.goToDungeonSelect();
+      if (!mod.running) return;
+      queue = mod.scanEligibleDungeons();
+      if (queue.length === 0) {
+        Core.log('dungeon', '입장 가능한 던전이 없습니다 (전부 완료됐거나 입장권이 없음). 정지합니다.');
+        Core.moduleResults.dungeon = { ok: true, message: '입장 가능한 모든 던전 완료 또는 입장권 소진', at: Date.now() };
+        mod.running = false;
+        Core.activeModuleId = Core.activeModuleId === 'dungeon' ? null : Core.activeModuleId;
+        Core.updateModuleButtons();
+        return;
+      }
+      Core.log('dungeon', `입장 큐 확정: ${queue.map((d) => d.label).join(' → ')}`);
+    }
+
+    // 여기 도달했다는 건 할 일이 있다는 뜻(재개할 던전이 있거나, 새로 들어갈
+    // 던전이 있음) → 이제서야 프리셋/속성을 맞춘다.
     Core.log('dungeon', '시작 전 공용 프리셋 "던전" 적용');
     await Core.applyCommonPreset('던전', 'dungeon');
     Core.log('dungeon', `시작 전 원래 속성(${mod.config.originalElement}) 확인`);
     await Core.ensureCharacterElement(mod.config.originalElement, 'dungeon');
-    Core.log('dungeon', `던전 자동클리어 시작 (오늘 이미 클리어한 던전: ${mod.cycleCount}개)`);
 
-    const resumeDungeon = mod.detectResumeDungeon();
     if (resumeDungeon) {
       Core.log('dungeon', `이미 진행 중이던 "${resumeDungeon.label}"을(를) 인식했습니다 - 이어서 진행합니다.`);
       await mod.runOneDungeon(resumeDungeon, { resume: true });
@@ -4495,21 +4535,19 @@
         Core.updateModuleButtons();
         return;
       }
+      await mod.goToDungeonSelect();
+      if (!mod.running) return;
+      queue = mod.scanEligibleDungeons();
+      if (queue.length === 0) {
+        Core.log('dungeon', '입장 가능한 던전이 없습니다 (전부 완료됐거나 입장권이 없음). 정지합니다.');
+        Core.moduleResults.dungeon = { ok: true, message: '입장 가능한 모든 던전 완료 또는 입장권 소진', at: Date.now() };
+        mod.running = false;
+        Core.activeModuleId = Core.activeModuleId === 'dungeon' ? null : Core.activeModuleId;
+        Core.updateModuleButtons();
+        return;
+      }
+      Core.log('dungeon', `입장 큐 확정: ${queue.map((d) => d.label).join(' → ')}`);
     }
-
-    await mod.goToDungeonSelect();
-    if (!mod.running) return;
-
-    const queue = mod.scanEligibleDungeons();
-    if (queue.length === 0) {
-      Core.log('dungeon', '입장 가능한 던전이 없습니다 (전부 완료됐거나 입장권이 없음). 정지합니다.');
-      Core.moduleResults.dungeon = { ok: true, message: '입장 가능한 모든 던전 완료 또는 입장권 소진', at: Date.now() };
-      mod.running = false;
-      Core.activeModuleId = Core.activeModuleId === 'dungeon' ? null : Core.activeModuleId;
-      Core.updateModuleButtons();
-      return;
-    }
-    Core.log('dungeon', `입장 큐 확정: ${queue.map((d) => d.label).join(' → ')}`);
 
     for (const dungeonDef of queue) {
       if (!mod.running) break;
@@ -6020,20 +6058,19 @@
     mod.usedSmithyOnce = false;
 
     Core.log('deepdungeon', `심층던전 자동클리어 시작 (${mod.config.jobMode})`);
-    Core.log('deepdungeon', '시작 전 공용 프리셋 "심층던전" 적용');
-    await Core.applyCommonPreset('심층던전', 'deepdungeon');
     const deepOriginalElement = mod.config.originalElement;
     if (!Core.ELEMENT_OPTIONS.includes(deepOriginalElement)) {
       throw new Error('심층던전 탭에서 원래 속성을 먼저 선택해주세요.');
     }
-    Core.log('deepdungeon', `시작 전 원래 속성(${deepOriginalElement}) 확인`);
-    await Core.ensureCharacterElement(deepOriginalElement, 'deepdungeon');
+
+    // ⚠ 사용자 요청(2026-08): 프리셋/속성부터 맞추고 나서 "오늘 이미 주간
+    // 누적 데미지를 다 채웠는지"를 확인하던 순서를 반대로 바꾼다. 이미 다
+    // 채운 상태에서 일일을 돌리면 아무 것도 안 하면서 속성돌만 낭비하는
+    // 문제가 있었다. 화면 진입/누적 데미지 확인은 프리셋·속성과 무관하게
+    // 할 수 있으므로 먼저 확인하고, 할 일이 있을 때만 프리셋/속성을 맞춘다.
     await mod.goToDeepDungeon();
     if (!mod.running) return;
 
-    // "누적 데미지 100만 이하시 재도전" 옵션이 켜져 있으면, 매크로를 시작하는
-    // 시점에도 먼저 주간 누적 데미지를 확인한다. 이미 100만을 넘겼다면 (예:
-    // 수동 플레이로 이미 채워둔 경우) 새 런에 진입하지 않고 바로 정지한다.
     if (mod.config.retryIfWeeklyDamageUnder1M) {
       const startDamage = await mod.readWeeklyCumulativeDamage();
       if (startDamage === null) {
@@ -6050,6 +6087,14 @@
         );
         return;
       }
+    }
+
+    Core.log('deepdungeon', '시작 전 공용 프리셋 "심층던전" 적용');
+    await Core.applyCommonPreset('심층던전', 'deepdungeon');
+    Core.log('deepdungeon', `시작 전 원래 속성(${deepOriginalElement}) 확인`);
+    await Core.ensureCharacterElement(deepOriginalElement, 'deepdungeon');
+
+    if (mod.config.retryIfWeeklyDamageUnder1M) {
       const enterTabAtStart = await Core.retryStep(
         '"입장" 탭 찾기',
         () => mod.findTopNavigationTab('입장')
