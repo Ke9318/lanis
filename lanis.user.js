@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.47-stable
+// @version      1.13.48-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -980,6 +980,28 @@
       throw new Error(`초대형/최상급 ${potionType}포션을 모두 하나도 구매하지 못했습니다(골드 부족으로 추정).`);
     }
     return bought;
+  };
+
+  // ⚠ 사용자 요청(2026-08): 포션 부족으로 정지하기 전에, 마을 어디서든 무료로
+  // HP/MP를 완전 회복시켜주는 "여관"에 먼저 들른다(확인창 없이 "휴식하기"
+  // 버튼 한 번으로 즉시 회복됨을 실전 확인함). 현재 마을에서 바로 가능하므로
+  // 굳이 특정 마을로 이동할 필요는 없다.
+  Core.restAtInn = async function (moduleId) {
+    await Core.clickNavMenuExact('마을', '여관');
+    const arrived = await Core.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/inn',
+      10000,
+      250
+    );
+    if (!arrived) throw new Error('여관 화면으로 진입하지 못했습니다.');
+    const restBtn = await Core.waitFor(() => Core.findButtonByText('휴식하기'), 8000, 250);
+    if (!restBtn) throw new Error('"휴식하기" 버튼을 찾지 못했습니다.');
+    if (!(await Core.safeClick(() => Core.findButtonByText('휴식하기'), {
+      beforeMin: 500, beforeMax: 900, afterMin: 900, afterMax: 1400,
+    }))) {
+      throw new Error('"휴식하기" 클릭에 실패했습니다.');
+    }
+    Core.log(moduleId, '여관에서 무료로 HP/MP 완전 회복 완료');
   };
 
   // 해당 속성의 돌을 파는 마을(ELEMENT_TO_TOWN)로 이동해 아이템 상점 "기타"
@@ -3217,18 +3239,35 @@
   // 포션(HP/MP) 잔량이 0이 되었을 때, 그냥 정지하지 않고 데자브에서 사 온
   // 뒤 원래 사냥터로 복귀해 계속 진행한다. 구매 자체가 실패하면(둘 다 골드
   // 부족 등) 기존처럼 은행 입금 후 정지한다.
-  Modules.autohunt.recoverPotionAndResume = async function (potionType, label) {
+  // ⚠ 사용자 요청(2026-08): 순서를 "은행입금 → 여관회복 → 데자브이동 →
+  // 포션구매 → 기존 사냥터 복귀"로 명확히 한다. potionTypes는 ['HP'],
+  // ['MP'], 또는 ['HP','MP'] 배열을 받아 필요한 것만 산다.
+  Modules.autohunt.recoverPotionAndResume = async function (potionTypes, label) {
     const mod = this;
-    Core.log('autohunt', `${label} 소진 확인 - 데자브에서 구매 시도`);
+    Core.log('autohunt', `${label} 부족 확인 - 회복 절차 시작 (은행입금 → 여관회복 → 데자브 포션구매 → 사냥터 복귀)`);
+
+    // 1. 은행 입금 (보유 골드 보호)
+    await Core.bankDepositAll('autohunt');
+
+    // 2. 여관에서 무료로 HP/MP 완전 회복 (현재 마을에서 바로 가능, 이동 불필요)
     try {
-      await Core.buyEmergencyPotion(potionType, 'autohunt');
+      await Core.restAtInn('autohunt');
     } catch (e) {
-      await Core.bankDepositAll('autohunt');
+      Core.log('autohunt', `⚠ 여관 휴식 실패(포션 구매는 계속 진행): ${e.message}`);
+    }
+
+    // 3. 데자브로 이동해 부족한 포션을 전부 구매
+    try {
+      for (const potionType of potionTypes) {
+        await Core.buyEmergencyPotion(potionType, 'autohunt');
+      }
+    } catch (e) {
       Core.notifyStopped('autohunt', `${label} 구매에 실패해 정지합니다: ${e.message}`);
       return false;
     }
-    // 포션은 아무 마을에서나 파는 게 아니라 데자브 한정이므로, 구매 후에는
-    // 반드시 사냥용 속성 마을로 되돌아가야 버프를 받는다.
+
+    // 4. 포션은 데자브 한정이므로, 구매 후에는 반드시 사냥용 속성 마을과
+    // 사냥터로 되돌아가야 버프를 받는다.
     try {
       await Core.ensureCurrentTownForElement(mod.config.originalElement, 'autohunt');
       const okGround = await mod.ensureOnGround(mod.config.groundSuffix, mod.config.floor);
@@ -3237,7 +3276,7 @@
       Core.notifyStopped('autohunt', `${label} 구매 후 원래 사냥터로 복귀하지 못해 정지합니다: ${e.message}`);
       return false;
     }
-    Core.log('autohunt', `${label} 구매 후 원래 사냥터로 복귀 완료 - 계속 진행`);
+    Core.log('autohunt', `${label} 회복 완료 후 원래 사냥터로 복귀 완료 - 계속 진행`);
     return true;
   };
 
@@ -3253,25 +3292,32 @@
       return true;
     }
     const mpPotionRemaining = this.readMpPotionRemaining();
-    if (mpPotionRemaining !== null && mpPotionRemaining <= 0) {
-      const recovered = await this.recoverPotionAndResume('MP', 'MP 포션');
-      return !recovered;
-    }
     const hpPotionRemaining = this.readHpPotionRemaining();
-    if (hpPotionRemaining !== null && hpPotionRemaining <= 0) {
-      const recovered = await this.recoverPotionAndResume('HP', 'HP 포션');
+    const zeroTypes = [];
+    if (mpPotionRemaining !== null && mpPotionRemaining <= 0) zeroTypes.push('MP');
+    if (hpPotionRemaining !== null && hpPotionRemaining <= 0) zeroTypes.push('HP');
+    if (zeroTypes.length > 0) {
+      const label = zeroTypes.map((t) => `${t} 포션`).join('/');
+      const recovered = await this.recoverPotionAndResume(zeroTypes, label);
       return !recovered;
     }
     // ⚠ 사용자 확인: 1전투 모드는 x50과 달리 전투 후 HP/MP가 가득
     // 차지 않아도 정상이다(포션이 매 전투마다 자동으로 풀회복을 보장하는 게
     // 아니기 때문). 이 HP/MP 추론 체크는 x50 모드에서만 쓰고, 1전투
     // 모드에서는 건너뛰고 위의 명시적인 "잔량 수치" 체크만 신뢰한다.
+    // ⚠ 버그 수정(2026-08): 이 분기가 은행 입금 후 그냥 정지만 하고
+    // 회복 절차(여관/포션 구매)를 전혀 타지 않고 있었다. 잔량 수치 체크와
+    // 동일하게 recoverPotionAndResume으로 연결한다.
     if (!this.config.singleBattleMode) {
       const hpmp = this.readPlayerHPMP();
-      if (hpmp && (hpmp.hp.cur < hpmp.hp.max || hpmp.mp.cur < hpmp.mp.max)) {
-        await Core.bankDepositAll('autohunt');
-        Core.notifyStopped('autohunt', '포션이 부족한 것으로 보입니다(전투 후 HP/MP가 가득 차지 않음) — 은행에 입금 후 정지합니다.');
-        return true;
+      if (hpmp) {
+        const needed = [];
+        if (hpmp.hp.cur < hpmp.hp.max) needed.push('HP');
+        if (hpmp.mp.cur < hpmp.mp.max) needed.push('MP');
+        if (needed.length > 0) {
+          const recovered = await this.recoverPotionAndResume(needed, '포션(전투 후 HP/MP 미충전)');
+          return !recovered;
+        }
       }
     }
     return false;
