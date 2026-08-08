@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.48-stable
+// @version      1.13.51-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -3653,6 +3653,38 @@
     return document.querySelector('div[aria-label="지도 아이템을 사용해 레어맵으로 이동하기"]');
   };
 
+  // ⚠ 사용자 요청(2026-08): 레어맵 매크로는 지금까지 "이미 사냥터(/battle)
+  // 화면에 있어야만" 작동했다. 다른 화면(인벤토리, 캐릭 등)에 있으면 지도
+  // 사용 아이콘 자체가 없어 바로 실패했다. 실전 확인 결과 특정 사냥터일
+  // 필요는 없고(지도 아이템 사용 아이콘은 /battle 화면이면 사냥터 종류와
+  // 무관하게 항상 존재), 단순히 /battle 화면으로만 이동하면 된다.
+  // ⚠ 사용자 요청(2026-08): 아무 사냥터가 아니라, 자동사냥 매크로에 등록된
+  // 메인 사냥터(Modules.autohunt.config.groundSuffix/floor)로 가야 한다.
+  // 이렇게 해야 레어맵이 실제로 노리는 사냥터와 일치한다.
+  Modules.raremap.ensureOnBattleScreen = async function () {
+    const groundSuffix = (Modules.autohunt.config && Modules.autohunt.config.groundSuffix) || '평야';
+    const floor = Modules.autohunt.config && Modules.autohunt.config.floor;
+    if (location.pathname.replace(/\/$/, '') === '/battle') {
+      if (floor) await Modules.autohunt.selectFloor(floor);
+      return true;
+    }
+    Core.log('raremap', `사냥터 화면이 아님 - 등록된 사냥터(${groundSuffix})로 이동`);
+    try {
+      await Core.clickNavMenuSuffix('전투', groundSuffix);
+    } catch (e) {
+      Core.log('raremap', `⚠ 사냥터 이동 실패: ${e.message}`);
+      return false;
+    }
+    const arrived = await Core.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/battle',
+      10000,
+      250
+    );
+    if (!arrived) return false;
+    if (floor) await Modules.autohunt.selectFloor(floor);
+    return true;
+  };
+
   Modules.raremap.getMapDialog = function () {
     const titleEl = Array.from(document.querySelectorAll('h1, h2, h3')).find((el) => el.textContent.trim() === '지도 아이템 사용하기');
     if (!titleEl) return null;
@@ -3837,7 +3869,14 @@
   Modules.raremap.clearRareMapsIfAny = async function () {
     let count = 0;
     let unchangedCount = 0;
-    while (this.running && count < 100) {
+    // ⚠ 사용자 확인(2026-08): 레어맵은 같은 종류가 25회 이상 연속으로 나오는
+    // 경우도 있다. 버튼 텍스트가 이전과 같은 것만으로는 "클릭이 안 먹혔다"와
+    // "같은 종류 레어맵이 또 나왔다"를 구분할 수 없다(실전 확인: 일반 광산
+    // 버튼도 클릭 후 완전히 동일한 DOM 요소가 재사용되며 텍스트도 그대로임).
+    // 그래서 안전 중단 임계값을 정상적인 연속 출현 범위보다 훨씬 크게 잡아,
+    // 진짜 멈춤(같은 화면에서 수십 번째도 전혀 진행이 없는 경우)만 잡는다.
+    const UNCHANGED_SAFETY_LIMIT = 40;
+    while (this.running && count < 150) {
       const rareBtn = this.getRareMapButton();
       if (!rareBtn) break;
       const beforeText = rareBtn.textContent.trim();
@@ -3850,10 +3889,14 @@
       }, 10000, 400);
       if (!changed) {
         unchangedCount++;
-        Core.log('raremap', `동일 레어맵 버튼이 그대로 남아 있습니다 (${unchangedCount}/3).`);
-        if (unchangedCount >= 3) {
-          throw new Error('동일 레어맵 버튼이 반복해서 남아 있어 안전을 위해 중단합니다.');
+        // 텍스트가 같아도 클릭 자체는 매번 성공했으므로, 같은 종류 레어맵이
+        // 연속 출현 중인 정상 상황일 가능성이 높다. 진행 카운트는 그대로
+        // 늘리고, 안전장치(UNCHANGED_SAFETY_LIMIT)에만 별도로 반영한다.
+        Core.log('raremap', `동일 종류 레어맵이 연속 출현 중일 수 있습니다 (연속 ${unchangedCount}/${UNCHANGED_SAFETY_LIMIT}, 정상 범위: 최대 25회 안팎).`);
+        if (unchangedCount >= UNCHANGED_SAFETY_LIMIT) {
+          throw new Error(`동일 레어맵 버튼이 ${UNCHANGED_SAFETY_LIMIT}회 연속으로 전혀 바뀌지 않아 안전을 위해 중단합니다.`);
         }
+        count++;
         continue;
       }
       unchangedCount = 0;
@@ -3867,6 +3910,14 @@
     mod.cycleCount++;
     Core.log('raremap', `--- 사이클 ${mod.cycleCount} 시작 ---`);
     Core.updateModuleButtons();
+
+    const onBattleScreen = await mod.ensureOnBattleScreen();
+    if (!onBattleScreen) {
+      mod.stopReason = '사냥터 화면으로 이동하지 못함';
+      Core.log('raremap', '사냥터 화면으로 이동하지 못해 정지합니다.');
+      mod.running = false;
+      return;
+    }
 
     const preCleared = await mod.clearRareMapsIfAny();
     if (preCleared > 0) {
