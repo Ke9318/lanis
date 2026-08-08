@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.51-stable
+// @version      1.13.52-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -678,19 +678,18 @@
       }, 6000, 250);
       if (!dialog) throw new Error('보상 상자 사용 확인창을 찾지 못했습니다.');
 
-      // 일부 상자는 한 번에 여러 개(최대 10개) 처리하는 수량 입력이 있을 수
-      // 있다(실전에서 개별 상자 1개씩만 보유해 직접 확인은 못 했으나, 방어적으로
-      // 처리). 입력칸이 있으면 최대치(10)로 맞춘다.
-      const qtyInput = dialog.querySelector('input[type="number"]');
-      if (qtyInput) {
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        nativeSetter.call(qtyInput, 10);
-        qtyInput.dispatchEvent(new Event('input', { bubbles: true }));
-        await Core.humanDelay(400, 700);
-      }
-
+      // ⚠ 버그 수정(2026-08, 실전 확인): 다이얼로그를 열면 수량 입력칸이 이미
+      // "보유 수량 전체"로 자동 채워져 있다. 예전에는 "최대 10개까지일 수
+      // 있으니 방어적으로 10을 강제로 넣는다"는 로직이 있었는데, 보유 수량이
+      // 10보다 적으면(예: 2개) 유효하지 않은 값이 되어 "사용" 버튼이
+      // disabled로 막혀버렸다(실전에서 confirmBtnDisabled=true로 직접 확인).
+      // 이 때문에 확인창이 닫히지 않고 계속 열려 있어서, 뒤이은 자동사냥/
+      // 심층던전/아레나 단계가 전부 "상단 메뉴 버튼을 찾을 수 없음"으로
+      // 실패했다(모달이 화면을 덮고 있었기 때문). 수량 입력은 절대 건드리지
+      // 않고 기본값(보유 수량 전체) 그대로 확정한다.
       const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
       if (!confirmBtn) throw new Error('보상 상자 사용 확인 버튼을 찾지 못했습니다.');
+      if (confirmBtn.disabled) throw new Error('보상 상자 사용 확인 버튼이 비활성화 상태입니다.');
       if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 600, beforeMax: 1100, afterMin: 900, afterMax: 1400 }))) {
         throw new Error('보상 상자 사용을 확정하지 못했습니다.');
       }
