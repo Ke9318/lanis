@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.52-stable
+// @version      1.13.53-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -6559,6 +6559,19 @@
     await Core.applyCommonPreset('심층던전', 'deepdungeon');
     Core.log('deepdungeon', `시작 전 원래 속성(${deepOriginalElement}) 확인`);
     await Core.ensureCharacterElement(deepOriginalElement, 'deepdungeon');
+
+    // ⚠ 버그 수정(2026-08, 실전 확인): 프리셋 적용은 "캐릭 > 프리셋", 속성
+    // 확인은 "캐릭 > 내정보"로 화면을 이동시키는데, 그 이후 심층던전
+    // 화면으로 복귀하는 코드가 빠져 있었다. 그 결과 "입장" 탭 찾기와
+    // enterFreshRunIfNeeded()가 전부 엉뚱한 화면(/status)에서 실행되어
+    // 매번 실패하고, 매크로가 "속성 확인 완료" 로그만 남긴 채 던전에
+    // 진입하지 못하고 멈췄다(실전 로그로 직접 재현·확인함).
+    if (!mod.running) return;
+    const backOnDeepDungeon = await mod.goToDeepDungeon();
+    if (!backOnDeepDungeon) {
+      Core.notifyStopped('deepdungeon', '속성/프리셋 확인 후 심층던전 화면으로 복귀하지 못해 정지합니다.');
+      return;
+    }
 
     if (mod.config.retryIfWeeklyDamageUnder1M) {
       const enterTabAtStart = await Core.retryStep(
