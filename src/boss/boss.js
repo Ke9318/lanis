@@ -2983,7 +2983,7 @@
           <input type="checkbox" class="lrm-boss-check" value="vineWraith" style="width:16px; height:16px; cursor:pointer;"> 지하의 망령
         </label>
         <label style="display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer;">
-          <input type="checkbox" class="lrm-boss-check" value="corruptedPurifier" style="width:16px; height:16px; cursor:pointer;"> 타락한 정화자 (HARD, 검술 공략만 구현됨·다른 직업 추후 추가, 수·금 자동 제외)
+          <input type="checkbox" class="lrm-boss-check" value="corruptedPurifier" style="width:16px; height:16px; cursor:pointer;"> 타락한 정화자 (HARD, 검술 공략만 구현됨·다른 직업 추후 추가)
         </label>
 
         <button id="lrm-boss-ref-run-queue" style="width:100%; margin-bottom:6px; padding:6px; background:#2e7d32; color:#fff; border:none; border-radius:4px; cursor:pointer;">보스 도전</button>
