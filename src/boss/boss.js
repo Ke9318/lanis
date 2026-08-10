@@ -1111,6 +1111,46 @@
     if (btn) btn.click();
   };
 
+  // ⚠ 타락한 정화자 전용(2026-08, 사용자 확인): 수/금은 정화자를 아예 잡을
+  // 수 없는 요일이다. KST(UTC+9) 기준 요일(0=일 ~ 6=토)을 반환한다.
+  M.getKstDayOfWeek = () => {
+    const kst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+    return kst.getUTCDay();
+  };
+
+  // ⚠ 타락한 정화자 전용(2026-08, 실전 확인): 캐릭터 카드에 표시되는
+  // "물리 방어력" 숫자는 전투 내내 고정값이라(새로고침해도 안 바뀜) 신뢰할
+  // 수 없다. 대신 전투 기록 로그의 "보스: 방↓N"이 매 턴 오르내리는 실시간
+  // 지표임을 실전으로 확인함(예: 40→80→...→400→...→누적 아님, 상태이상
+  // 지속시간에 따라 감소했다가 다시 상승하는 패턴). 로그는 최신순으로
+  // 나열되므로 맨 위(가장 최근) 항목의 방↓ 값만 읽는다.
+  M.getLatestBossDefenseDrop = () => {
+    const logContainer = M.getLogContainer();
+    if (!logContainer) return null;
+    const match = logContainer.textContent.match(/방↓(\d+)/);
+    return match ? parseInt(match[1], 10) : null;
+  };
+
+  // ⚠ 타락한 정화자 전용(2026-08, 실전 확인): 목표 어빌리티가 정해진 턴
+  // 내에 봉인되지 않으면 "도전 포기" 후 재도전한다. 실전에서 "도전
+  // 포기" → 확인창 "포기" → 목록(/personal-boss) 복귀 → 대상 보스
+  // 재도전 전체 흐름을 검증함.
+  M.abandonCurrentChallenge = async () => {
+    const abandonBtn = M.findButtonByText('도전 포기');
+    if (!abandonBtn) throw new Error('"도전 포기" 버튼을 찾지 못했습니다.');
+    abandonBtn.click();
+    await M.sleep(M.rand(500, 900));
+    const confirmBtn = await M.waitFor(() => M.findConfirmInOpenDialog(['포기']), 5000);
+    if (!confirmBtn) throw new Error('"도전 포기" 확인 버튼을 찾지 못했습니다.');
+    confirmBtn.click();
+    const returned = await M.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/personal-boss',
+      8000,
+      200
+    );
+    if (!returned) throw new Error('도전 포기 후 목록 복귀를 확인하지 못했습니다.');
+  };
+
   // 보스 자세(공격태세/수비태세) 판정: 지하의 망령 전용 기믹.
   // 화면에 보스 이름이 여러 번 나올 수 있어(리스트 페이지의 "이번 주 보상
   // 보스" 배지 등) 마지막(가장 안쪽) 일치 항목을 실제 보스 카드로 본다.
@@ -1264,6 +1304,7 @@
     voidEmperor: { label: '공허의 황제' },
     vineEnt: { label: '지하를 휘감은 엔트' },
     vineWraith: { label: '지하의 망령' },
+    corruptedPurifier: { label: '타락한 정화자', hard: true },
   };
   // 임시 실전 테스트 옵션. true인 동안에는 카드에 "클리어"가 표시되어도
   // 자동 완료 처리하지 않고 도전/재도전 버튼을 계속 탐색한다.
@@ -1280,6 +1321,7 @@
       voidEmperor: 'runVoidEmperor',
       vineEnt: 'runVineEntSword',
       vineWraith: 'runVineWraithSword',
+      corruptedPurifier: 'runCorruptedPurifierSword',
     },
     인술: {
       fallenGuardian: 'runFallenGuardian',
@@ -2007,13 +2049,15 @@
     });
   };
 
-  M.enterBossBattle = async (bossLabel) => {
+  M.enterBossBattle = async (bossLabel, { hard = false } = {}) => {
     M.throwIfStopped();
-    // 일반/HARD 탭이 있으면 일반 탭 보장 (지금 다루는 보스는 모두 일반 모드)
-    const normalTab = M.findButtonByText('일반');
-    if (normalTab) {
+    // 일반/HARD 탭이 있으면 대상 탭 보장. 기존 4개 보스는 전부 일반 모드,
+    // 타락한 정화자(하드)처럼 HARD 전용 보스는 hard:true로 호출한다.
+    const targetTabLabel = hard ? 'HARD' : '일반';
+    const targetTab = M.findButtonByText(targetTabLabel);
+    if (targetTab) {
       M.throwIfStopped();
-      normalTab.click();
+      targetTab.click();
       await M.sleep(300);
     }
     let btn = M.findBossCardActionButton(bossLabel);
@@ -2244,7 +2288,7 @@
           if (M.uiLog) M.uiLog(`🔎 "${entry.label}" 속성 확인 중...`);
           await M.ensureElementForBoss(entry.label);
           if (M.uiLog) M.uiLog(`🧭 "${entry.label}" 카드 찾는 중...`);
-          await M.enterBossBattle(entry.label);
+          await M.enterBossBattle(entry.label, { hard: !!entry.hard });
           // 기존엔 sleep(500) 뒤 딱 한 번만 확인해서, SPA 렌더가 조금만 느려도
           // 그 자리에서 "진입 실패"로 단정하고 큐를 통째로 중단했다. 같은 일을
           // 하는 일일 수호자 경로는 이미 waitFor로 10초를 기다리고 있어서 이 큐
@@ -2392,8 +2436,9 @@
     }
   };
 
-  // 약한 순서 (BOSS_REGISTRY 등록 순서와 동일)
-  const BOSS_ORDER = ['fallenGuardian', 'voidEmperor', 'vineEnt', 'vineWraith'];
+  // 약한 순서 (BOSS_REGISTRY 등록 순서와 동일). 타락한 정화자(HARD)는
+  // 체력이 가장 높아 맨 뒤에 둔다.
+  const BOSS_ORDER = ['fallenGuardian', 'voidEmperor', 'vineEnt', 'vineWraith', 'corruptedPurifier'];
 
   // ⚠ 버그 수정(2026-08): bossLabel 텍스트가 페이지에 최소 2곳(카드 제목과
   // "이번 주 보상 보스" 요약 배지)에 나타나는데, 기존 코드는 findAllLeavesByExactText가
@@ -2588,8 +2633,22 @@
   M.runDailySelectedBosses = async () => {
     const auth = M.getBossRunAuth();
     M.assertBossRunAuthorized(auth && auth.id);
-    const selected = BOSS_ORDER.filter((key) => loadSelectedBosses().includes(key));
+    let selected = BOSS_ORDER.filter((key) => loadSelectedBosses().includes(key));
     if (selected.length === 0) throw new Error('선택한 보스가 없습니다.');
+
+    // ⚠ 사용자 확인(2026-08): 수(3)/금(5)은 타락한 정화자를 아예 도전할 수
+    // 없는 요일이다. 정지시키지 않고 큐에서만 빼고 알림 로그를 남긴다 -
+    // 일일은 어차피 다 체크해두고 돌리며, 받을 게 없으면 수호자에 입장했다
+    // 나가는 것처럼, 정화자도 오늘 못 잡으면 그냥 건너뛰면 되는 항목이다.
+    const kstDay = M.getKstDayOfWeek();
+    if ((kstDay === 3 || kstDay === 5) && selected.includes('corruptedPurifier')) {
+      selected = selected.filter((key) => key !== 'corruptedPurifier');
+      const dayLabel = kstDay === 3 ? '수요일' : '금요일';
+      if (M.uiLog) M.uiLog(`⚠ 오늘은 ${dayLabel}이라 타락한 정화자는 도전 불가 - 이번 큐에서 제외`);
+      if (selected.length === 0) {
+        return '오늘은 정화자 도전 불가 요일이고 다른 선택 보스가 없어 처리할 것 없음';
+      }
+    }
 
     // Chrome이 실행 중인 탭을 폐기했다 복원한 경우에는 저장된 보스 큐가
     // 현재 전투 체크포인트다. 먼저 목록으로 이동하면 진행 중 전투를 버리고
@@ -2923,6 +2982,9 @@
         <label style="display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer;">
           <input type="checkbox" class="lrm-boss-check" value="vineWraith" style="width:16px; height:16px; cursor:pointer;"> 지하의 망령
         </label>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer;">
+          <input type="checkbox" class="lrm-boss-check" value="corruptedPurifier" style="width:16px; height:16px; cursor:pointer;"> 타락한 정화자 (HARD, 검술 전용, 수·금 자동 제외)
+        </label>
 
         <button id="lrm-boss-ref-run-queue" style="width:100%; margin-bottom:6px; padding:6px; background:#2e7d32; color:#fff; border:none; border-radius:4px; cursor:pointer;">보스 도전</button>
         <button id="lrm-boss-ref-bg-test" style="width:100%; margin-bottom:6px; padding:6px; background:#1565c0; color:#fff; border:none; border-radius:4px; cursor:pointer;">백그라운드 진단 (60초)</button>
@@ -3153,6 +3215,127 @@
   // ==========================================================================
   // 보스별 공략 로직
   // ==========================================================================
+
+  // --- 타락한 정화자 (검술 잡, HARD 전용) --------------------------------------
+  // 기믹: 요일마다 보스 방어력을 약화시키는 상태이상이 다르다.
+  //   월=화상, 화=빙결, 수=못잡음, 목=중독, 금=못잡음, 토=모든상태이상(목요일과
+  //   동일 취급), 일=암흑. 하지만 실제 전투 로직은 요일과 무관하게 두 패턴뿐:
+  //   - 월/화/일: 딜 프리셋 자체에 상태이상을 거는 딜스킬이 포함돼 있어
+  //     별도 방깎 프리셋 없이 "봉인 → 딜"만 하면 된다. (이 함수가 구현하는 패턴)
+  //   - 목/토: 중독은 스킬딜이 없어 어빌리티·무기를 따로 빼야 해서 방깎을
+  //     별도 프리셋으로 분리한다. "봉인 → 방깎 → 딜 → 방깎 → 딜" (2026-08
+  //     시점 아직 미구현 - 다음에 추가 예정)
+  //   수/금은 아예 도전 불가능한 요일이라 daily 단계에서 정화자를 큐에서
+  //   제외하고 알림만 띄워야 한다(정지 아님) - 별도 처리.
+  //
+  // 1) 봉인 프리셋(공용 "봉인")으로 "불굴"+"엔드 블로킹" 봉인. 5턴씩,
+  //    내 HP 50% 미만이면 그 턴은 회복. 10턴(5턴×2회) 내 봉인 안 되면
+  //    "도전 포기" 후 재도전(최대 시도 횟수까지 반복).
+  // 2) 봉인되면 오늘 보스 속성을 실시간으로 읽어 "{속성} 딜" 프리셋을 적용.
+  //    프리셋이 없으면 applyBossPreset이 에러를 던져 매크로가 정지한다
+  //    (프리셋 이름 오타/누락 신호 - 사용자 확인 필요).
+  // 3) 내 HP/MP 60% 이상이면 1턴 공격, 미만이면 회복. 공격으로 보스에게
+  //    상태이상을 쌓아 방어력을 깎다가, 전투 로그의 "보스: 방↓N"이 400
+  //    이상이면 공격 스크롤(5턴 지속) 1개 사용. 스크롤 효과가 끝나는
+  //    5공격턴마다 다시 방↓400 조건을 확인해 반복 사용(스크롤 소진되면
+  //    이후로는 그냥 공격만 반복). 보스 죽을 때까지 반복.
+  M.runCorruptedPurifierSword = async ({
+    requiredSeals = ['불굴', '엔드 블로킹'],
+    sealRoundsPerAttempt = 2, // 5턴씩 2회 = 10턴
+    maxSealAttempts = 5,
+    sealLowHpThreshold = 0.5,
+    dealHpThreshold = 0.6,
+    dealMpThreshold = 0.6,
+    defenseDropThreshold = 400,
+    scrollDurationTurns = 5,
+    maxDealRounds = 200,
+  } = {}) => {
+    const bossLabel = BOSS_REGISTRY.corruptedPurifier.label;
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+
+    // 1단계: 봉인 (재도전 포함)
+    let sealed = new Set();
+    let sealSucceeded = false;
+    for (let attempt = 1; attempt <= maxSealAttempts; attempt++) {
+      M.throwIfStopped();
+      await M.applyBossPreset('봉인');
+      push(`[봉인 시도 ${attempt}] 프리셋 적용`);
+      sealed = M.parseSealedAbilities(requiredSeals);
+      let rounds = 0;
+      while (!requiredSeals.every((a) => sealed.has(a)) && rounds < sealRoundsPerAttempt) {
+        M.throwIfStopped();
+        const state = M.getHpMpNumbers();
+        const hpRatio = state.player.hp.cur / state.player.hp.max;
+        if (hpRatio < sealLowHpThreshold) {
+          await M.clickRecover();
+          push(`[봉인 시도 ${attempt}] 내HP ${Math.round(hpRatio * 100)}% -> 회복`);
+        } else {
+          await M.clickTurn(5);
+          rounds++;
+        }
+        for (const s of M.parseSealedAbilities(requiredSeals)) sealed.add(s);
+        push(`[봉인 시도 ${attempt}, ${rounds}회차] sealed=${[...sealed].join(',')}`);
+      }
+      if (requiredSeals.every((a) => sealed.has(a))) {
+        push('[봉인] 목표 어빌리티 전부 봉인 완료');
+        sealSucceeded = true;
+        break;
+      }
+      if (attempt === maxSealAttempts) break;
+      push(`[봉인 시도 ${attempt}] 10턴 내 봉인 실패 - 도전 포기 후 재도전`);
+      await M.abandonCurrentChallenge();
+      await M.enterBossBattle(bossLabel, { hard: true });
+    }
+    if (!sealSucceeded) {
+      throw new Error(`최대 ${maxSealAttempts}회 재도전에도 봉인(${requiredSeals.join(',')})에 실패했습니다.`);
+    }
+
+    // 2단계: 오늘 보스 속성에 맞는 딜 프리셋 적용 (없으면 applyBossPreset이 에러로 정지시킴)
+    const element = M.getBossElementInBattle(bossLabel);
+    if (!element) throw new Error('보스 속성을 화면에서 확인하지 못했습니다.');
+    const dealPresetName = `${element} 딜`;
+    await M.applyBossPreset(dealPresetName);
+    push(`[딜] 오늘 속성(${element}) 기준 프리셋 "${dealPresetName}" 적용`);
+
+    // 3단계: 딜 - HP/MP 기준 회복/공격 반복, 방↓400 이상일 때마다 스크롤 재사용
+    let state = M.getHpMpNumbers();
+    let round = 0;
+    let turnsSinceScroll = null; // null = 아직 스크롤 안 씀(즉시 사용 가능)
+    let scrollExhausted = false;
+    while (state.boss.hp.cur > 0 && round < maxDealRounds) {
+      M.throwIfStopped();
+      round++;
+      const hpRatio = state.player.hp.cur / state.player.hp.max;
+      const mpRatio = state.player.mp.cur / state.player.mp.max;
+      if (hpRatio < dealHpThreshold || mpRatio < dealMpThreshold) {
+        await M.clickRecover();
+        push(`[딜 ${round}] HP ${Math.round(hpRatio * 100)}% / MP ${Math.round(mpRatio * 100)}% -> 회복`);
+      } else {
+        const defDrop = M.getLatestBossDefenseDrop();
+        const scrollReady = !scrollExhausted && (turnsSinceScroll === null || turnsSinceScroll >= scrollDurationTurns);
+        if (scrollReady && defDrop !== null && defDrop >= defenseDropThreshold) {
+          try {
+            await M.useScrolls(['공격']);
+            push(`[딜 ${round}] 방↓${defDrop} >= ${defenseDropThreshold} -> 공격 스크롤 사용`);
+            turnsSinceScroll = 0;
+          } catch (e) {
+            scrollExhausted = true;
+            push(`[딜 ${round}] 스크롤 사용 실패(소진 추정, 이후 공격만 반복): ${e.message}`);
+          }
+        }
+        await M.clickTurn(1);
+        if (turnsSinceScroll !== null) turnsSinceScroll++;
+      }
+      state = M.getHpMpNumbers();
+      push(`[딜 ${round}] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
+      if (state.boss.hp.cur <= 0) break;
+    }
+
+    await M.closeClearPopupIfAny();
+    push('완료');
+    return log;
+  };
 
   // --- 타락한 수호자 (검술 잡, 일반) -------------------------------------------
   // 1) 봉인 프리셋으로 "불굴"+"엔드 블로킹" 봉인될 때까지 5턴씩 반복
