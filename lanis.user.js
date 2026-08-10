@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.63-stable
+// @version      1.13.64-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -11618,6 +11618,39 @@
 
     if (remaining.length === 0) {
       M.assertBossRunAuthorized(auth.id);
+
+      // ⚠ 사용자 요청(2026-08): "필러"(수호자 들어갔다 나오기)로 일일 도전
+      // 과제만 채우던 걸, 조건이 맞으면 실제 정화자 전투로 대체한다 - 이러면
+      // 일일 도전과제도 채워지고 실제 보스 처치·보상도 같이 얻는다. 조건:
+      // (1) 오늘 요일에 구현된 공략 패턴이 있음(월/화/일만 - 목/토 방깎
+      // 패턴은 아직 미구현이라 여기 넣지 않음, 나중에 추가되면 이 배열만
+      // 늘리면 됨), (2) 현재 선택된 직업에 정화자 로직이 등록돼 있음(현재
+      // 검술만), (3) 오늘 정화자를 아직 안 잡았음. 셋 다 맞으면 필러 대신
+      // 실전 투입한다.
+      const IMPLEMENTED_PURIFIER_DAYS = [0, 1, 2]; // KST getUTCDay 기준: 일=0, 월=1, 화=2
+      const todayKstDay = M.getKstDayOfWeek();
+      let purifierRunName = null;
+      try {
+        purifierRunName = M.getRunFunctionName('corruptedPurifier');
+      } catch (e) {
+        purifierRunName = null;
+      }
+      const purifierAlreadyClearedToday = M.isBossAlreadyCleared(BOSS_REGISTRY.corruptedPurifier.label);
+      if (IMPLEMENTED_PURIFIER_DAYS.includes(todayKstDay) && purifierRunName && !purifierAlreadyClearedToday) {
+        if (M.uiLog) {
+          M.uiLog('선택한 보스 전부 처리 완료 → 필러 대신 타락한 정화자 실전 투입(일일 과제+보상 동시 처리)');
+        }
+        await M.enterBossBattle(BOSS_REGISTRY.corruptedPurifier.label, { hard: true });
+        const purifierEntered = await M.waitFor(
+          () => M.isInBattleScreen(BOSS_REGISTRY.corruptedPurifier.label),
+          10000,
+          250
+        );
+        if (!purifierEntered) throw new Error('필러 대체용 정화자 전투 진입을 확인하지 못했습니다.');
+        await M[purifierRunName]();
+        return '선택 보스 주간 보상 소진 확인, 필러 대신 타락한 정화자 실전 처치 완료';
+      }
+
       if (M.uiLog) M.uiLog('선택한 보스 전부 처리 완료(오늘 이미 처치했거나 주간 보상 소진) → 수호자 도전 후 포기');
       await M.enterBossBattle(BOSS_REGISTRY.fallenGuardian.label);
       const entered = await M.waitFor(() => M.isInBattleScreen(BOSS_REGISTRY.fallenGuardian.label), 10000, 250);
