@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.61-stable
+// @version      1.13.62-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -11890,7 +11890,7 @@
           <input type="checkbox" class="lrm-boss-check" value="vineWraith" style="width:16px; height:16px; cursor:pointer;"> 지하의 망령
         </label>
         <label style="display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer;">
-          <input type="checkbox" class="lrm-boss-check" value="corruptedPurifier" style="width:16px; height:16px; cursor:pointer;"> 타락한 정화자 (HARD, 검술 전용, 수·금 자동 제외)
+          <input type="checkbox" class="lrm-boss-check" value="corruptedPurifier" style="width:16px; height:16px; cursor:pointer;"> 타락한 정화자 (HARD, 검술 공략만 구현됨·다른 직업 추후 추가, 수·금 자동 제외)
         </label>
 
         <button id="lrm-boss-ref-run-queue" style="width:100%; margin-bottom:6px; padding:6px; background:#2e7d32; color:#fff; border:none; border-radius:4px; cursor:pointer;">보스 도전</button>
