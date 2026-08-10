@@ -99,10 +99,63 @@
     return true;
   };
 
+  // ⚠ 사용자 요청(2026-08): 지난 주 아레나 순위 보상(전체 순위+직업군 순위)을
+  // 주 1회 자동으로 받는다. 실전 확인: GET /api/arena/last-week의
+  // {participated, rewardReceived}로 정확히 판별 가능(수령 후 rewardReceived
+  // 가 true로 바뀌는 것까지 확인함). 이 보상은 요일 제약이 없으므로(주말
+  // 한정 전투와 무관), mainLoop의 "주말에만 실행" 체크보다 먼저 처리해서
+  // 평일에 모듈이 실행되더라도 보상 수령 기회를 놓치지 않게 한다.
+  Modules.arena.claimLastWeekRewardIfAny = async function () {
+    let data;
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('https://lanis.me/api/arena/last-week', {
+        credentials: 'include',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error(`API 호출 실패 (HTTP ${res.status})`);
+      data = await res.json();
+    } catch (e) {
+      Core.log('arena', `⚠ 아레나 지난 주 보상 확인 실패(계속 진행): ${e.message}`);
+      return;
+    }
+    if (!data.participated || data.rewardReceived) {
+      Core.log('arena', '아레나 지난 주 보상: 받을 것 없음(참여 안 했거나 이미 수령함)');
+      return;
+    }
+    Core.log('arena', `아레나 지난 주 보상 수령 시도 (전체 ${data.finalRank}위, 직업군 ${data.baseClassRank}위)`);
+
+    await this.goToArena();
+    const rewardTab = await Core.retryStep('아레나 "보상" 탭 찾기', () => Core.findButtonByText('보상'));
+    if (!rewardTab) {
+      Core.log('arena', '⚠ "보상" 탭을 찾지 못해 지난 주 보상 수령을 건너뜁니다.');
+      return;
+    }
+    if (!(await Core.safeClick(() => Core.findButtonByText('보상'), { beforeMin: 500, beforeMax: 900, afterMin: 700, afterMax: 1200 }))) {
+      Core.log('arena', '⚠ "보상" 탭 클릭에 실패해 지난 주 보상 수령을 건너뜁니다.');
+      return;
+    }
+    const claimBtn = await Core.waitFor(() => Core.findButtonByText('보상 받기'), 8000, 250);
+    if (!claimBtn) {
+      Core.log('arena', '⚠ "보상 받기" 버튼을 찾지 못했습니다.');
+      return;
+    }
+    if (!(await Core.safeClick(() => Core.findButtonByText('보상 받기'), { beforeMin: 600, beforeMax: 1100, afterMin: 1000, afterMax: 1500 }))) {
+      Core.log('arena', '⚠ "보상 받기" 클릭에 실패했습니다.');
+      return;
+    }
+    Core.log('arena', '아레나 지난 주 보상 수령 완료');
+  };
+
   Modules.arena.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
     mod.loadConfig();
+
+    // 지난 주 보상은 요일 제약이 없으므로, "주말에만 전투" 체크보다 먼저 처리한다.
+    await mod.claimLastWeekRewardIfAny();
+    if (!mod.running) return;
+
     if (!mod.isWeekend()) {
       mod.clearResume();
       Core.notifyStopped('arena', '아레나는 토요일과 일요일에만 자동 실행할 수 있습니다.');
