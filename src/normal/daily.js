@@ -377,6 +377,46 @@
     return true;
   };
 
+  // ⚠ 사용자 요청(2026-08): 일간/주간 퀘스트 "보상 받기" 버튼도 자동으로
+  // 누른다. 실전 확인: 확인창 없이 클릭 한 번으로 즉시 처리되고, 이미
+  // 받았으면 버튼이 "수령 완료"로 바뀌며 disabled 상태가 된다. 7개 미만
+  // 완료 상태면 "보상 받기 (N/7)"로 표시되지만 이때도 disabled라, 두
+  // 경우 다 disabled 여부 하나로 정확히 "지금 받을 수 있는지"를 판별할
+  // 수 있다(텍스트를 따로 안 봐도 됨).
+  Modules.daily.claimQuestRewardIfReady = async function (tabLabel) {
+    await Core.clickNavMenuExact('캐릭', '퀘스트');
+    const onQuestPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300);
+    if (!onQuestPage) {
+      Core.log('daily', `⚠ 퀘스트 화면 진입을 확인하지 못해 ${tabLabel} 퀘스트 보상 수령을 건너뜁니다.`);
+      return false;
+    }
+    await Core.humanDelay(500, 900);
+
+    if (tabLabel === '주간') {
+      const weeklyTab = await Core.retryStep('"주간" 탭 찾기', () => Core.findButtonByText('주간'));
+      if (!weeklyTab) {
+        Core.log('daily', '⚠ "주간" 탭을 찾지 못해 주간 퀘스트 보상 수령을 건너뜁니다.');
+        return false;
+      }
+      if (!(await Core.safeClick(() => Core.findButtonByText('주간'), { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 }))) {
+        Core.log('daily', '⚠ "주간" 탭 클릭에 실패해 주간 퀘스트 보상 수령을 건너뜁니다.');
+        return false;
+      }
+    }
+
+    const rewardBtn = Core.gameElements('button').find(
+      (b) => Core.isElementVisible(b) && b.textContent.trim().startsWith('보상 받기') && !b.disabled
+    );
+    if (!rewardBtn) {
+      Core.log('daily', `${tabLabel} 퀘스트 보상: 받을 것 없음(조건 미달이거나 이미 수령함)`);
+      return true;
+    }
+    rewardBtn.click();
+    await Core.humanDelay(1000, 1500);
+    Core.log('daily', `${tabLabel} 퀘스트 보상 수령 완료`);
+    return true;
+  };
+
   Modules.daily.craftBoxQuestItem = async function () {
     await Core.clickNavMenuExact('마을', '대장간');
     const onCraftPage = await Core.waitFor(() => Core.bodyText().includes('조합소'), 15000, 300);
@@ -536,6 +576,7 @@
       // 지금은 "장인 정신"(아이템 조합)만 구현됨. 수행/길드보스 등 다른
       // 일간·주간 퀘스트 항목이 추가되면 이 자리에 이어서 호출한다.
       const craftOk = await this.completeCraftQuestIfNeeded();
+      await this.claimQuestRewardIfReady('일간');
       return craftOk ? '일간 퀘스트 처리 완료' : '일간 퀘스트 일부 처리 실패';
     }
     if (step === 'weeklyQuests') {
@@ -543,6 +584,7 @@
       // 특정 시간대에 길드마스터가 소환하는 방식이라 자동화하지 않고 수동
       // 그대로 둔다. "꾸준한 수행"만 자동화한다.
       const cultivationOk = await this.completeCultivationQuestIfNeeded();
+      await this.claimQuestRewardIfReady('주간');
       return cultivationOk ? '주간 퀘스트 처리 완료' : '주간 퀘스트 일부 처리 실패';
     }
     if (step === 'attendance') {
