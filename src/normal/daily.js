@@ -27,6 +27,8 @@
   const ARENA_REWARD_WEEK_KEY = 'lrm-arena-reward-week-done';
   const DAILY_STEP_LABELS = {
     weeklyRewards: '주간 보상(심층던전+아레나)',
+    dailyQuests: '일간 퀘스트',
+    weeklyQuests: '주간 퀘스트',
     attendance: '출석체크',
     dungeon: '던전',
     arena: '아레나',
@@ -258,6 +260,151 @@
     if (result && result.ok === false) throw new Error(result.message);
   };
 
+  // ⚠ 사용자 요청(2026-08): 일일 퀘스트 "장인 정신"(아이템 조합 1회)을 위해
+  // 마을 > 대장간 > 조합소 > 상자 카테고리에서 금 → 은 → 동 순서로 시도해
+  // 1개 조합한다. 실전 확인: 목록의 "선택"/"확인" 버튼 텍스트는 재료 보유
+  // 여부와 무관하다(둘 다 재료가 충분해도 라벨이 다르게 나옴) — 반드시
+  // 클릭해서 확인 다이얼로그를 열고 "최대 N개 조합 가능" 문구로 실제
+  // 조합 가능 여부를 판단해야 한다. 상자 셋 다 실패하면 가죽 카테고리로
+  // 넘어간다(세부 우선순위는 추후 확정 - 지금은 상자만 구현).
+  // ⚠ 사용자 요청(2026-08): 이 퀘스트는 "1회 조합"이면 완료되므로, 절대
+  // 중복으로 조합하면 안 된다. 대장간에 가기 전에 먼저 퀘스트 화면에서
+  // "장인 정신" 진행도(N/M)를 확인해서, 이미 완료(N>=M)면 대장간에 아예
+  // 가지 않고 스킵한다. 이렇게 하면 "일일"을 하루에 여러 번 돌려도 두 번째
+  // 부터는 조합 자체를 시도하지 않는다.
+  Modules.daily.completeCraftQuestIfNeeded = async function () {
+    await Core.clickNavMenuExact('캐릭', '퀘스트');
+    const onQuestPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300);
+    if (!onQuestPage) {
+      Core.log('daily', '⚠ 퀘스트 화면 진입을 확인하지 못해 아이템 조합 퀘스트를 건너뜁니다.');
+      return false;
+    }
+    await Core.humanDelay(500, 900);
+
+    const questText = Core.bodyText();
+    const match = questText.match(/장인\s*정신\s*(\d+)\s*\/\s*(\d+)/);
+    if (match && parseInt(match[1], 10) >= parseInt(match[2], 10)) {
+      Core.log('daily', '"장인 정신" 퀘스트 이미 완료됨 - 조합 생략');
+      return true;
+    }
+
+    return await Modules.daily.craftBoxQuestItem();
+  };
+
+  Modules.daily.craftBoxQuestItem = async function () {
+    await Core.clickNavMenuExact('마을', '대장간');
+    const onCraftPage = await Core.waitFor(() => Core.bodyText().includes('조합소'), 15000, 300);
+    if (!onCraftPage) {
+      Core.log('daily', '⚠ 대장간 화면 진입을 확인하지 못해 아이템 조합을 건너뜁니다.');
+      return false;
+    }
+
+    const craftTab = await Core.retryStep('"조합소" 탭 찾기', () => Core.findButtonByText('조합소'));
+    if (!craftTab) {
+      Core.log('daily', '⚠ "조합소" 탭을 찾지 못해 아이템 조합을 건너뜁니다.');
+      return false;
+    }
+    if (!(await Core.safeClick(() => Core.findButtonByText('조합소'), { beforeMin: 500, beforeMax: 900, afterMin: 700, afterMax: 1100 }))) {
+      Core.log('daily', '⚠ "조합소" 탭 클릭에 실패해 아이템 조합을 건너뜁니다.');
+      return false;
+    }
+
+    // ⚠ 실전 확인: 카테고리 필터(전체/가죽/결정/상자/해방/던전/일반)도
+    // 인벤토리 보상 필터처럼 다중 토글이다(aria-pressed로 확인). "상자"만
+    // 켜기 전에 이미 켜져 있는 다른 카테고리를 먼저 꺼야, 엉뚱한 카테고리
+    // 레시피가 섞여 heading 검색이 꼬이지 않는다. 또한 페이지 전환 직후라
+    // 클릭이 씹히는 경우를 실전에서 확인해, 클릭 후 실제 상태를 재확인하고
+    // 필요하면 재시도한다.
+    const setOnlyCategory = async (targetLabel) => {
+      const categoryLabels = ['가죽', '결정', '상자', '해방', '던전', '일반'];
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let allCorrect = true;
+        for (const label of categoryLabels) {
+          const btn = Core.gameElements('button').find((b) => b.textContent.trim() === label && Core.isElementVisible(b));
+          if (!btn) continue;
+          const isPressed = btn.getAttribute('aria-pressed') === 'true';
+          const shouldBePressed = label === targetLabel;
+          if (isPressed !== shouldBePressed) {
+            allCorrect = false;
+            btn.click();
+            await Core.humanDelay(400, 700);
+          }
+        }
+        if (allCorrect) return true;
+      }
+      return false;
+    };
+    await setOnlyCategory('상자');
+
+    // 재료가 여러 경로(같은 완제품 이름의 서로 다른 레시피 행)로 존재할 수
+    // 있다(예: "가죽끈"은 재료가 "가죽"인 행과 "낡은 가죽끈"인 행 둘 다 있음).
+    // 이런 경우 모든 행을 순서대로 시도한다.
+    const tryCraft = async (label) => {
+      const findAllRecipeButtons = () => {
+        const all = Core.gameElements('*');
+        const headings = all.filter((el) => el.children.length === 0 && el.textContent.trim() === label);
+        const buttons = [];
+        for (const heading of headings) {
+          const idx = all.indexOf(heading);
+          for (let i = idx + 1; i < Math.min(idx + 30, all.length); i++) {
+            const el = all[i];
+            if (el.tagName === 'BUTTON' && ['선택', '확인'].includes(el.textContent.trim()) && Core.isElementVisible(el)) {
+              buttons.push(el);
+              break;
+            }
+          }
+        }
+        return buttons;
+      };
+      const count = findAllRecipeButtons().length;
+      for (let variant = 0; variant < count; variant++) {
+        const getBtn = () => findAllRecipeButtons()[variant] || null;
+        const recipeBtn = getBtn();
+        if (!recipeBtn) continue;
+        if (!(await Core.safeClick(getBtn, { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 }))) continue;
+
+        const dialog = await Core.waitFor(
+          () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d) && d.textContent.includes('조합 확인')) || null,
+          8000,
+          250
+        );
+        if (!dialog) continue;
+
+        const match = dialog.textContent.match(/최대\s*(\d+)\s*개\s*조합\s*가능/);
+        const maxCount = match ? parseInt(match[1], 10) : 0;
+        if (maxCount >= 1) {
+          const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '조합');
+          if (confirmBtn) {
+            confirmBtn.click();
+            await Core.humanDelay(1000, 1600);
+            Core.log('daily', `일일 퀘스트용 아이템 조합 완료: ${label}`);
+            return true;
+          }
+        }
+        const cancelBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
+        if (cancelBtn) cancelBtn.click();
+        await Core.humanDelay(400, 700);
+      }
+      return false;
+    };
+
+    for (const label of ['금의 상자', '은의 상자', '동의 상자']) {
+      if (await tryCraft(label)) return true;
+    }
+
+    // ⚠ 사용자 요청(2026-08): 상자 카테고리에서 전부 실패하면 가죽 카테고리로
+    // 넘어간다. 우선순위(사용자 지정): 고급 가죽끈 → 가죽끈 → 낡은 가죽끈.
+    Core.log('daily', '상자 카테고리에서 조합 가능한 재료가 없어 가죽 카테고리로 전환합니다.');
+    await setOnlyCategory('가죽');
+
+    for (const label of ['고급 가죽끈', '가죽끈', '낡은 가죽끈']) {
+      if (await tryCraft(label)) return true;
+    }
+
+    Core.log('daily', '상자·가죽 카테고리 모두에서 조합 가능한 재료가 없습니다.');
+    return false;
+  };
+
   // ⚠ 사용자 요청(2026-08): 심층던전(보상 3종)/아레나(지난 주 순위 보상)를
   // 각 매크로가 실제로 돌아가는지와 완전히 무관하게, "일일" 실행 시 이번
   // 주에 한 번만 확인해서 받는다. 아레나는 토·일에만 진입 가능한데 보상은
@@ -298,6 +445,18 @@
   Modules.daily.runStep = async function (step) {
     if (step === 'weeklyRewards') {
       return await this.claimWeeklyRewardsIfDue();
+    }
+    if (step === 'dailyQuests') {
+      // 지금은 "장인 정신"(아이템 조합)만 구현됨. 수행/길드보스 등 다른
+      // 일간·주간 퀘스트 항목이 추가되면 이 자리에 이어서 호출한다.
+      const craftOk = await this.completeCraftQuestIfNeeded();
+      return craftOk ? '일간 퀘스트 처리 완료' : '일간 퀘스트 일부 처리 실패';
+    }
+    if (step === 'weeklyQuests') {
+      // TODO(2026-08): 주간 퀘스트 "꾸준한 수행"/"길드의 용사" 자동화는
+      // 아직 미구현. 화면 조사 후 추가 예정.
+      Core.log('daily', '주간 퀘스트 자동화는 아직 미구현입니다 (수행/길드보스 조사 필요).');
+      return '주간 퀘스트 자동화 미구현';
     }
     if (step === 'attendance') {
       return await this.runAttendance();
@@ -436,12 +595,16 @@
     // 열리지 않으므로 우선순위를 뒤로 미룬다. 던전 → 보스 → 사냥 → 심층던전
     // → 아레나 순서로 실행한다. 주간 보상(weeklyRewards)은 체크박스 설정과
     // 무관하게 항상 맨 먼저 실행한다(해당 매크로를 안 돌려도 반드시 받아야
-    // 하는 보상이기 때문).
+    // 하는 보상이기 때문). 일간 퀘스트(dailyQuests)는 다른 모든 단계가
+    // 끝난 뒤에야 정확한 진행도를 확인할 수 있으므로 항상 맨 마지막에
+    // 실행한다(매일). 주간 퀘스트(weeklyQuests)는 토·일에만 실행한다.
     const steps = [
       'weeklyRewards',
       'attendance',
       ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena']
         .filter((key) => mod.config[key]),
+      'dailyQuests',
+      ...(Modules.arena.isWeekend() ? ['weeklyQuests'] : []),
     ];
     if (
       steps.includes('dungeon') &&
