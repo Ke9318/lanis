@@ -291,6 +291,92 @@
     return await Modules.daily.craftBoxQuestItem();
   };
 
+  // ⚠ 사용자 요청(2026-08): 주간 퀘스트 "꾸준한 수행"(수행 5회)을 위해
+  // 캐릭 > 수행 화면에서 "수행하기"를 눌러 나오는 "여러 번 수행하기"
+  // 다이얼로그의 수량을 채운다. 기본값이 100(최대치)으로 잡혀 있어 그대로
+  // 두면 안 되고, 실제로 필요한 횟수만 입력해야 한다 — 이미 몇 회 했는지도
+  // 감안해 남은 횟수(목표-현재)만 정확히 채운다(실전 확인: 5회 실행 시
+  // 숙련도 정확히 1,800×5 소모, 퀘스트 진행도 5/5로 정확히 반영됨).
+  Modules.daily.completeCultivationQuestIfNeeded = async function () {
+    await Core.clickNavMenuExact('캐릭', '퀘스트');
+    const onQuestPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300);
+    if (!onQuestPage) {
+      Core.log('daily', '⚠ 퀘스트 화면 진입을 확인하지 못해 수행 퀘스트를 건너뜁니다.');
+      return false;
+    }
+    await Core.humanDelay(500, 900);
+
+    const weeklyTab = await Core.retryStep('"주간" 탭 찾기', () => Core.findButtonByText('주간'));
+    if (!weeklyTab) {
+      Core.log('daily', '⚠ "주간" 탭을 찾지 못해 수행 퀘스트를 건너뜁니다.');
+      return false;
+    }
+    if (!(await Core.safeClick(() => Core.findButtonByText('주간'), { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 }))) {
+      Core.log('daily', '⚠ "주간" 탭 클릭에 실패해 수행 퀘스트를 건너뜁니다.');
+      return false;
+    }
+
+    const match = Core.bodyText().match(/꾸준한\s*수행\s*(\d+)\s*\/\s*(\d+)/);
+    if (!match) {
+      Core.log('daily', '⚠ "꾸준한 수행" 퀘스트 항목을 찾지 못했습니다.');
+      return false;
+    }
+    const current = parseInt(match[1], 10);
+    const target = parseInt(match[2], 10);
+    if (current >= target) {
+      Core.log('daily', '"꾸준한 수행" 퀘스트 이미 완료됨 - 생략');
+      return true;
+    }
+    const remaining = target - current;
+
+    await Core.clickNavMenuExact('캐릭', '수행');
+    const onTrainingPage = await Core.waitFor(() => location.pathname.startsWith('/training'), 15000, 300);
+    if (!onTrainingPage) {
+      Core.log('daily', '⚠ 수행 화면 진입을 확인하지 못했습니다.');
+      return false;
+    }
+    await Core.humanDelay(500, 900);
+
+    const trainBtn = await Core.retryStep('"수행하기" 버튼 찾기', () => Core.findButtonByText('수행하기'));
+    if (!trainBtn) {
+      Core.log('daily', '⚠ "수행하기" 버튼을 찾지 못했습니다.');
+      return false;
+    }
+    if (!(await Core.safeClick(() => Core.findButtonByText('수행하기'), { beforeMin: 500, beforeMax: 900, afterMin: 700, afterMax: 1100 }))) {
+      Core.log('daily', '⚠ "수행하기" 버튼 클릭에 실패했습니다.');
+      return false;
+    }
+
+    const dialog = await Core.waitFor(
+      () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d) && d.textContent.includes('여러 번 수행하기')) || null,
+      8000,
+      250
+    );
+    if (!dialog) {
+      Core.log('daily', '⚠ 수행 횟수 입력창을 찾지 못했습니다.');
+      return false;
+    }
+    const input = dialog.querySelector('input');
+    if (!input) {
+      Core.log('daily', '⚠ 수행 횟수 입력칸을 찾지 못했습니다.');
+      return false;
+    }
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    nativeSetter.call(input, String(remaining));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await Core.humanDelay(400, 700);
+
+    const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '수행하기');
+    if (!confirmBtn) {
+      Core.log('daily', '⚠ 수행 확인 버튼을 찾지 못했습니다.');
+      return false;
+    }
+    confirmBtn.click();
+    await Core.humanDelay(1200, 1800);
+    Core.log('daily', `"꾸준한 수행" 퀘스트용 수행 ${remaining}회 완료`);
+    return true;
+  };
+
   Modules.daily.craftBoxQuestItem = async function () {
     await Core.clickNavMenuExact('마을', '대장간');
     const onCraftPage = await Core.waitFor(() => Core.bodyText().includes('조합소'), 15000, 300);
@@ -453,10 +539,11 @@
       return craftOk ? '일간 퀘스트 처리 완료' : '일간 퀘스트 일부 처리 실패';
     }
     if (step === 'weeklyQuests') {
-      // TODO(2026-08): 주간 퀘스트 "꾸준한 수행"/"길드의 용사" 자동화는
-      // 아직 미구현. 화면 조사 후 추가 예정.
-      Core.log('daily', '주간 퀘스트 자동화는 아직 미구현입니다 (수행/길드보스 조사 필요).');
-      return '주간 퀘스트 자동화 미구현';
+      // ⚠ 사용자 확인(2026-08): "길드의 용사"(길드 보스 3회 공격)는 화·목
+      // 특정 시간대에 길드마스터가 소환하는 방식이라 자동화하지 않고 수동
+      // 그대로 둔다. "꾸준한 수행"만 자동화한다.
+      const cultivationOk = await this.completeCultivationQuestIfNeeded();
+      return cultivationOk ? '주간 퀘스트 처리 완료' : '주간 퀘스트 일부 처리 실패';
     }
     if (step === 'attendance') {
       return await this.runAttendance();
