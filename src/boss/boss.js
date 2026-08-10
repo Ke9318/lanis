@@ -2636,11 +2636,23 @@
     if (unreadable.length) {
       throw new Error(`주간 보상 횟수를 읽지 못한 보스: ${unreadable.map((item) => item.label).join(', ')}`);
     }
-    const remaining = progressBefore.filter((item) => !item.progress.exhausted).map((item) => item.key);
+    // ⚠ 버그 수정(2026-08, 사용자 확인): 큐에 넣을 보스를 고를 때 주간 보상
+    // 소진 여부(exhausted)만 확인하고 "오늘 이미 처치했는지"는 전혀 확인하지
+    // 않고 있었다. isBossAlreadyCleared 함수는 이미 존재했지만 어디서도
+    // 호출되지 않는 죽은 코드였다. 사용자 확인: 보스 도전이 성립하려면
+    // "오늘 아직 안 잡았음" AND "주간 보상이 남아있음" 둘 다 만족해야
+    // 한다(보상 퍼센트 단계는 여러 번 처치해야 채워지는 게 아니라, 체력을
+    // 얼마나 깎았는지에 따른 단일 보상표일 뿐 — 처치=0%면 모든 단계 보상을
+    // 한 번에 받음). 이 누락 때문에 "일일"이 이미 오늘 완전히 처치·보상
+    // 수령까지 끝난 보스 3마리를 그대로 다시 큐에 넣어 불필요하게
+    // 재처치(전투 스크롤 등 자원 소모)시키는 걸 실전에서 직접 확인함.
+    const remaining = progressBefore
+      .filter((item) => !item.progress.exhausted && !M.isBossAlreadyCleared(item.label))
+      .map((item) => item.key);
 
     if (remaining.length === 0) {
       M.assertBossRunAuthorized(auth.id);
-      if (M.uiLog) M.uiLog('선택한 보스의 주간 보상 소진 확인 → 수호자 도전 후 포기');
+      if (M.uiLog) M.uiLog('선택한 보스 전부 처리 완료(오늘 이미 처치했거나 주간 보상 소진) → 수호자 도전 후 포기');
       await M.enterBossBattle(BOSS_REGISTRY.fallenGuardian.label);
       const entered = await M.waitFor(() => M.isInBattleScreen(BOSS_REGISTRY.fallenGuardian.label), 10000, 250);
       if (!entered) throw new Error('일일 과제용 수호자 전투 진입을 확인하지 못했습니다.');

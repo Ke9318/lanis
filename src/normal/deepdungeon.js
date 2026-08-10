@@ -1225,8 +1225,13 @@
     shouldCancel = Core.defaultShouldCancel
   ) {
     await Core.clickNavMenuExact('전투', '심층 던전', shouldCancel);
+    // ⚠ 버그 수정(2026-08, 실전 확인): 예전엔 bodyText().includes('던전 진입')도
+    // 성공 조건에 포함시켰는데, 이게 화면이 실제로 안 바뀐 상태(/status 등)에서도
+    // true를 반환하는 오판정을 실전에서 직접 재현함(다른 화면 조작이나 텍스트
+    // 캐시 우연 일치로 추정). URL 경로만으로 판정하는 게 훨씬 신뢰도 높다 —
+    // SPA 라우팅이 실제로 일어났다는 확실한 증거이기 때문.
     return !!(await Core.waitFor(
-      () => (/deep-dungeon/.test(location.href) || Core.bodyText().includes('던전 진입') ? true : null),
+      () => (location.pathname.startsWith('/deep-dungeon') ? true : null),
       15000,
       300,
       shouldCancel
@@ -1559,8 +1564,16 @@
     // 채운 상태에서 일일을 돌리면 아무 것도 안 하면서 속성돌만 낭비하는
     // 문제가 있었다. 화면 진입/누적 데미지 확인은 프리셋·속성과 무관하게
     // 할 수 있으므로 먼저 확인하고, 할 일이 있을 때만 프리셋/속성을 맞춘다.
-    await mod.goToDeepDungeon();
+    // ⚠ 버그 수정(2026-08, 실전 확인): 이 첫 goToDeepDungeon() 호출이 반환값을
+    // 확인하지 않고 있었다. 실패해도 조용히 다음 단계(주간 누적 데미지 확인)로
+    // 넘어가서 "기록 탭 찾기" 실패 로그만 반복되다가, 원인을 알 수 없는 채로
+    // 이후 모든 단계가 줄줄이 실패하는 상태가 됨을 실전에서 직접 재현함.
+    const enteredDeepDungeonAtStart = await mod.goToDeepDungeon();
     if (!mod.running) return;
+    if (!enteredDeepDungeonAtStart) {
+      Core.notifyStopped('deepdungeon', '심층던전 화면 진입에 실패해 정지합니다.');
+      return;
+    }
 
     if (mod.config.retryIfWeeklyDamageUnder1M) {
       const startDamage = await mod.readWeeklyCumulativeDamage();

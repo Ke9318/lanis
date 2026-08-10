@@ -139,6 +139,24 @@
     ));
   };
 
+  // ⚠ 버그 수정(2026-08, 실전 확인): "전투 > 던전" 메뉴는 진행 중인 던전이
+  // 있으면 목록 화면이 아니라 그 던전의 진행 화면으로 곧바로 이동시킨다
+  // (목록 화면 특징 텍스트인 "일일 던전"이 아니라 "진행도"가 뜸). 기존
+  // goToDungeonSelect는 "일일 던전" 텍스트만 성공 조건으로 봐서, 진행 중인
+  // 던전이 있는 상태에서 호출하면 15초 내내 기다리다 실패한다. 이어하기
+  // (resume) 경로 전용으로, 목록 화면/진행 화면 둘 다 성공으로 인정한다.
+  Modules.dungeon.goToDungeonScreen = async function (
+    shouldCancel = Core.defaultShouldCancel
+  ) {
+    await Core.clickNavMenuExact('전투', '던전', shouldCancel);
+    return !!(await Core.waitFor(
+      () => Core.bodyText().includes('일일 던전') || Core.bodyText().includes('진행도'),
+      15000,
+      300,
+      shouldCancel
+    ));
+  };
+
   Modules.dungeon.scanEligibleDungeons = function () {
     const queue = [];
     for (const dungeonDef of this.DUNGEONS) {
@@ -1027,6 +1045,20 @@
 
     if (resumeDungeon) {
       Core.log('dungeon', `이미 진행 중이던 "${resumeDungeon.label}"을(를) 인식했습니다 - 이어서 진행합니다.`);
+
+      // ⚠ 버그 수정(2026-08, 실전 확인): 프리셋/속성 확인 과정에서 화면이
+      // "캐릭 > 프리셋", "캐릭 > 내정보"로 이동하는데, 그 이후 던전 화면으로
+      // 복귀하는 코드가 빠져 있었다(심층던전에서 발견해 고친 것과 동일
+      // 패턴). "전투 > 던전" 메뉴는 진행 중인 던전이 있으면 목록이 아니라
+      // 그 던전의 진행 화면으로 곧바로 이동시키는 것을 실전에서 직접
+      // 확인함(진행도 0/15 상태에서 캐릭>프리셋→캐릭>내정보로 화면을 이동시킨
+      // 뒤, "전투>던전"만 다시 눌러 정확히 원래 진행 화면으로 복귀 확인됨).
+      const backOnDungeonScreen = await mod.goToDungeonScreen();
+      if (!backOnDungeonScreen) {
+        Core.notifyStopped('dungeon', '속성/프리셋 확인 후 던전 화면으로 복귀하지 못해 정지합니다.');
+        return;
+      }
+
       await mod.runOneDungeon(resumeDungeon, { resume: true });
       if (!mod.running) {
         Core.log('dungeon', `던전 자동클리어 종료. 오늘 클리어한 던전: ${mod.cycleCount}개`);

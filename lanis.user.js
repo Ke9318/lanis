@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.56-stable
+// @version      1.13.57-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5138,6 +5138,24 @@
     ));
   };
 
+  // ⚠ 버그 수정(2026-08, 실전 확인): "전투 > 던전" 메뉴는 진행 중인 던전이
+  // 있으면 목록 화면이 아니라 그 던전의 진행 화면으로 곧바로 이동시킨다
+  // (목록 화면 특징 텍스트인 "일일 던전"이 아니라 "진행도"가 뜸). 기존
+  // goToDungeonSelect는 "일일 던전" 텍스트만 성공 조건으로 봐서, 진행 중인
+  // 던전이 있는 상태에서 호출하면 15초 내내 기다리다 실패한다. 이어하기
+  // (resume) 경로 전용으로, 목록 화면/진행 화면 둘 다 성공으로 인정한다.
+  Modules.dungeon.goToDungeonScreen = async function (
+    shouldCancel = Core.defaultShouldCancel
+  ) {
+    await Core.clickNavMenuExact('전투', '던전', shouldCancel);
+    return !!(await Core.waitFor(
+      () => Core.bodyText().includes('일일 던전') || Core.bodyText().includes('진행도'),
+      15000,
+      300,
+      shouldCancel
+    ));
+  };
+
   Modules.dungeon.scanEligibleDungeons = function () {
     const queue = [];
     for (const dungeonDef of this.DUNGEONS) {
@@ -6026,6 +6044,20 @@
 
     if (resumeDungeon) {
       Core.log('dungeon', `이미 진행 중이던 "${resumeDungeon.label}"을(를) 인식했습니다 - 이어서 진행합니다.`);
+
+      // ⚠ 버그 수정(2026-08, 실전 확인): 프리셋/속성 확인 과정에서 화면이
+      // "캐릭 > 프리셋", "캐릭 > 내정보"로 이동하는데, 그 이후 던전 화면으로
+      // 복귀하는 코드가 빠져 있었다(심층던전에서 발견해 고친 것과 동일
+      // 패턴). "전투 > 던전" 메뉴는 진행 중인 던전이 있으면 목록이 아니라
+      // 그 던전의 진행 화면으로 곧바로 이동시키는 것을 실전에서 직접
+      // 확인함(진행도 0/15 상태에서 캐릭>프리셋→캐릭>내정보로 화면을 이동시킨
+      // 뒤, "전투>던전"만 다시 눌러 정확히 원래 진행 화면으로 복귀 확인됨).
+      const backOnDungeonScreen = await mod.goToDungeonScreen();
+      if (!backOnDungeonScreen) {
+        Core.notifyStopped('dungeon', '속성/프리셋 확인 후 던전 화면으로 복귀하지 못해 정지합니다.');
+        return;
+      }
+
       await mod.runOneDungeon(resumeDungeon, { resume: true });
       if (!mod.running) {
         Core.log('dungeon', `던전 자동클리어 종료. 오늘 클리어한 던전: ${mod.cycleCount}개`);
@@ -7452,8 +7484,13 @@
     shouldCancel = Core.defaultShouldCancel
   ) {
     await Core.clickNavMenuExact('전투', '심층 던전', shouldCancel);
+    // ⚠ 버그 수정(2026-08, 실전 확인): 예전엔 bodyText().includes('던전 진입')도
+    // 성공 조건에 포함시켰는데, 이게 화면이 실제로 안 바뀐 상태(/status 등)에서도
+    // true를 반환하는 오판정을 실전에서 직접 재현함(다른 화면 조작이나 텍스트
+    // 캐시 우연 일치로 추정). URL 경로만으로 판정하는 게 훨씬 신뢰도 높다 —
+    // SPA 라우팅이 실제로 일어났다는 확실한 증거이기 때문.
     return !!(await Core.waitFor(
-      () => (/deep-dungeon/.test(location.href) || Core.bodyText().includes('던전 진입') ? true : null),
+      () => (location.pathname.startsWith('/deep-dungeon') ? true : null),
       15000,
       300,
       shouldCancel
@@ -7786,8 +7823,16 @@
     // 채운 상태에서 일일을 돌리면 아무 것도 안 하면서 속성돌만 낭비하는
     // 문제가 있었다. 화면 진입/누적 데미지 확인은 프리셋·속성과 무관하게
     // 할 수 있으므로 먼저 확인하고, 할 일이 있을 때만 프리셋/속성을 맞춘다.
-    await mod.goToDeepDungeon();
+    // ⚠ 버그 수정(2026-08, 실전 확인): 이 첫 goToDeepDungeon() 호출이 반환값을
+    // 확인하지 않고 있었다. 실패해도 조용히 다음 단계(주간 누적 데미지 확인)로
+    // 넘어가서 "기록 탭 찾기" 실패 로그만 반복되다가, 원인을 알 수 없는 채로
+    // 이후 모든 단계가 줄줄이 실패하는 상태가 됨을 실전에서 직접 재현함.
+    const enteredDeepDungeonAtStart = await mod.goToDeepDungeon();
     if (!mod.running) return;
+    if (!enteredDeepDungeonAtStart) {
+      Core.notifyStopped('deepdungeon', '심층던전 화면 진입에 실패해 정지합니다.');
+      return;
+    }
 
     if (mod.config.retryIfWeeklyDamageUnder1M) {
       const startDamage = await mod.readWeeklyCumulativeDamage();
@@ -11206,11 +11251,23 @@
     if (unreadable.length) {
       throw new Error(`주간 보상 횟수를 읽지 못한 보스: ${unreadable.map((item) => item.label).join(', ')}`);
     }
-    const remaining = progressBefore.filter((item) => !item.progress.exhausted).map((item) => item.key);
+    // ⚠ 버그 수정(2026-08, 사용자 확인): 큐에 넣을 보스를 고를 때 주간 보상
+    // 소진 여부(exhausted)만 확인하고 "오늘 이미 처치했는지"는 전혀 확인하지
+    // 않고 있었다. isBossAlreadyCleared 함수는 이미 존재했지만 어디서도
+    // 호출되지 않는 죽은 코드였다. 사용자 확인: 보스 도전이 성립하려면
+    // "오늘 아직 안 잡았음" AND "주간 보상이 남아있음" 둘 다 만족해야
+    // 한다(보상 퍼센트 단계는 여러 번 처치해야 채워지는 게 아니라, 체력을
+    // 얼마나 깎았는지에 따른 단일 보상표일 뿐 — 처치=0%면 모든 단계 보상을
+    // 한 번에 받음). 이 누락 때문에 "일일"이 이미 오늘 완전히 처치·보상
+    // 수령까지 끝난 보스 3마리를 그대로 다시 큐에 넣어 불필요하게
+    // 재처치(전투 스크롤 등 자원 소모)시키는 걸 실전에서 직접 확인함.
+    const remaining = progressBefore
+      .filter((item) => !item.progress.exhausted && !M.isBossAlreadyCleared(item.label))
+      .map((item) => item.key);
 
     if (remaining.length === 0) {
       M.assertBossRunAuthorized(auth.id);
-      if (M.uiLog) M.uiLog('선택한 보스의 주간 보상 소진 확인 → 수호자 도전 후 포기');
+      if (M.uiLog) M.uiLog('선택한 보스 전부 처리 완료(오늘 이미 처치했거나 주간 보상 소진) → 수호자 도전 후 포기');
       await M.enterBossBattle(BOSS_REGISTRY.fallenGuardian.label);
       const entered = await M.waitFor(() => M.isInBattleScreen(BOSS_REGISTRY.fallenGuardian.label), 10000, 250);
       if (!entered) throw new Error('일일 과제용 수호자 전투 진입을 확인하지 못했습니다.');
