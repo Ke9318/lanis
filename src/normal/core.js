@@ -1836,3 +1836,19 @@
     }
   };
 
+  // ⚠ 사용자 요청(2026-08): 심층던전/아레나 주간 보상은 "일주일에 한 번만"
+  // 확인하면 된다. 서버 초기화 기준(매주 월요일 00:00 KST)에 맞춰, 현재가
+  // 속한 주의 "월요일 날짜(YYYY-MM-DD, KST 기준)"를 문자열로 반환한다.
+  // 이 문자열이 바뀌는 시점(=다음 월요일 KST 00:00)마다 새로 확인하면 된다.
+  Core.getKstMondayWeekId = function () {
+    const kst = new Date(Date.now() + 9 * 60 * 60 * 1000); // UTC -> KST 보정
+    const day = kst.getUTCDay(); // 0=일, 1=월, ... 6=토
+    const diffToMonday = day === 0 ? -6 : 1 - day;
+    const monday = new Date(kst);
+    monday.setUTCDate(kst.getUTCDate() + diffToMonday);
+    const y = monday.getUTCFullYear();
+    const m = String(monday.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(monday.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+

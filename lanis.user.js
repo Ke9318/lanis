@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.55-stable
+// @version      1.13.56-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -1849,6 +1849,22 @@
     }
   };
 
+  // ⚠ 사용자 요청(2026-08): 심층던전/아레나 주간 보상은 "일주일에 한 번만"
+  // 확인하면 된다. 서버 초기화 기준(매주 월요일 00:00 KST)에 맞춰, 현재가
+  // 속한 주의 "월요일 날짜(YYYY-MM-DD, KST 기준)"를 문자열로 반환한다.
+  // 이 문자열이 바뀌는 시점(=다음 월요일 KST 00:00)마다 새로 확인하면 된다.
+  Core.getKstMondayWeekId = function () {
+    const kst = new Date(Date.now() + 9 * 60 * 60 * 1000); // UTC -> KST 보정
+    const day = kst.getUTCDay(); // 0=일, 1=월, ... 6=토
+    const diffToMonday = day === 0 ? -6 : 1 - day;
+    const monday = new Date(kst);
+    monday.setUTCDate(kst.getUTCDate() + diffToMonday);
+    const y = monday.getUTCFullYear();
+    const m = String(monday.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(monday.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
 
   // ==========================================================================
   // 모듈 정의: 재전직 / 자동사냥 / 레어맵 / 던전 / 심층던전
@@ -1889,7 +1905,14 @@
   // 정지/탭 종료 시 사라진다.
   const DAILY_AUTH_KEY = 'lrm-daily-explicit-run-auth';
   const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'boss', 'autohunt', 'deepdungeon'];
+  // ⚠ 사용자 요청(2026-08): 심층던전/아레나 주간 보상은 그 매크로를 돌리지
+  // 않아도 "일일" 실행 시 최우선으로 받아야 하고, 일주일에 한 번만 확인하면
+  // 된다. Core.getKstMondayWeekId()가 반환하는 값(매주 월요일 00:00 KST마다
+  // 바뀜)을 여기에 저장해, 이미 확인한 주라면 API 호출조차 다시 하지 않는다.
+  const DD_REWARD_WEEK_KEY = 'lrm-deepdungeon-reward-week-done';
+  const ARENA_REWARD_WEEK_KEY = 'lrm-arena-reward-week-done';
   const DAILY_STEP_LABELS = {
+    weeklyRewards: '주간 보상(심층던전+아레나)',
     attendance: '출석체크',
     dungeon: '던전',
     arena: '아레나',
@@ -2121,7 +2144,47 @@
     if (result && result.ok === false) throw new Error(result.message);
   };
 
+  // ⚠ 사용자 요청(2026-08): 심층던전(보상 3종)/아레나(지난 주 순위 보상)를
+  // 각 매크로가 실제로 돌아가는지와 완전히 무관하게, "일일" 실행 시 이번
+  // 주에 한 번만 확인해서 받는다. 아레나는 토·일에만 진입 가능한데 보상은
+  // 월~금에만 받을 수 있어, 아레나 매크로 자체에 묶으면 영영 못 받는 모순이
+  // 생긴다는 걸 사용자가 명확히 지적함 — 그래서 여기 daily 레벨에서 독립
+  // 처리한다.
+  Modules.daily.claimWeeklyRewardsIfDue = async function () {
+    const weekId = Core.getKstMondayWeekId();
+    const results = [];
+
+    if (localStorage.getItem(DD_REWARD_WEEK_KEY) === weekId) {
+      results.push('심층던전: 이번 주 이미 확인함');
+    } else {
+      const ok = await Modules.deepdungeon.claimWeeklyWorldBossRewards();
+      if (ok) {
+        localStorage.setItem(DD_REWARD_WEEK_KEY, weekId);
+        results.push('심층던전: 확인 완료');
+      } else {
+        results.push('심층던전: 확인 실패(다음 실행 시 재시도)');
+      }
+    }
+
+    if (localStorage.getItem(ARENA_REWARD_WEEK_KEY) === weekId) {
+      results.push('아레나: 이번 주 이미 확인함');
+    } else {
+      const ok = await Modules.arena.claimLastWeekRewardIfAny();
+      if (ok) {
+        localStorage.setItem(ARENA_REWARD_WEEK_KEY, weekId);
+        results.push('아레나: 확인 완료');
+      } else {
+        results.push('아레나: 확인 실패(다음 실행 시 재시도)');
+      }
+    }
+
+    return results.join(' / ');
+  };
+
   Modules.daily.runStep = async function (step) {
+    if (step === 'weeklyRewards') {
+      return await this.claimWeeklyRewardsIfDue();
+    }
     if (step === 'attendance') {
       return await this.runAttendance();
     }
@@ -2257,8 +2320,11 @@
     }
     // ⚠ 사용자 요청(2026-08): 심층던전(주 1회)과 아레나(주말 한정)는 자주
     // 열리지 않으므로 우선순위를 뒤로 미룬다. 던전 → 보스 → 사냥 → 심층던전
-    // → 아레나 순서로 실행한다.
+    // → 아레나 순서로 실행한다. 주간 보상(weeklyRewards)은 체크박스 설정과
+    // 무관하게 항상 맨 먼저 실행한다(해당 매크로를 안 돌려도 반드시 받아야
+    // 하는 보상이기 때문).
     const steps = [
+      'weeklyRewards',
       'attendance',
       ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena']
         .filter((key) => mod.config[key]),
@@ -2515,11 +2581,14 @@
   };
 
   // ⚠ 사용자 요청(2026-08): 지난 주 아레나 순위 보상(전체 순위+직업군 순위)을
-  // 주 1회 자동으로 받는다. 실전 확인: GET /api/arena/last-week의
-  // {participated, rewardReceived}로 정확히 판별 가능(수령 후 rewardReceived
-  // 가 true로 바뀌는 것까지 확인함). 이 보상은 요일 제약이 없으므로(주말
-  // 한정 전투와 무관), mainLoop의 "주말에만 실행" 체크보다 먼저 처리해서
-  // 평일에 모듈이 실행되더라도 보상 수령 기회를 놓치지 않게 한다.
+  // 받는다. 실전 확인: GET /api/arena/last-week의 {participated,
+  // rewardReceived}로 정확히 판별 가능(수령 후 rewardReceived가 true로
+  // 바뀌는 것까지 확인함). ⚠ 아레나는 토·일에만 진입 가능한데 이 보상은
+  // 월~금에만 받을 수 있어, 아레나 매크로 자체에 묶으면 영영 못 받는
+  // 모순이 생긴다. 그래서 이 함수는 아레나 mainLoop가 아니라 "일일" 단계에서
+  // 최우선으로, 아레나 매크로 실행 여부와 무관하게 별도로 호출한다
+  // (Modules.daily.claimWeeklyRewardsIfDue 참고). 성공적으로 확인(수령했거나
+  // 받을 게 없었거나)했으면 true, API 실패 등으로 재시도가 필요하면 false.
   Modules.arena.claimLastWeekRewardIfAny = async function () {
     let data;
     try {
@@ -2531,45 +2600,47 @@
       if (!res.ok) throw new Error(`API 호출 실패 (HTTP ${res.status})`);
       data = await res.json();
     } catch (e) {
-      Core.log('arena', `⚠ 아레나 지난 주 보상 확인 실패(계속 진행): ${e.message}`);
-      return;
+      Core.log('arena', `⚠ 아레나 지난 주 보상 확인 실패: ${e.message}`);
+      return false;
     }
     if (!data.participated || data.rewardReceived) {
       Core.log('arena', '아레나 지난 주 보상: 받을 것 없음(참여 안 했거나 이미 수령함)');
-      return;
+      return true;
     }
     Core.log('arena', `아레나 지난 주 보상 수령 시도 (전체 ${data.finalRank}위, 직업군 ${data.baseClassRank}위)`);
 
-    await this.goToArena();
-    const rewardTab = await Core.retryStep('아레나 "보상" 탭 찾기', () => Core.findButtonByText('보상'));
-    if (!rewardTab) {
-      Core.log('arena', '⚠ "보상" 탭을 찾지 못해 지난 주 보상 수령을 건너뜁니다.');
-      return;
+    try {
+      await this.goToArena();
+      const rewardTab = await Core.retryStep('아레나 "보상" 탭 찾기', () => Core.findButtonByText('보상'));
+      if (!rewardTab) {
+        Core.log('arena', '⚠ "보상" 탭을 찾지 못해 지난 주 보상 수령을 건너뜁니다.');
+        return false;
+      }
+      if (!(await Core.safeClick(() => Core.findButtonByText('보상'), { beforeMin: 500, beforeMax: 900, afterMin: 700, afterMax: 1200 }))) {
+        Core.log('arena', '⚠ "보상" 탭 클릭에 실패해 지난 주 보상 수령을 건너뜁니다.');
+        return false;
+      }
+      const claimBtn = await Core.waitFor(() => Core.findButtonByText('보상 받기'), 8000, 250);
+      if (!claimBtn) {
+        Core.log('arena', '⚠ "보상 받기" 버튼을 찾지 못했습니다.');
+        return false;
+      }
+      if (!(await Core.safeClick(() => Core.findButtonByText('보상 받기'), { beforeMin: 600, beforeMax: 1100, afterMin: 1000, afterMax: 1500 }))) {
+        Core.log('arena', '⚠ "보상 받기" 클릭에 실패했습니다.');
+        return false;
+      }
+      Core.log('arena', '아레나 지난 주 보상 수령 완료');
+      return true;
+    } catch (e) {
+      Core.log('arena', `⚠ 아레나 지난 주 보상 수령 중 오류: ${e.message}`);
+      return false;
     }
-    if (!(await Core.safeClick(() => Core.findButtonByText('보상'), { beforeMin: 500, beforeMax: 900, afterMin: 700, afterMax: 1200 }))) {
-      Core.log('arena', '⚠ "보상" 탭 클릭에 실패해 지난 주 보상 수령을 건너뜁니다.');
-      return;
-    }
-    const claimBtn = await Core.waitFor(() => Core.findButtonByText('보상 받기'), 8000, 250);
-    if (!claimBtn) {
-      Core.log('arena', '⚠ "보상 받기" 버튼을 찾지 못했습니다.');
-      return;
-    }
-    if (!(await Core.safeClick(() => Core.findButtonByText('보상 받기'), { beforeMin: 600, beforeMax: 1100, afterMin: 1000, afterMax: 1500 }))) {
-      Core.log('arena', '⚠ "보상 받기" 클릭에 실패했습니다.');
-      return;
-    }
-    Core.log('arena', '아레나 지난 주 보상 수령 완료');
   };
 
   Modules.arena.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
     mod.loadConfig();
-
-    // 지난 주 보상은 요일 제약이 없으므로, "주말에만 전투" 체크보다 먼저 처리한다.
-    await mod.claimLastWeekRewardIfAny();
-    if (!mod.running) return;
 
     if (!mod.isWeekend()) {
       mod.clearResume();
@@ -7637,13 +7708,14 @@
   };
 
   // ⚠ 사용자 요청(2026-08): 심층던전 "던전의 주인" 주간 보상 3종(공유 HP
-  // 차감/직업별 랭킹/개인 누적 데미지)을 자동으로 확인해서, 아직 안 받은
-  // 것만 받는다. 실전 확인: GET /api/deep-dungeon/world-boss/rewards의
+  // 차감/직업별 랭킹/개인 누적 데미지)을 확인해서, 아직 안 받은 것만 받는다.
+  // 실전 확인: GET /api/deep-dungeon/world-boss/rewards의
   // {hpContribution,classRanking,personalCumulative}.{eligible,claimed}로
-  // 정확히 판별 가능. 매주 월요일 초기화, 월~금요일에만 수령 가능(화면 안내
-  // 문구 기준) — 요일 자체는 매크로가 미리 계산하지 않고, API가 알려주는
-  // eligible/claimed만 신뢰한다(주말이면 자연스럽게 시도가 실패하거나
-  // 버튼을 못 찾아 건너뛴다).
+  // 정확히 판별 가능. ⚠ 심층던전 매크로(사냥/도전) 자체를 돌리지 않아도 이
+  // 보상은 받아야 하므로, mainLoop에 묶지 않고 "일일" 단계에서 최우선으로,
+  // 심층던전 매크로 실행 여부와 무관하게 별도로 호출한다(화면 진입까지
+  // 이 함수가 직접 처리). 성공적으로 확인(수령했거나 받을 게 없었거나)
+  // 했으면 true, API 실패 등으로 재시도가 필요하면 false.
   Modules.deepdungeon.claimWeeklyWorldBossRewards = async function () {
     let data;
     try {
@@ -7655,8 +7727,8 @@
       if (!res.ok) throw new Error(`API 호출 실패 (HTTP ${res.status})`);
       data = await res.json();
     } catch (e) {
-      Core.log('deepdungeon', `⚠ 던전의 주인 주간 보상 확인 실패(계속 진행): ${e.message}`);
-      return;
+      Core.log('deepdungeon', `⚠ 던전의 주인 주간 보상 확인 실패: ${e.message}`);
+      return false;
     }
 
     const items = [
@@ -7667,28 +7739,35 @@
     const pending = items.filter(({ key }) => data[key] && data[key].eligible && !data[key].claimed);
     if (pending.length === 0) {
       Core.log('deepdungeon', '던전의 주인 주간 보상: 받을 것 없음(이미 수령했거나 자격 없음)');
-      return;
+      return true;
     }
     Core.log('deepdungeon', `던전의 주인 주간 보상 ${pending.length}개 수령 시도: ${pending.map((p) => p.label).join(', ')}`);
 
-    const rewardTab = await Core.retryStep('심층던전 "보상" 탭 찾기', () => this.findTopNavigationTab('보상'));
-    if (!rewardTab) {
-      Core.log('deepdungeon', '⚠ "보상" 탭을 찾지 못해 주간 보상 수령을 건너뜁니다.');
-      return;
-    }
-    if (!(await Core.safeClick(() => this.findTopNavigationTab('보상'), { beforeMin: 500, beforeMax: 900, afterMin: 800, afterMax: 1300 }))) {
-      Core.log('deepdungeon', '⚠ "보상" 탭 클릭에 실패해 주간 보상 수령을 건너뜁니다.');
-      return;
-    }
+    try {
+      await this.goToDeepDungeon();
+      const rewardTab = await Core.retryStep('심층던전 "보상" 탭 찾기', () => this.findTopNavigationTab('보상'));
+      if (!rewardTab) {
+        Core.log('deepdungeon', '⚠ "보상" 탭을 찾지 못해 주간 보상 수령을 건너뜁니다.');
+        return false;
+      }
+      if (!(await Core.safeClick(() => this.findTopNavigationTab('보상'), { beforeMin: 500, beforeMax: 900, afterMin: 800, afterMax: 1300 }))) {
+        Core.log('deepdungeon', '⚠ "보상" 탭 클릭에 실패해 주간 보상 수령을 건너뜁니다.');
+        return false;
+      }
 
-    let claimed = 0;
-    for (let i = 0; i < 5; i++) {
-      const btn = Core.findButtonByText('보상 수령');
-      if (!btn) break;
-      if (!(await Core.safeClick(() => Core.findButtonByText('보상 수령'), { beforeMin: 600, beforeMax: 1100, afterMin: 900, afterMax: 1400 }))) break;
-      claimed++;
+      let claimed = 0;
+      for (let i = 0; i < 5; i++) {
+        const btn = Core.findButtonByText('보상 수령');
+        if (!btn) break;
+        if (!(await Core.safeClick(() => Core.findButtonByText('보상 수령'), { beforeMin: 600, beforeMax: 1100, afterMin: 900, afterMax: 1400 }))) break;
+        claimed++;
+      }
+      Core.log('deepdungeon', `던전의 주인 주간 보상 ${claimed}개 수령 완료`);
+      return claimed >= pending.length;
+    } catch (e) {
+      Core.log('deepdungeon', `⚠ 던전의 주인 주간 보상 수령 중 오류: ${e.message}`);
+      return false;
     }
-    Core.log('deepdungeon', `던전의 주인 주간 보상 ${claimed}개 수령 완료`);
   };
 
   Modules.deepdungeon.mainLoop = async function () {
@@ -7708,10 +7787,6 @@
     // 문제가 있었다. 화면 진입/누적 데미지 확인은 프리셋·속성과 무관하게
     // 할 수 있으므로 먼저 확인하고, 할 일이 있을 때만 프리셋/속성을 맞춘다.
     await mod.goToDeepDungeon();
-    if (!mod.running) return;
-
-    // 던전의 주인 주간 보상도 프리셋/속성과 무관하게(화면 진입 직후) 처리한다.
-    await mod.claimWeeklyWorldBossRewards();
     if (!mod.running) return;
 
     if (mod.config.retryIfWeeklyDamageUnder1M) {

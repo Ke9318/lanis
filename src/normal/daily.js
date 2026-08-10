@@ -19,7 +19,14 @@
   // 정지/탭 종료 시 사라진다.
   const DAILY_AUTH_KEY = 'lrm-daily-explicit-run-auth';
   const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'boss', 'autohunt', 'deepdungeon'];
+  // ⚠ 사용자 요청(2026-08): 심층던전/아레나 주간 보상은 그 매크로를 돌리지
+  // 않아도 "일일" 실행 시 최우선으로 받아야 하고, 일주일에 한 번만 확인하면
+  // 된다. Core.getKstMondayWeekId()가 반환하는 값(매주 월요일 00:00 KST마다
+  // 바뀜)을 여기에 저장해, 이미 확인한 주라면 API 호출조차 다시 하지 않는다.
+  const DD_REWARD_WEEK_KEY = 'lrm-deepdungeon-reward-week-done';
+  const ARENA_REWARD_WEEK_KEY = 'lrm-arena-reward-week-done';
   const DAILY_STEP_LABELS = {
+    weeklyRewards: '주간 보상(심층던전+아레나)',
     attendance: '출석체크',
     dungeon: '던전',
     arena: '아레나',
@@ -251,7 +258,47 @@
     if (result && result.ok === false) throw new Error(result.message);
   };
 
+  // ⚠ 사용자 요청(2026-08): 심층던전(보상 3종)/아레나(지난 주 순위 보상)를
+  // 각 매크로가 실제로 돌아가는지와 완전히 무관하게, "일일" 실행 시 이번
+  // 주에 한 번만 확인해서 받는다. 아레나는 토·일에만 진입 가능한데 보상은
+  // 월~금에만 받을 수 있어, 아레나 매크로 자체에 묶으면 영영 못 받는 모순이
+  // 생긴다는 걸 사용자가 명확히 지적함 — 그래서 여기 daily 레벨에서 독립
+  // 처리한다.
+  Modules.daily.claimWeeklyRewardsIfDue = async function () {
+    const weekId = Core.getKstMondayWeekId();
+    const results = [];
+
+    if (localStorage.getItem(DD_REWARD_WEEK_KEY) === weekId) {
+      results.push('심층던전: 이번 주 이미 확인함');
+    } else {
+      const ok = await Modules.deepdungeon.claimWeeklyWorldBossRewards();
+      if (ok) {
+        localStorage.setItem(DD_REWARD_WEEK_KEY, weekId);
+        results.push('심층던전: 확인 완료');
+      } else {
+        results.push('심층던전: 확인 실패(다음 실행 시 재시도)');
+      }
+    }
+
+    if (localStorage.getItem(ARENA_REWARD_WEEK_KEY) === weekId) {
+      results.push('아레나: 이번 주 이미 확인함');
+    } else {
+      const ok = await Modules.arena.claimLastWeekRewardIfAny();
+      if (ok) {
+        localStorage.setItem(ARENA_REWARD_WEEK_KEY, weekId);
+        results.push('아레나: 확인 완료');
+      } else {
+        results.push('아레나: 확인 실패(다음 실행 시 재시도)');
+      }
+    }
+
+    return results.join(' / ');
+  };
+
   Modules.daily.runStep = async function (step) {
+    if (step === 'weeklyRewards') {
+      return await this.claimWeeklyRewardsIfDue();
+    }
     if (step === 'attendance') {
       return await this.runAttendance();
     }
@@ -387,8 +434,11 @@
     }
     // ⚠ 사용자 요청(2026-08): 심층던전(주 1회)과 아레나(주말 한정)는 자주
     // 열리지 않으므로 우선순위를 뒤로 미룬다. 던전 → 보스 → 사냥 → 심층던전
-    // → 아레나 순서로 실행한다.
+    // → 아레나 순서로 실행한다. 주간 보상(weeklyRewards)은 체크박스 설정과
+    // 무관하게 항상 맨 먼저 실행한다(해당 매크로를 안 돌려도 반드시 받아야
+    // 하는 보상이기 때문).
     const steps = [
+      'weeklyRewards',
       'attendance',
       ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena']
         .filter((key) => mod.config[key]),
