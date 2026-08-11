@@ -2712,14 +2712,19 @@
     if (remaining.length === 0) {
       M.assertBossRunAuthorized(auth.id);
 
+      // ⚠ 버그 수정(2026-08, 사용자 확인): 사용자가 체크박스에서 정화자를
+      // 선택 안 했는데도 필러 대체가 실행됐다 - 요일/직업/오늘미처치 조건만
+      // 확인하고 "사용자가 실제로 정화자를 선택했는지"를 빠뜨렸었다.
+      // 사용자가 명시적으로 체크 해제했다면 그 선택을 존중해야 한다.
       // ⚠ 사용자 요청(2026-08): "필러"(수호자 들어갔다 나오기)로 일일 도전
       // 과제만 채우던 걸, 조건이 맞으면 실제 정화자 전투로 대체한다 - 이러면
       // 일일 도전과제도 채워지고 실제 보스 처치·보상도 같이 얻는다. 조건:
-      // (1) 오늘 요일에 구현된 공략 패턴이 있음(월/화/일만 - 목/토 방깎
-      // 패턴은 아직 미구현이라 여기 넣지 않음, 나중에 추가되면 이 배열만
-      // 늘리면 됨), (2) 현재 선택된 직업에 정화자 로직이 등록돼 있음(현재
-      // 검술만), (3) 오늘 정화자를 아직 안 잡았음. 셋 다 맞으면 필러 대신
-      // 실전 투입한다.
+      // (0) 사용자가 체크박스에서 정화자를 선택해뒀음, (1) 오늘 요일에 구현된
+      // 공략 패턴이 있음(월/화/일만 - 목/토 방깎 패턴은 아직 미구현이라 여기
+      // 넣지 않음, 나중에 추가되면 이 배열만 늘리면 됨), (2) 현재 선택된
+      // 직업에 정화자 로직이 등록돼 있음(현재 검술만), (3) 오늘 정화자를
+      // 아직 안 잡았음. 넷 다 맞으면 필러 대신 실전 투입한다.
+      const purifierUserSelected = loadSelectedBosses().includes('corruptedPurifier');
       const IMPLEMENTED_PURIFIER_DAYS = [0, 1, 2]; // KST getUTCDay 기준: 일=0, 월=1, 화=2
       const todayKstDay = M.getKstDayOfWeek();
       let purifierRunName = null;
@@ -2729,7 +2734,12 @@
         purifierRunName = null;
       }
       const purifierAlreadyClearedToday = M.isBossAlreadyCleared(BOSS_REGISTRY.corruptedPurifier.label);
-      if (IMPLEMENTED_PURIFIER_DAYS.includes(todayKstDay) && purifierRunName && !purifierAlreadyClearedToday) {
+      if (
+        purifierUserSelected &&
+        IMPLEMENTED_PURIFIER_DAYS.includes(todayKstDay) &&
+        purifierRunName &&
+        !purifierAlreadyClearedToday
+      ) {
         if (M.uiLog) {
           M.uiLog('선택한 보스 전부 처리 완료 → 필러 대신 타락한 정화자 실전 투입(일일 과제+보상 동시 처리)');
         }
