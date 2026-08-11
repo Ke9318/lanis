@@ -8,7 +8,7 @@
     const requiredElement =
       mod.config && mod.config.originalElement;
     if (
-      (moduleId === 'autohunt' || moduleId === 'dungeon' || moduleId === 'deepdungeon') &&
+      (moduleId === 'autohunt' || moduleId === 'dungeon' || moduleId === 'deepdungeon' || moduleId === 'guildboss') &&
       !Core.ELEMENT_OPTIONS.includes(requiredElement)
     ) {
       Core.showBanner(moduleId, '시작 전에 원래 속성을 선택해주세요.');
@@ -157,11 +157,12 @@
     dungeon: {},
     arena: {},
     deepdungeon: {},
+    guildboss: {},
   };
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
-    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'deepdungeon'].forEach((id) => {
+    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'deepdungeon', 'guildboss'].forEach((id) => {
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
@@ -293,6 +294,7 @@
     buildDungeonTab(tabContents.dungeon);
     buildArenaTab(tabContents.arena);
     buildDeepDungeonTab(tabContents.deepdungeon);
+    buildGuildBossTab(tabContents.guildboss);
     buildBossTab(tabContents.boss);
     buildDailyTab(tabContents.daily);
     panel.appendChild(contentWrap);

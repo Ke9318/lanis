@@ -50,6 +50,8 @@ OUT="lanis.user.js"
   echo ""
   cat src/normal/deepdungeon.js
   echo ""
+  cat src/normal/guildboss.js
+  echo ""
   cat src/normal/shell-runtime.js
   echo "})();"
   echo ""

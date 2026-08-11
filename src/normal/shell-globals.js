@@ -9,6 +9,7 @@
     dungeon: '던전',
     arena: '아레나',
     deepdungeon: '심층던전',
+    guildboss: '길드보스',
     boss: '보스',
   };
   const moduleDisplayLabel = (moduleId) => MODULE_LABELS[moduleId] || moduleId;
