@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.66-stable
+// @version      1.13.67-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2527,7 +2527,18 @@
     }
     if (step === 'dungeon') {
       await this.runCoreModule('dungeon');
-      return await this.verifyDungeon();
+      const dungeonResult = await this.verifyDungeon();
+      // ⚠ 버그 수정(2026-08): 주석엔 "보스(그리고 던전)를 잡고 나면 보상
+      // 상자를 사용한다"고 적혀 있었는데, 실제로는 boss 단계에만 연결돼
+      // 있고 dungeon 단계엔 호출 자체가 빠져 있었다(사용자가 "안 쓰는 것
+      // 같다"고 지적해서 발견함). 보스와 동일하게, 실패해도 일일 시퀀스를
+      // 멈추지 않고 로그만 남긴다.
+      try {
+        await Core.useAllRewardBoxes('dungeon');
+      } catch (e) {
+        Core.log('dungeon', `⚠ 보상 상자 자동 사용 실패(던전 완료 자체는 완료됨): ${e.message}`);
+      }
+      return dungeonResult;
     }
     if (step === 'arena') {
       await this.runCoreModule('arena');
