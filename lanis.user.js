@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.67-stable
+// @version      1.13.68-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5026,12 +5026,20 @@
     return titleEl.closest('[role="dialog"]');
   };
 
+  // ⚠ 사용자 요청(2026-08): "숨겨진 방의 지도"는 재전직 때 따로 써야 하는
+  // 아이템이라, 레어맵 매크로가 아무 지도나 목록 맨 위 걸 골라 써버리면
+  // 안 된다(사용자가 그동안 창고에 매번 넣어서 보호해야 했던 이유). 이름이
+  // 이 목록에 있으면 사용 후보에서 건너뛴다. 나중에 다른 지도도 보호하고
+  // 싶으면 이 배열에 이름만 추가하면 된다.
+  Modules.raremap.EXCLUDED_MAP_ITEM_NAMES = ['숨겨진 방의 지도'];
+
   Modules.raremap.getTopRadio = function (dialog) {
     const inputs = [...dialog.querySelectorAll('input[type="radio"]')];
     for (const input of inputs) {
       const radio = input.closest('.MuiRadio-root') || input.parentElement;
       const row = radio ? radio.parentElement : null;
       const text = row ? row.textContent : '';
+      if (Modules.raremap.EXCLUDED_MAP_ITEM_NAMES.some((name) => text.includes(name))) continue;
       if (
         radio &&
         !input.disabled &&
