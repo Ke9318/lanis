@@ -144,14 +144,38 @@
     return { cur: parseInt(m[1].replace(/,/g, ''), 10), max: parseInt(m[2].replace(/,/g, ''), 10) };
   };
 
+  // ⚠ 실전 확인: 목록 화면에서 이미 처치된 머리는 "처치됨" 텍스트가 붙는다.
+  // HP 텍스트가 정확히 "0/N"으로 안 바뀌는 경우까지 대비해 두 신호를 함께 본다.
+  Modules.guildboss.isTargetHeadDefeated = function () {
+    const headHp = Modules.guildboss.getTargetHeadHp();
+    if (headHp && headHp.cur <= 0) return true;
+    const text = Core.bodyText();
+    const idx = text.indexOf('공격 대상');
+    if (idx !== -1 && text.slice(idx, idx + 60).includes('처치됨')) return true;
+    return false;
+  };
+
   Modules.guildboss.runAttackLoop = async function () {
     const mod = this;
     for (let i = 0; i < mod.MAX_ATTACKS; i++) {
       if (!mod.running || mod.stopRequested) return { stopped: true };
 
+      // ⚠ 사용자 요청(2026-08): 쿨타임 대기 중 다른 길드원이 먼저 대상
+      // 머리를 처치할 수 있다. 이 경우 공격을 계속 시도하지 말고, 공격
+      // 시도 직전에 매번 대상 상태를 확인해서 이미 죽어 있으면 즉시
+      // 정지+알람으로 끝낸다(공격 버튼을 아예 누르지 않음).
+      if (mod.isTargetHeadDefeated()) {
+        return { stopped: true, headDefeated: true, defeatedByOthers: true };
+      }
+
       const ready = await Core.waitFor(() => mod.getReadyAttackButton(), 40000, 500);
       if (!ready) throw new Error('공격 버튼이 활성화되지 않았습니다 (쿨타임 대기 실패).');
       if (!mod.running || mod.stopRequested) return { stopped: true };
+
+      // 쿨타임 대기 도중에도 처치될 수 있으므로 클릭 직전 한 번 더 확인한다.
+      if (mod.isTargetHeadDefeated()) {
+        return { stopped: true, headDefeated: true, defeatedByOthers: true };
+      }
 
       if (!(await Core.safeClick(() => mod.getReadyAttackButton(), { beforeMin: 400, beforeMax: 800, afterMin: 1200, afterMax: 1800 }))) {
         throw new Error('공격 버튼 클릭에 실패했습니다.');
@@ -163,9 +187,14 @@
         `공격 ${i + 1}회 완료 (공격 횟수: ${countInfo ? `${countInfo.current}/${countInfo.max}` : '확인 불가'})`
       );
 
-      const headHp = mod.getTargetHeadHp();
-      if (headHp && headHp.cur <= 0) {
+      if (mod.isTargetHeadDefeated()) {
         return { stopped: true, headDefeated: true };
+      }
+
+      // 실전 확인된 완료 문구: 버튼이 "최대 공격 횟수 도달 (8회)"로 바뀜
+      if (Core.bodyText().includes('최대 공격 횟수 도달')) {
+        Core.log('guildboss', '최대 공격 횟수에 도달했습니다.');
+        break;
       }
 
       if (countInfo && countInfo.current >= countInfo.max) {
@@ -197,7 +226,10 @@
 
       const loopResult = await mod.runAttackLoop();
       if (loopResult.headDefeated) {
-        Core.notifyStopped('guildboss', `"${mod.config.targetHead}" 처치 완료 - 정지합니다.`);
+        const msg = loopResult.defeatedByOthers
+          ? `"${mod.config.targetHead}"이(가) 다른 길드원에 의해 먼저 처치되어 더 공격할 수 없습니다 - 정지합니다.`
+          : `"${mod.config.targetHead}" 처치 완료 - 정지합니다.`;
+        Core.notifyStopped('guildboss', msg);
         return;
       }
       if (!loopResult.stopped) {
