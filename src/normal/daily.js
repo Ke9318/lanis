@@ -377,6 +377,54 @@
     return true;
   };
 
+  // ⚠ 사용자 요청(2026-08): 일간 퀘스트 "대장간 이용"(대장간 수리 1회)을
+  // 위해 마을 > 대장간 화면에서 활성화된 "수리" 버튼을 하나 누른다.
+  // Core.repairAllEquipment는 내구도가 심각하게 낮을 때만 호출되는 함수라,
+  // "그냥 아무거나 한 번 수리하면 되는" 이 퀘스트의 낮은 기준과 맞지 않아
+  // 자연스러운 부산물로 채워지지 않았다(실전 확인: 자동사냥을 오래 돌려도
+  // 내구도가 그 정도로까지 안 떨어지면 이 퀘스트만 항상 미완료로 남음).
+  Modules.daily.completeRepairQuestIfNeeded = async function () {
+    await Core.clickNavMenuExact('캐릭', '퀘스트');
+    const onQuestPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300);
+    if (!onQuestPage) {
+      Core.log('daily', '⚠ 퀘스트 화면 진입을 확인하지 못해 대장간 수리 퀘스트를 건너뜁니다.');
+      return false;
+    }
+    await Core.humanDelay(500, 900);
+
+    const match = Core.bodyText().match(/대장간\s*이용\s*(\d+)\s*\/\s*(\d+)/);
+    if (!match) {
+      Core.log('daily', '⚠ "대장간 이용" 퀘스트 항목을 찾지 못했습니다.');
+      return false;
+    }
+    if (parseInt(match[1], 10) >= parseInt(match[2], 10)) {
+      Core.log('daily', '"대장간 이용" 퀘스트 이미 완료됨 - 생략');
+      return true;
+    }
+
+    await Core.clickNavMenuExact('마을', '대장간');
+    const onBlacksmithPage = await Core.waitFor(() => location.pathname.startsWith('/blacksmith'), 15000, 300);
+    if (!onBlacksmithPage) {
+      Core.log('daily', '⚠ 대장간 화면 진입을 확인하지 못했습니다.');
+      return false;
+    }
+    await Core.humanDelay(500, 900);
+
+    const repairBtn = Core.gameElements('button').find(
+      (b) => Core.isElementVisible(b) && /수리/.test(b.textContent) && !b.disabled
+    );
+    if (!repairBtn) {
+      Core.log('daily', '수리 가능한 장비가 없습니다(전부 내구도 최대) - 대장간 이용 퀘스트를 이번엔 채우지 못함');
+      return true;
+    }
+    if (!(await Core.safeClick(() => repairBtn, { beforeMin: 500, beforeMax: 900, afterMin: 700, afterMax: 1100 }))) {
+      Core.log('daily', '⚠ 수리 버튼 클릭에 실패했습니다.');
+      return false;
+    }
+    Core.log('daily', '일일 퀘스트용 장비 수리 완료');
+    return true;
+  };
+
   // ⚠ 사용자 요청(2026-08): 일간/주간 퀘스트 "보상 받기" 버튼도 자동으로
   // 누른다. 실전 확인: 확인창 없이 클릭 한 번으로 즉시 처리되고, 이미
   // 받았으면 버튼이 "수령 완료"로 바뀌며 disabled 상태가 된다. 7개 미만
@@ -573,11 +621,12 @@
       return await this.claimWeeklyRewardsIfDue();
     }
     if (step === 'dailyQuests') {
-      // 지금은 "장인 정신"(아이템 조합)만 구현됨. 수행/길드보스 등 다른
-      // 일간·주간 퀘스트 항목이 추가되면 이 자리에 이어서 호출한다.
+      // "장인 정신"(아이템 조합), "대장간 이용"(수리) 구현됨. 낚시는 사용자
+      // 요청으로 자동화 제외. 다른 항목이 추가되면 이 자리에 이어서 호출한다.
       const craftOk = await this.completeCraftQuestIfNeeded();
+      const repairOk = await this.completeRepairQuestIfNeeded();
       await this.claimQuestRewardIfReady('일간');
-      return craftOk ? '일간 퀘스트 처리 완료' : '일간 퀘스트 일부 처리 실패';
+      return craftOk && repairOk ? '일간 퀘스트 처리 완료' : '일간 퀘스트 일부 처리 실패';
     }
     if (step === 'weeklyQuests') {
       // ⚠ 사용자 확인(2026-08): "길드의 용사"(길드 보스 3회 공격)는 화·목
