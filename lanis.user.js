@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.71-stable
+// @version      1.13.72-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8532,48 +8532,60 @@
   }
 
   // -------------------------- 모듈: 길드 보스 --------------------------
-  // ⚠ 사용자 요청(2026-08): 길드 보스(심연의 히드라)는 화/목 등 길드마스터가
-  // 소환한 특정 시간에만 도전 가능하다. 개인 보스와 달리 요일/시간 자동
-  // 판정은 하지 않고(소환 여부 자체를 매크로가 알 수 없음), 사용자가 소환된
-  // 시점에 직접 시작 버튼을 눌러야 한다.
+  // ⚠ 사용자 요청(2026-08): 길드 보스는 화/목 등 길드마스터가 소환한 특정
+  // 시간에만 도전 가능하다. 개인 보스와 달리 요일/시간 자동 판정은 하지
+  // 않고(소환 여부 자체를 매크로가 알 수 없음), 사용자가 소환된 시점에
+  // 직접 시작 버튼을 눌러야 한다.
   //
-  // 실전 확인된 구조:
-  //   - 보스 HP 전체를 5개의 속성별 "머리"로 나눠 관리 (화염/빙결/전격/대지/바람)
-  //   - 참여자 개인당 "공격 횟수" 제한(실전 확인: 8회)
-  //   - 목록 화면에서 머리 선택 → "공격하기" → 전투 서브화면(/guild/boss/battle)
-  //     진입 → 그 화면의 "공격" 버튼을 누르면 즉시 결과가 나오고 30초 쿨타임
-  //   - 쿨타임 텍스트가 "0초"로 표시된 직후에도 버튼이 몇 초간 더 disabled로
-  //     남아있음이 실전 확인됨 → 텍스트가 아니라 버튼의 실제 disabled 여부로
-  //     판정해야 함
-  //
-  // 로직: 속성 확인(다르면 속성돌 사용) → 공용 프리셋 "히드라" 적용 → 길드
-  // 보스 화면 진입 → 사용자가 지정한 "속성"을 가진 머리를 화면에서 찾아
-  // 선택 → 공격하기 → 쿨타임마다 공격을 8회까지 반복 → 중간에 대상 머리가
-  // 죽으면 정지 후 알림.
-  //
-  // ⚠ 사용자 확인(2026-08): 머리 이름(화염/빙결/전격/대지/바람)은 고정이지만,
-  // 각 머리에 배정된 속성은 소환마다 랜덤이고 전투 중에도 바뀐다 - 머리
-  // 3개가 죽으면 남은 것 중 하나가 어둠으로, 어둠 머리도 죽으면 남은 것이
-  // 빛으로 바뀐다. 그래서 "이름"이 아니라 "속성"으로 지정하고, 코드가 매번
-  // 목록 화면에서 그 속성을 가진 머리가 지금 어떤 이름인지 다시 찾아야 한다.
+  // ⚠ 사용자 요청(2026-08): 길드 보스는 보스 종류별로 하위 탭을 따로 두고,
+  // 이 파일 하나에서 새 보스가 추가될 때마다 BOSS_REGISTRY에만 등록하면
+  // UI/실행까지 자동으로 늘어나는 구조로 만든다. 첫 번째 등록 보스: 히드라
+  // (심연의 히드라).
   Modules.guildboss = {
     id: 'guildboss',
     running: false,
     stopRequested: false,
+    activeBossId: null,
     config: {
-      originalElement: '',
-      targetElement: '',
+      bosses: {},
     },
   };
 
-  Modules.guildboss.HEAD_NAMES = ['화염의 머리', '빙결의 머리', '전격의 머리', '대지의 머리', '바람의 머리'];
-  Modules.guildboss.MAX_ATTACKS = 8;
+  // ⚠ 사용자 확인(2026-08, 히드라 기준): 머리 이름(화염/빙결/전격/대지/바람)은
+  // 고정이지만, 각 머리에 배정된 속성은 소환마다 랜덤이고 전투 중에도
+  // 바뀐다 - 머리 3개가 죽으면 남은 것 중 하나가 어둠으로, 어둠 머리도
+  // 죽으면 남은 것이 빛으로 바뀐다. 그래서 "이름"이 아니라 "속성"으로
+  // 지정하고, 코드가 매번 목록 화면에서 그 속성을 가진 머리가 지금 어떤
+  // 이름인지 다시 찾는다.
+  //
+  // 새 길드 보스를 추가하려면: 여기 BOSS_REGISTRY에 항목을 하나 추가한다.
+  //   label: 하위 탭에 표시할 이름
+  //   presetName: 캐릭>프리셋(공용 프리셋)에서 적용할 프리셋 이름
+  //   headNames: 그 보스의 부위/머리 이름 목록 (부위 개념이 없는 단일 보스면 빈 배열)
+  //   maxAttacks: 개인 공격 횟수 제한 (실전 확인 필요)
+  Modules.guildboss.BOSS_REGISTRY = {
+    hydra: {
+      label: '히드라',
+      presetName: '히드라',
+      headNames: ['화염의 머리', '빙결의 머리', '전격의 머리', '대지의 머리', '바람의 머리'],
+      maxAttacks: 8,
+    },
+  };
+
+  Modules.guildboss.getBossConfig = function (bossId) {
+    const mod = Modules.guildboss;
+    if (!mod.config.bosses[bossId]) {
+      mod.config.bosses[bossId] = { originalElement: '', targetElement: '' };
+    }
+    return mod.config.bosses[bossId];
+  };
 
   // 목록 화면에서 지정한 속성을 가진 머리의 "이름"을 찾는다. 처치된 머리는
   // 건너뛴다(실전 확인: 처치된 머리 근처엔 "처치됨" 텍스트가 붙음).
-  Modules.guildboss.findHeadNameByElement = function (targetElement) {
+  Modules.guildboss.findHeadNameByElement = function (bossId, targetElement) {
+    const headNames = Modules.guildboss.BOSS_REGISTRY[bossId].headNames;
     const all = Core.gameElements('*');
-    for (const headName of Modules.guildboss.HEAD_NAMES) {
+    for (const headName of headNames) {
       const heading = all.find(
         (el) => el.children.length === 0 && el.textContent.trim() === headName && Core.isElementVisible(el)
       );
@@ -8593,8 +8605,8 @@
     return null;
   };
 
-  // 공용 프리셋 "히드라" 적용 (캐릭 > 프리셋 화면, 보스 전용 프리셋이 아니라 공용 프리셋임)
-  Modules.guildboss.applyHydraPreset = async function () {
+  // 공용 프리셋 적용 (캐릭 > 프리셋 화면, 보스 전용 프리셋이 아니라 공용 프리셋)
+  Modules.guildboss.applyBossPreset = async function (presetName) {
     await Core.clickNavMenuExact('캐릭', '프리셋');
     const onPresetPage = await Core.waitFor(() => location.pathname.replace(/\/$/, '') === '/user-presets', 15000, 300);
     if (!onPresetPage) throw new Error('프리셋 화면 진입을 확인하지 못했습니다.');
@@ -8602,7 +8614,7 @@
 
     const findApplyBtn = () => {
       const all = Core.gameElements('*');
-      const heading = all.find((el) => el.children.length === 0 && el.textContent.trim() === '히드라');
+      const heading = all.find((el) => el.children.length === 0 && el.textContent.trim() === presetName);
       if (!heading) return null;
       const idx = all.indexOf(heading);
       for (let i = idx + 1; i < Math.min(idx + 15, all.length); i++) {
@@ -8612,17 +8624,18 @@
       return null;
     };
     const applyBtn = await Core.waitFor(findApplyBtn, 8000, 250);
-    if (!applyBtn) throw new Error('"히드라" 프리셋을 찾지 못했습니다 (프리셋 이름/존재 여부 확인 필요).');
+    if (!applyBtn) throw new Error(`"${presetName}" 프리셋을 찾지 못했습니다 (프리셋 이름/존재 여부 확인 필요).`);
     if (!(await Core.safeClick(findApplyBtn, { beforeMin: 500, beforeMax: 900, afterMin: 1000, afterMax: 1500 }))) {
-      throw new Error('"히드라" 프리셋 적용 클릭에 실패했습니다.');
+      throw new Error(`"${presetName}" 프리셋 적용 클릭에 실패했습니다.`);
     }
-    Core.log('guildboss', '"히드라" 프리셋 적용 완료');
+    Core.log('guildboss', `"${presetName}" 프리셋 적용 완료`);
   };
 
   // 우측 상단 계정 아이콘(텍스트/aria-label 없는, 상단 네비게이션 바에서
   // 가장 오른쪽에 위치한 아이콘 버튼) → 드롭다운 "길드" → "보스" 탭.
   // 실전 확인: 이 아이콘은 aria-label이 없어 텍스트로 찾을 수 없고, 화면
   // 최상단(top<40px)에 있는 버튼 중 가장 오른쪽(right 값 최대)인 것으로 특정함.
+  // 모든 길드 보스에 공통되는 진입 경로.
   Modules.guildboss.goToGuildBossScreen = async function () {
     const findAccountIconBtn = () => {
       const navBtns = Core.gameElements('button').filter((el) => {
@@ -8662,9 +8675,9 @@
     return true;
   };
 
-  // 목록에서 지정한 머리 선택 → "공격하기" → 전투 서브화면 진입
-  Modules.guildboss.enterHeadBattle = async function (targetElement) {
-    const resolveHeadName = () => Modules.guildboss.findHeadNameByElement(targetElement);
+  // 목록에서 지정한 속성의 머리를 찾아 선택 → "공격하기" → 전투 서브화면 진입
+  Modules.guildboss.enterHeadBattle = async function (bossId, targetElement) {
+    const resolveHeadName = () => Modules.guildboss.findHeadNameByElement(bossId, targetElement);
     const headLabel = await Core.waitFor(resolveHeadName, 10000, 250);
     if (!headLabel) {
       throw new Error(`"${targetElement}" 속성을 가진 머리를 찾지 못했습니다 (이미 처치됐거나 이번 소환에 없을 수 있습니다).`);
@@ -8724,9 +8737,10 @@
     return false;
   };
 
-  Modules.guildboss.runAttackLoop = async function () {
+  Modules.guildboss.runAttackLoop = async function (bossId) {
     const mod = this;
-    for (let i = 0; i < mod.MAX_ATTACKS; i++) {
+    const maxAttacks = mod.BOSS_REGISTRY[bossId].maxAttacks;
+    for (let i = 0; i < maxAttacks; i++) {
       if (!mod.running || mod.stopRequested) return { stopped: true };
 
       // ⚠ 사용자 요청(2026-08): 쿨타임 대기 중 다른 길드원이 먼저 대상
@@ -8760,7 +8774,7 @@
         return { stopped: true, headDefeated: true };
       }
 
-      // 실전 확인된 완료 문구: 버튼이 "최대 공격 횟수 도달 (8회)"로 바뀜
+      // 실전 확인된 완료 문구: 버튼이 "최대 공격 횟수 도달 (N회)"로 바뀜
       if (Core.bodyText().includes('최대 공격 횟수 도달')) {
         Core.log('guildboss', '최대 공격 횟수에 도달했습니다.');
         break;
@@ -8776,33 +8790,40 @@
 
   Modules.guildboss.mainLoop = async function () {
     const mod = this;
-    Core.log('guildboss', '길드 보스 매크로 시작');
+    const bossId = mod.activeBossId;
+    const bossDef = mod.BOSS_REGISTRY[bossId];
+    if (!bossDef) {
+      Core.notifyStopped('guildboss', '선택된 길드 보스 정보를 찾을 수 없습니다.');
+      return;
+    }
+    const bossConfig = mod.getBossConfig(bossId);
+    Core.log('guildboss', `길드 보스(${bossDef.label}) 매크로 시작`);
     try {
-      if (!mod.config.targetElement) throw new Error('공격할 속성을 먼저 선택해주세요.');
+      if (!bossConfig.targetElement) throw new Error('공격할 속성을 먼저 선택해주세요.');
 
-      Core.log('guildboss', `시작 전 원래 속성(${mod.config.originalElement}) 확인`);
-      await Core.ensureCharacterElement(mod.config.originalElement, 'guildboss');
+      Core.log('guildboss', `시작 전 원래 속성(${bossConfig.originalElement}) 확인`);
+      await Core.ensureCharacterElement(bossConfig.originalElement, 'guildboss');
       if (!mod.running || mod.stopRequested) return;
 
-      await mod.applyHydraPreset();
+      await mod.applyBossPreset(bossDef.presetName);
       if (!mod.running || mod.stopRequested) return;
 
       await mod.goToGuildBossScreen();
       if (!mod.running || mod.stopRequested) return;
 
-      const headLabel = await mod.enterHeadBattle(mod.config.targetElement);
+      const headLabel = await mod.enterHeadBattle(bossId, bossConfig.targetElement);
       if (!mod.running || mod.stopRequested) return;
 
-      const loopResult = await mod.runAttackLoop();
+      const loopResult = await mod.runAttackLoop(bossId);
       if (loopResult.headDefeated) {
         const msg = loopResult.defeatedByOthers
-          ? `"${headLabel}"(${mod.config.targetElement} 속성)이(가) 다른 길드원에 의해 먼저 처치되어 더 공격할 수 없습니다 - 정지합니다.`
-          : `"${headLabel}"(${mod.config.targetElement} 속성) 처치 완료 - 정지합니다.`;
+          ? `"${headLabel}"(${bossConfig.targetElement} 속성)이(가) 다른 길드원에 의해 먼저 처치되어 더 공격할 수 없습니다 - 정지합니다.`
+          : `"${headLabel}"(${bossConfig.targetElement} 속성) 처치 완료 - 정지합니다.`;
         Core.notifyStopped('guildboss', msg);
         return;
       }
       if (!loopResult.stopped) {
-        Core.notifyCompleted('guildboss', '길드 보스 공격을 완료했습니다.');
+        Core.notifyCompleted('guildboss', `길드 보스(${bossDef.label}) 공격을 완료했습니다.`);
         return;
       }
     } catch (e) {
@@ -8814,57 +8835,58 @@
     Core.updateModuleButtons();
   };
 
-  const GUILDBOSS_PERSIST_KEYS = ['originalElement', 'targetElement'];
+  const GUILDBOSS_PERSIST_KEYS = ['bosses'];
 
-  function buildGuildBossTab(container) {
+  // 보스 하나의 설정 패널(속성 select 2개 + 시작/정지 + 안내문)을 만든다.
+  function buildGuildBossSubPanel(panelContainer, bossId) {
     const mod = Modules.guildboss;
-    const refs = UIRefs.guildboss;
-    Core.loadModuleConfig('guildboss', GUILDBOSS_PERSIST_KEYS);
+    const bossDef = mod.BOSS_REGISTRY[bossId];
+    const bossConfig = mod.getBossConfig(bossId);
+    const refs = (UIRefs.guildboss[bossId] = UIRefs.guildboss[bossId] || {});
 
-    container.appendChild(labelEl('원래 속성 (시작 전 자동 확인·변경)'));
+    panelContainer.appendChild(labelEl('원래 속성 (시작 전 자동 확인·변경)'));
     const elementSelect = document.createElement('select');
     elementSelect.style.cssText = inputStyle();
     const elementPlaceholder = document.createElement('option');
     elementPlaceholder.value = '';
     elementPlaceholder.textContent = '속성 선택 필요';
-    elementPlaceholder.selected = !Core.ELEMENT_OPTIONS.includes(mod.config.originalElement);
+    elementPlaceholder.selected = !Core.ELEMENT_OPTIONS.includes(bossConfig.originalElement);
     elementSelect.appendChild(elementPlaceholder);
     Core.ELEMENT_OPTIONS.forEach((element) => {
       const option = document.createElement('option');
       option.value = element;
       option.textContent = element;
-      option.selected = element === mod.config.originalElement;
+      option.selected = element === bossConfig.originalElement;
       elementSelect.appendChild(option);
     });
     elementSelect.addEventListener('change', (e) => {
-      mod.config.originalElement = e.target.value;
+      bossConfig.originalElement = e.target.value;
       Core.saveModuleConfig('guildboss', GUILDBOSS_PERSIST_KEYS);
     });
-    container.appendChild(elementSelect);
+    panelContainer.appendChild(elementSelect);
 
-    // ⚠ 사용자 확인(2026-08): 머리 이름은 고정이지만 배정된 속성은 소환마다,
-    // 전투 중에도(3개 죽으면 어둠, 어둠도 죽으면 빛으로) 바뀐다. 그래서
-    // "머리 이름"이 아니라 "속성"으로 지정한다.
-    container.appendChild(labelEl('공격할 속성 (해당 속성 머리를 매번 자동으로 찾음)'));
-    const elementTargetSelect = document.createElement('select');
-    elementTargetSelect.style.cssText = inputStyle();
-    const elementTargetPlaceholder = document.createElement('option');
-    elementTargetPlaceholder.value = '';
-    elementTargetPlaceholder.textContent = '속성 선택 필요';
-    elementTargetPlaceholder.selected = !Core.ELEMENT_OPTIONS.includes(mod.config.targetElement);
-    elementTargetSelect.appendChild(elementTargetPlaceholder);
+    // ⚠ 사용자 확인(2026-08): 부위/머리 이름은 고정이지만 배정된 속성은
+    // 소환마다·전투 중에도 바뀌므로 "이름"이 아니라 "속성"으로 지정한다.
+    panelContainer.appendChild(labelEl('공격할 속성 (해당 속성 부위를 매번 자동으로 찾음)'));
+    const targetSelect = document.createElement('select');
+    targetSelect.style.cssText = inputStyle();
+    const targetPlaceholder = document.createElement('option');
+    targetPlaceholder.value = '';
+    targetPlaceholder.textContent = '속성 선택 필요';
+    targetPlaceholder.selected = !Core.ELEMENT_OPTIONS.includes(bossConfig.targetElement);
+    targetSelect.appendChild(targetPlaceholder);
     Core.ELEMENT_OPTIONS.forEach((element) => {
       const option = document.createElement('option');
       option.value = element;
       option.textContent = element;
-      option.selected = element === mod.config.targetElement;
-      elementTargetSelect.appendChild(option);
+      option.selected = element === bossConfig.targetElement;
+      targetSelect.appendChild(option);
     });
-    elementTargetSelect.addEventListener('change', (e) => {
-      mod.config.targetElement = e.target.value;
+    targetSelect.addEventListener('change', (e) => {
+      bossConfig.targetElement = e.target.value;
       Core.saveModuleConfig('guildboss', GUILDBOSS_PERSIST_KEYS);
     });
-    container.appendChild(elementTargetSelect);
+    panelContainer.appendChild(targetSelect);
 
     const btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
@@ -8878,22 +8900,69 @@
     const statusEl = document.createElement('span');
     statusEl.textContent = '대기중';
     statusEl.style.cssText = 'margin-left:4px; font-size:11px;';
-    startBtn.addEventListener('click', () => Core.startModule('guildboss'));
+    startBtn.addEventListener('click', () => {
+      Modules.guildboss.activeBossId = bossId;
+      Core.startModule('guildboss');
+    });
     stopBtn.addEventListener('click', () => Core.requestStopModule('guildboss'));
     btnRow.appendChild(startBtn);
     btnRow.appendChild(stopBtn);
-    container.appendChild(btnRow);
-    container.appendChild(statusEl);
+    panelContainer.appendChild(btnRow);
+    panelContainer.appendChild(statusEl);
 
     const hint = document.createElement('div');
-    hint.textContent = '※ 길드마스터가 보스를 소환한 시간에만 사용 가능합니다. 개인 공격 횟수 최대 8회.';
+    hint.textContent = `※ 길드마스터가 "${bossDef.label}"을(를) 소환한 시간에만 사용 가능합니다. 개인 공격 횟수 최대 ${bossDef.maxAttacks}회.`;
     hint.style.cssText = 'color:#888; font-size:10px; margin-top:4px;';
-    container.appendChild(hint);
+    panelContainer.appendChild(hint);
 
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [elementSelect, elementTargetSelect];
+    refs.inputs = [elementSelect, targetSelect];
+  }
+
+  // 길드보스 탭 전체: 보스별 하위 탭 바 + 각 보스의 설정 패널.
+  // BOSS_REGISTRY에 새 보스를 추가하면 이 함수가 자동으로 하위 탭을 만든다.
+  function buildGuildBossTab(container) {
+    const mod = Modules.guildboss;
+    Core.loadModuleConfig('guildboss', GUILDBOSS_PERSIST_KEYS);
+    const bossIds = Object.keys(mod.BOSS_REGISTRY);
+    bossIds.forEach((bossId) => mod.getBossConfig(bossId));
+
+    const subTabBar = document.createElement('div');
+    subTabBar.style.cssText = 'display:flex; border-bottom:1px solid #444; margin-bottom:8px;';
+    const subTabContentWrap = document.createElement('div');
+
+    const subTabButtons = {};
+    const subTabContents = {};
+
+    function switchSubTab(bossId) {
+      bossIds.forEach((id) => {
+        subTabContents[id].style.display = id === bossId ? 'block' : 'none';
+        subTabButtons[id].style.borderBottom = id === bossId ? '2px solid #f5a623' : '2px solid transparent';
+        subTabButtons[id].style.color = id === bossId ? '#f5a623' : '#eee';
+      });
+    }
+
+    bossIds.forEach((bossId) => {
+      const btn = document.createElement('button');
+      btn.textContent = mod.BOSS_REGISTRY[bossId].label;
+      btn.style.cssText =
+        'flex:1; padding:5px 0; background:#1a1a1a; color:#eee; border:none; border-bottom:2px solid transparent; cursor:pointer; font-size:11px;';
+      btn.addEventListener('click', () => switchSubTab(bossId));
+      subTabBar.appendChild(btn);
+      subTabButtons[bossId] = btn;
+
+      const content = document.createElement('div');
+      content.style.display = 'none';
+      subTabContentWrap.appendChild(content);
+      subTabContents[bossId] = content;
+      buildGuildBossSubPanel(content, bossId);
+    });
+
+    container.appendChild(subTabBar);
+    container.appendChild(subTabContentWrap);
+    if (bossIds.length > 0) switchSubTab(bossIds[0]);
   }
 
   Core.startModule = function (moduleId, options = {}) {
@@ -8904,7 +8973,9 @@
       return null;
     }
     const requiredElement =
-      mod.config && mod.config.originalElement;
+      moduleId === 'guildboss'
+        ? mod.activeBossId && mod.config.bosses[mod.activeBossId] && mod.config.bosses[mod.activeBossId].originalElement
+        : mod.config && mod.config.originalElement;
     if (
       (moduleId === 'autohunt' || moduleId === 'dungeon' || moduleId === 'deepdungeon' || moduleId === 'guildboss') &&
       !Core.ELEMENT_OPTIONS.includes(requiredElement)
@@ -9060,7 +9131,7 @@
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
-    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'deepdungeon', 'guildboss'].forEach((id) => {
+    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'deepdungeon'].forEach((id) => {
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
@@ -9081,6 +9152,27 @@
       refs.statusEl.textContent = mod.running ? `실행중 (${cycleLabel})` : otherRunning ? '다른 모듈 실행중' : '대기중';
       if (refs.inputs) refs.inputs.forEach((inp) => (inp.disabled = mod.running));
     });
+
+    // ⚠ 길드보스는 보스별 하위 탭마다 별도 시작/정지 버튼을 가진다
+    // (UIRefs.guildboss[bossId] 형태로 중첩됨). 실행 중인 보스의 버튼만
+    // 정지 가능하게 하고, 나머지 하위 탭은 시작이 막힌다(동시에 한 보스만
+    // 실행 가능).
+    const guildbossMod = Modules.guildboss;
+    if (guildbossMod) {
+      Object.keys(UIRefs.guildboss).forEach((bossId) => {
+        const refs = UIRefs.guildboss[bossId];
+        if (!refs.startBtn) return;
+        const isThisBossActive = guildbossMod.running && guildbossMod.activeBossId === bossId;
+        const otherRunning =
+          (Core.activeModuleId && Core.activeModuleId !== 'guildboss') ||
+          (Core.activeModuleId === 'guildboss' && guildbossMod.activeBossId !== bossId) ||
+          (Core.dailyActive && !isThisBossActive);
+        refs.startBtn.disabled = guildbossMod.running || otherRunning;
+        refs.stopBtn.disabled = !isThisBossActive;
+        refs.statusEl.textContent = isThisBossActive ? '실행중' : otherRunning ? '다른 모듈 실행중' : '대기중';
+        if (refs.inputs) refs.inputs.forEach((inp) => (inp.disabled = guildbossMod.running));
+      });
+    }
 
     const bossPanel = document.getElementById('lrm-boss-ref-panel');
     if (bossPanel) {

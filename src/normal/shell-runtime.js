@@ -6,7 +6,9 @@
       return null;
     }
     const requiredElement =
-      mod.config && mod.config.originalElement;
+      moduleId === 'guildboss'
+        ? mod.activeBossId && mod.config.bosses[mod.activeBossId] && mod.config.bosses[mod.activeBossId].originalElement
+        : mod.config && mod.config.originalElement;
     if (
       (moduleId === 'autohunt' || moduleId === 'dungeon' || moduleId === 'deepdungeon' || moduleId === 'guildboss') &&
       !Core.ELEMENT_OPTIONS.includes(requiredElement)
@@ -162,7 +164,7 @@
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
-    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'deepdungeon', 'guildboss'].forEach((id) => {
+    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'deepdungeon'].forEach((id) => {
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
@@ -183,6 +185,27 @@
       refs.statusEl.textContent = mod.running ? `실행중 (${cycleLabel})` : otherRunning ? '다른 모듈 실행중' : '대기중';
       if (refs.inputs) refs.inputs.forEach((inp) => (inp.disabled = mod.running));
     });
+
+    // ⚠ 길드보스는 보스별 하위 탭마다 별도 시작/정지 버튼을 가진다
+    // (UIRefs.guildboss[bossId] 형태로 중첩됨). 실행 중인 보스의 버튼만
+    // 정지 가능하게 하고, 나머지 하위 탭은 시작이 막힌다(동시에 한 보스만
+    // 실행 가능).
+    const guildbossMod = Modules.guildboss;
+    if (guildbossMod) {
+      Object.keys(UIRefs.guildboss).forEach((bossId) => {
+        const refs = UIRefs.guildboss[bossId];
+        if (!refs.startBtn) return;
+        const isThisBossActive = guildbossMod.running && guildbossMod.activeBossId === bossId;
+        const otherRunning =
+          (Core.activeModuleId && Core.activeModuleId !== 'guildboss') ||
+          (Core.activeModuleId === 'guildboss' && guildbossMod.activeBossId !== bossId) ||
+          (Core.dailyActive && !isThisBossActive);
+        refs.startBtn.disabled = guildbossMod.running || otherRunning;
+        refs.stopBtn.disabled = !isThisBossActive;
+        refs.statusEl.textContent = isThisBossActive ? '실행중' : otherRunning ? '다른 모듈 실행중' : '대기중';
+        if (refs.inputs) refs.inputs.forEach((inp) => (inp.disabled = guildbossMod.running));
+      });
+    }
 
     const bossPanel = document.getElementById('lrm-boss-ref-panel');
     if (bossPanel) {
