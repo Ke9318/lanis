@@ -14,20 +14,51 @@
   //     판정해야 함
   //
   // 로직: 속성 확인(다르면 속성돌 사용) → 공용 프리셋 "히드라" 적용 → 길드
-  // 보스 화면 진입 → 사용자가 지정한 머리 선택 → 공격하기 → 쿨타임마다 공격을
-  // 8회까지 반복 → 중간에 대상 머리가 죽으면 정지 후 알림.
+  // 보스 화면 진입 → 사용자가 지정한 "속성"을 가진 머리를 화면에서 찾아
+  // 선택 → 공격하기 → 쿨타임마다 공격을 8회까지 반복 → 중간에 대상 머리가
+  // 죽으면 정지 후 알림.
+  //
+  // ⚠ 사용자 확인(2026-08): 머리 이름(화염/빙결/전격/대지/바람)은 고정이지만,
+  // 각 머리에 배정된 속성은 소환마다 랜덤이고 전투 중에도 바뀐다 - 머리
+  // 3개가 죽으면 남은 것 중 하나가 어둠으로, 어둠 머리도 죽으면 남은 것이
+  // 빛으로 바뀐다. 그래서 "이름"이 아니라 "속성"으로 지정하고, 코드가 매번
+  // 목록 화면에서 그 속성을 가진 머리가 지금 어떤 이름인지 다시 찾아야 한다.
   Modules.guildboss = {
     id: 'guildboss',
     running: false,
     stopRequested: false,
     config: {
       originalElement: '',
-      targetHead: '',
+      targetElement: '',
     },
   };
 
-  Modules.guildboss.HEAD_OPTIONS = ['화염의 머리', '빙결의 머리', '전격의 머리', '대지의 머리', '바람의 머리'];
+  Modules.guildboss.HEAD_NAMES = ['화염의 머리', '빙결의 머리', '전격의 머리', '대지의 머리', '바람의 머리'];
   Modules.guildboss.MAX_ATTACKS = 8;
+
+  // 목록 화면에서 지정한 속성을 가진 머리의 "이름"을 찾는다. 처치된 머리는
+  // 건너뛴다(실전 확인: 처치된 머리 근처엔 "처치됨" 텍스트가 붙음).
+  Modules.guildboss.findHeadNameByElement = function (targetElement) {
+    const all = Core.gameElements('*');
+    for (const headName of Modules.guildboss.HEAD_NAMES) {
+      const heading = all.find(
+        (el) => el.children.length === 0 && el.textContent.trim() === headName && Core.isElementVisible(el)
+      );
+      if (!heading) continue;
+      const idx = all.indexOf(heading);
+      let elementText = null;
+      let isDefeated = false;
+      for (let i = idx + 1; i < Math.min(idx + 8, all.length); i++) {
+        const t = all[i].textContent.trim();
+        if (t === '처치됨') isDefeated = true;
+        if (!elementText && Core.ELEMENT_OPTIONS.includes(t)) elementText = t;
+        if (t === 'HP') break;
+      }
+      if (isDefeated) continue;
+      if (elementText === targetElement) return headName;
+    }
+    return null;
+  };
 
   // 공용 프리셋 "히드라" 적용 (캐릭 > 프리셋 화면, 보스 전용 프리셋이 아니라 공용 프리셋임)
   Modules.guildboss.applyHydraPreset = async function () {
@@ -99,11 +130,16 @@
   };
 
   // 목록에서 지정한 머리 선택 → "공격하기" → 전투 서브화면 진입
-  Modules.guildboss.enterHeadBattle = async function (headLabel) {
+  Modules.guildboss.enterHeadBattle = async function (targetElement) {
+    const resolveHeadName = () => Modules.guildboss.findHeadNameByElement(targetElement);
+    const headLabel = await Core.waitFor(resolveHeadName, 10000, 250);
+    if (!headLabel) {
+      throw new Error(`"${targetElement}" 속성을 가진 머리를 찾지 못했습니다 (이미 처치됐거나 이번 소환에 없을 수 있습니다).`);
+    }
+    Core.log('guildboss', `"${targetElement}" 속성 머리 확인: "${headLabel}"`);
+
     const findHeadHeading = () =>
       Core.gameElements('*').find((el) => el.children.length === 0 && el.textContent.trim() === headLabel && Core.isElementVisible(el));
-    const heading = await Core.waitFor(findHeadHeading, 10000, 250);
-    if (!heading) throw new Error(`"${headLabel}" 항목을 찾지 못했습니다.`);
     if (!(await Core.safeClick(findHeadHeading, { beforeMin: 400, beforeMax: 700, afterMin: 500, afterMax: 900 }))) {
       throw new Error(`"${headLabel}" 선택에 실패했습니다.`);
     }
@@ -115,7 +151,7 @@
     }
     const onBattlePage = await Core.waitFor(() => location.pathname.replace(/\/$/, '') === '/guild/boss/battle', 10000, 250);
     if (!onBattlePage) throw new Error('길드 보스 전투 화면 진입을 확인하지 못했습니다.');
-    return true;
+    return headLabel;
   };
 
   // ⚠ 실전 확인: 쿨타임이 "0초"로 표시된 직후에도 버튼이 몇 초 더 disabled
@@ -209,7 +245,7 @@
     const mod = this;
     Core.log('guildboss', '길드 보스 매크로 시작');
     try {
-      if (!mod.config.targetHead) throw new Error('공격할 머리를 먼저 선택해주세요.');
+      if (!mod.config.targetElement) throw new Error('공격할 속성을 먼저 선택해주세요.');
 
       Core.log('guildboss', `시작 전 원래 속성(${mod.config.originalElement}) 확인`);
       await Core.ensureCharacterElement(mod.config.originalElement, 'guildboss');
@@ -221,14 +257,14 @@
       await mod.goToGuildBossScreen();
       if (!mod.running || mod.stopRequested) return;
 
-      await mod.enterHeadBattle(mod.config.targetHead);
+      const headLabel = await mod.enterHeadBattle(mod.config.targetElement);
       if (!mod.running || mod.stopRequested) return;
 
       const loopResult = await mod.runAttackLoop();
       if (loopResult.headDefeated) {
         const msg = loopResult.defeatedByOthers
-          ? `"${mod.config.targetHead}"이(가) 다른 길드원에 의해 먼저 처치되어 더 공격할 수 없습니다 - 정지합니다.`
-          : `"${mod.config.targetHead}" 처치 완료 - 정지합니다.`;
+          ? `"${headLabel}"(${mod.config.targetElement} 속성)이(가) 다른 길드원에 의해 먼저 처치되어 더 공격할 수 없습니다 - 정지합니다.`
+          : `"${headLabel}"(${mod.config.targetElement} 속성) 처치 완료 - 정지합니다.`;
         Core.notifyStopped('guildboss', msg);
         return;
       }
@@ -245,7 +281,7 @@
     Core.updateModuleButtons();
   };
 
-  const GUILDBOSS_PERSIST_KEYS = ['originalElement', 'targetHead'];
+  const GUILDBOSS_PERSIST_KEYS = ['originalElement', 'targetElement'];
 
   function buildGuildBossTab(container) {
     const mod = Modules.guildboss;
@@ -273,26 +309,29 @@
     });
     container.appendChild(elementSelect);
 
-    container.appendChild(labelEl('공격할 머리'));
-    const headSelect = document.createElement('select');
-    headSelect.style.cssText = inputStyle();
-    const headPlaceholder = document.createElement('option');
-    headPlaceholder.value = '';
-    headPlaceholder.textContent = '머리 선택 필요';
-    headPlaceholder.selected = !mod.HEAD_OPTIONS.includes(mod.config.targetHead);
-    headSelect.appendChild(headPlaceholder);
-    mod.HEAD_OPTIONS.forEach((head) => {
+    // ⚠ 사용자 확인(2026-08): 머리 이름은 고정이지만 배정된 속성은 소환마다,
+    // 전투 중에도(3개 죽으면 어둠, 어둠도 죽으면 빛으로) 바뀐다. 그래서
+    // "머리 이름"이 아니라 "속성"으로 지정한다.
+    container.appendChild(labelEl('공격할 속성 (해당 속성 머리를 매번 자동으로 찾음)'));
+    const elementTargetSelect = document.createElement('select');
+    elementTargetSelect.style.cssText = inputStyle();
+    const elementTargetPlaceholder = document.createElement('option');
+    elementTargetPlaceholder.value = '';
+    elementTargetPlaceholder.textContent = '속성 선택 필요';
+    elementTargetPlaceholder.selected = !Core.ELEMENT_OPTIONS.includes(mod.config.targetElement);
+    elementTargetSelect.appendChild(elementTargetPlaceholder);
+    Core.ELEMENT_OPTIONS.forEach((element) => {
       const option = document.createElement('option');
-      option.value = head;
-      option.textContent = head;
-      option.selected = head === mod.config.targetHead;
-      headSelect.appendChild(option);
+      option.value = element;
+      option.textContent = element;
+      option.selected = element === mod.config.targetElement;
+      elementTargetSelect.appendChild(option);
     });
-    headSelect.addEventListener('change', (e) => {
-      mod.config.targetHead = e.target.value;
+    elementTargetSelect.addEventListener('change', (e) => {
+      mod.config.targetElement = e.target.value;
       Core.saveModuleConfig('guildboss', GUILDBOSS_PERSIST_KEYS);
     });
-    container.appendChild(headSelect);
+    container.appendChild(elementTargetSelect);
 
     const btnRow = document.createElement('div');
     btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
@@ -321,5 +360,5 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [elementSelect, headSelect];
+    refs.inputs = [elementSelect, elementTargetSelect];
   }
