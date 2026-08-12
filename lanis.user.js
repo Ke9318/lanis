@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.81-stable
+// @version      1.13.83-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -1997,8 +1997,7 @@
   const GUILD_BOSS_REWARD_DAY_KEY = 'lrm-guildboss-reward-day-done';
   const DAILY_STEP_LABELS = {
     weeklyRewards: '주간 보상(심층던전+아레나)',
-    dailyQuests: '일간 퀘스트',
-    weeklyQuests: '주간 퀘스트',
+    dailyQuests: '일간+주간 퀘스트',
     attendance: '출석체크',
     dungeon: '던전',
     arena: '아레나',
@@ -2402,6 +2401,163 @@
   // 완료 상태면 "보상 받기 (N/7)"로 표시되지만 이때도 disabled라, 두
   // 경우 다 disabled 여부 하나로 정확히 "지금 받을 수 있는지"를 판별할
   // 수 있다(텍스트를 따로 안 봐도 됨).
+  // ⚠ 사용자 요청(2026-08, 실전 확인): "낚시광" 주간 퀘스트(낚시 10회)는
+  // 피렌트 마을의 낚시터에서만 진행 가능하다. 통발이 설치되어 있는 동안은
+  // 낚시를 할 수 없으므로, 통발을 수거한 뒤 낚시를 시작하고, 목표 달성
+  // 후에는 다시 통발을 설치해두고 떠나야 한다(사용자 지시).
+  //
+  // 실전 확인된 사실:
+  //   - "낚시하기"를 누르면 자동으로 계속 낚싯대를 던지며 물고기를 잡는다
+  //     (버튼이 "낚시 멈추기"로 바뀜). 그런데 일정 시간이 지나면 자동으로
+  //     멈춰서 다시 "🎣 낚시하기" 상태로 돌아온다 - 그러면 다시 눌러줘야
+  //     계속 진행된다.
+  //   - 낚시 자체는 "횟수"를 화면에 안 보여주지만, "보유 물고기" 수가
+  //     정확히 1:1로 대응한다(실전 확인: 물고기 3마리 증가 = 낚시광
+  //     진행도 정확히 3 증가). 그래서 물고기 수를 폴링하면 정확한 진행
+  //     상황을 알 수 있다 - 시간만으로 어림짐작할 필요가 없다.
+  Modules.daily.completeFishingQuestIfNeeded = async function () {
+    await Core.clickNavMenuExact('캐릭', '퀘스트');
+    const onQuestPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300);
+    if (!onQuestPage) {
+      Core.log('daily', '⚠ 퀘스트 화면 진입을 확인하지 못해 낚시 퀘스트를 건너뜁니다.');
+      return false;
+    }
+    await Core.humanDelay(500, 900);
+    if (!(await Core.safeClick(() => Core.findButtonByText('주간'), { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 }))) {
+      Core.log('daily', '⚠ "주간" 탭 클릭에 실패해 낚시 퀘스트를 건너뜁니다.');
+      return false;
+    }
+
+    const match = Core.bodyText().match(/낚시광\s*(\d+)\s*\/\s*(\d+)/);
+    if (!match) {
+      Core.log('daily', '⚠ "낚시광" 퀘스트 항목을 찾지 못했습니다.');
+      return false;
+    }
+    const current = parseInt(match[1], 10);
+    const target = parseInt(match[2], 10);
+    if (current >= target) {
+      Core.log('daily', '"낚시광" 퀘스트 이미 완료됨 - 생략');
+      return true;
+    }
+    const remaining = target - current;
+
+    // 피렌트로 이동 (이미 피렌트면 생략)
+    await Core.clickNavMenuExact('마을', '마을 이동');
+    const onTownMovePage = await Core.waitFor(() => location.pathname.startsWith('/town-move'), 15000, 300);
+    if (!onTownMovePage) {
+      Core.log('daily', '⚠ 마을 이동 화면 진입을 확인하지 못해 낚시 퀘스트를 건너뜁니다.');
+      return false;
+    }
+    await Core.humanDelay(500, 900);
+    if (!Core.bodyText().includes('현재 위치는 피렌트')) {
+      const townItem = Core.gameElements('*').find(
+        (el) => el.children.length === 0 && el.textContent.trim() === '피렌트' && Core.isElementVisible(el)
+      );
+      if (!townItem) {
+        Core.log('daily', '⚠ "피렌트" 항목을 찾지 못해 낚시 퀘스트를 건너뜁니다.');
+        return false;
+      }
+      if (!(await Core.safeClick(() => townItem, { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 }))) {
+        Core.log('daily', '⚠ "피렌트" 선택에 실패해 낚시 퀘스트를 건너뜁니다.');
+        return false;
+      }
+      const moveBtn = await Core.retryStep('"이 마을로 이동" 버튼 찾기', () => Core.findButtonByText('이 마을로 이동'));
+      if (!moveBtn) {
+        Core.log('daily', '⚠ "이 마을로 이동" 버튼을 찾지 못해 낚시 퀘스트를 건너뜁니다.');
+        return false;
+      }
+      if (!(await Core.safeClick(() => Core.findButtonByText('이 마을로 이동'), { beforeMin: 500, beforeMax: 900, afterMin: 1200, afterMax: 1800 }))) {
+        Core.log('daily', '⚠ 피렌트 이동에 실패해 낚시 퀘스트를 건너뜁니다.');
+        return false;
+      }
+    }
+
+    await Core.clickNavMenuExact('마을', '낚시터');
+    const onFishingPage = await Core.waitFor(() => location.pathname.startsWith('/fishing'), 15000, 300);
+    if (!onFishingPage) {
+      Core.log('daily', '⚠ 낚시터 화면 진입을 확인하지 못해 낚시 퀘스트를 건너뜁니다.');
+      return false;
+    }
+    await Core.humanDelay(500, 900);
+
+    const readFishCount = () => {
+      const m = Core.bodyText().match(/보유\s*물고기\s*🐟?\s*([\d,]+)/);
+      return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+    };
+
+    // 통발이 설치되어 있으면 수거해야 낚시가 가능하다.
+    const collectBtn = Core.findButtonByText('통발 수거하기');
+    if (collectBtn) {
+      if (!(await Core.safeClick(() => Core.findButtonByText('통발 수거하기'), { beforeMin: 500, beforeMax: 900, afterMin: 1000, afterMax: 1500 }))) {
+        Core.log('daily', '⚠ 통발 수거에 실패해 낚시 퀘스트를 건너뜁니다.');
+        return false;
+      }
+      Core.log('daily', '통발을 수거했습니다.');
+    }
+
+    const startFish = await Core.waitFor(readFishCount, 8000, 250);
+    if (startFish === null) {
+      Core.log('daily', '⚠ 보유 물고기 수를 읽지 못해 낚시 퀘스트를 건너뜁니다.');
+      return false;
+    }
+    const targetFish = startFish + remaining;
+
+    // 목표 물고기 수에 도달할 때까지 낚시를 진행/재개하며 폴링한다.
+    // 마리당 대략 20~40초 관측됨 - 넉넉히 여유를 두고 타임아웃을 잡는다.
+    const timeoutMs = remaining * 90 * 1000;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const nowFish = readFishCount();
+      if (nowFish !== null && nowFish >= targetFish) break;
+      const isFishing = !!Core.findButtonByText('낚시 멈추기');
+      if (!isFishing) {
+        const startBtn = Core.gameElements('button').find(
+          (b) => Core.isElementVisible(b) && b.textContent.trim().includes('낚시하기')
+        );
+        if (startBtn) {
+          await Core.safeClick(() => startBtn, { beforeMin: 400, beforeMax: 700, afterMin: 800, afterMax: 1200 });
+          Core.log('daily', `낚시 시작/재개 (현재 물고기: ${nowFish ?? '확인중'}, 목표: ${targetFish})`);
+        }
+      }
+      await Core.sleep(5000);
+    }
+
+    const finalFish = readFishCount();
+    if (finalFish === null || finalFish < targetFish) {
+      Core.log('daily', `⚠ 낚시 제한시간 내 목표 미도달(현재 ${finalFish}, 목표 ${targetFish}) - 다음 실행 시 이어서 진행됩니다.`);
+    } else {
+      Core.log('daily', `낚시 목표 달성 (${finalFish}마리)`);
+    }
+
+    // 낚시 중이면 멈추고, 사용자 지시대로 떠나기 전 통발을 다시 설치한다.
+    const stopBtn = Core.findButtonByText('낚시 멈추기');
+    if (stopBtn) {
+      await Core.safeClick(() => Core.findButtonByText('낚시 멈추기'), { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 });
+    }
+    const installBtn = Core.findButtonByText('통발 설치하기');
+    if (installBtn) {
+      // ⚠ 실전 확인(2026-08): "통발 설치하기" 클릭은 즉시 설치되지 않고
+      // "통발 설치 확인" 다이얼로그(취소/확인)가 먼저 뜬다. 확인을 안
+      // 누르면 통발이 실제로 설치되지 않은 채(버튼이 그대로 남은 채) 끝난다.
+      if (!(await Core.safeClick(() => Core.findButtonByText('통발 설치하기'), { beforeMin: 500, beforeMax: 900, afterMin: 700, afterMax: 1100 }))) {
+        Core.log('daily', '⚠ 통발 재설치에 실패했습니다 - 다음에 직접 확인해주세요.');
+      } else {
+        const dialog = await Core.waitFor(
+          () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d) && d.textContent.includes('통발 설치 확인')) || null,
+          6000,
+          250
+        );
+        const confirmBtn = dialog ? [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '확인') : null;
+        if (!confirmBtn || !(await Core.safeClick(() => confirmBtn, { beforeMin: 400, beforeMax: 700, afterMin: 900, afterMax: 1400 }))) {
+          Core.log('daily', '⚠ 통발 설치 확인창 처리에 실패했습니다 - 다음에 직접 확인해주세요.');
+        } else {
+          Core.log('daily', '통발을 다시 설치했습니다.');
+        }
+      }
+    }
+    return finalFish !== null && finalFish >= targetFish;
+  };
+
   Modules.daily.claimQuestRewardIfReady = async function (tabLabel) {
     await Core.clickNavMenuExact('캐릭', '퀘스트');
     const onQuestPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300);
@@ -2628,24 +2784,28 @@
       return await this.claimWeeklyRewardsIfDue();
     }
     if (step === 'dailyQuests') {
-      // "장인 정신"(아이템 조합), "대장간 이용"(수리) 구현됨. 낚시는 사용자
-      // 요청으로 자동화 제외. 다른 항목이 추가되면 이 자리에 이어서 호출한다.
+      // "장인 정신"(아이템 조합), "대장간 이용"(수리) 구현됨. 다른 항목이
+      // 추가되면 이 자리에 이어서 호출한다.
       const craftOk = await this.completeCraftQuestIfNeeded();
       const repairOk = await this.completeRepairQuestIfNeeded();
       await this.claimQuestRewardIfReady('일간');
+
+      // ⚠ 사용자 요청(2026-08): 주간 퀘스트도 요일 제약(예전엔 주말에만)
+      // 없이 매일 확인하고, 일간 퀘스트 보상 받을 때 같이 처리한다.
+      // "길드의 용사"(길드 보스 공격)는 길드보스 매크로로 자연히 채워지고,
+      // "꾸준한 수행"과 "낚시광"은 직접 완료시켜야 한다.
+      const cultivationOk = await this.completeCultivationQuestIfNeeded();
+      const fishingOk = await this.completeFishingQuestIfNeeded();
+      await this.claimQuestRewardIfReady('주간');
+
       // ⚠ 사용자 요청(2026-08): 길드 보스(히드라) 개인 보상도 일간 퀘스트
-      // 보상을 받을 때 같이 처리한다(원래 weeklyRewards 옆의 별도 단계였음).
+      // 보상을 받을 때 같이 처리한다.
       const guildBossResult = await this.claimGuildBossRewardIfDue();
       Core.log('daily', guildBossResult);
-      return craftOk && repairOk ? '일간 퀘스트 처리 완료' : '일간 퀘스트 일부 처리 실패';
-    }
-    if (step === 'weeklyQuests') {
-      // ⚠ 사용자 확인(2026-08): "길드의 용사"(길드 보스 3회 공격)는 화·목
-      // 특정 시간대에 길드마스터가 소환하는 방식이라 자동화하지 않고 수동
-      // 그대로 둔다. "꾸준한 수행"만 자동화한다.
-      const cultivationOk = await this.completeCultivationQuestIfNeeded();
-      await this.claimQuestRewardIfReady('주간');
-      return cultivationOk ? '주간 퀘스트 처리 완료' : '주간 퀘스트 일부 처리 실패';
+
+      return craftOk && repairOk && cultivationOk && fishingOk
+        ? '일간+주간 퀘스트 처리 완료'
+        : '일간/주간 퀘스트 일부 처리 실패';
     }
     if (step === 'attendance') {
       return await this.runAttendance();
@@ -2808,14 +2968,14 @@
     // 무관하게 항상 맨 먼저 실행한다(해당 매크로를 안 돌려도 반드시 받아야
     // 하는 보상이기 때문). 일간 퀘스트(dailyQuests)는 다른 모든 단계가
     // 끝난 뒤에야 정확한 진행도를 확인할 수 있으므로 항상 맨 마지막에
-    // 실행한다(매일). 주간 퀘스트(weeklyQuests)는 토·일에만 실행한다.
+    // 실행한다(매일). 주간 퀘스트는 이제 요일 제약 없이 매일 dailyQuests
+    // 단계 안에서 함께 확인·처리한다(예전엔 토·일에만 별도 실행했음).
     const steps = [
       'weeklyRewards',
       'attendance',
       ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena', 'preseason']
         .filter((key) => mod.config[key]),
       'dailyQuests',
-      ...(Modules.arena.isWeekend() ? ['weeklyQuests'] : []),
     ];
     if (
       steps.includes('dungeon') &&
