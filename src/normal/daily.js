@@ -432,163 +432,6 @@
   // 완료 상태면 "보상 받기 (N/7)"로 표시되지만 이때도 disabled라, 두
   // 경우 다 disabled 여부 하나로 정확히 "지금 받을 수 있는지"를 판별할
   // 수 있다(텍스트를 따로 안 봐도 됨).
-  // ⚠ 사용자 요청(2026-08, 실전 확인): "낚시광" 주간 퀘스트(낚시 10회)는
-  // 피렌트 마을의 낚시터에서만 진행 가능하다. 통발이 설치되어 있는 동안은
-  // 낚시를 할 수 없으므로, 통발을 수거한 뒤 낚시를 시작하고, 목표 달성
-  // 후에는 다시 통발을 설치해두고 떠나야 한다(사용자 지시).
-  //
-  // 실전 확인된 사실:
-  //   - "낚시하기"를 누르면 자동으로 계속 낚싯대를 던지며 물고기를 잡는다
-  //     (버튼이 "낚시 멈추기"로 바뀜). 그런데 일정 시간이 지나면 자동으로
-  //     멈춰서 다시 "🎣 낚시하기" 상태로 돌아온다 - 그러면 다시 눌러줘야
-  //     계속 진행된다.
-  //   - 낚시 자체는 "횟수"를 화면에 안 보여주지만, "보유 물고기" 수가
-  //     정확히 1:1로 대응한다(실전 확인: 물고기 3마리 증가 = 낚시광
-  //     진행도 정확히 3 증가). 그래서 물고기 수를 폴링하면 정확한 진행
-  //     상황을 알 수 있다 - 시간만으로 어림짐작할 필요가 없다.
-  Modules.daily.completeFishingQuestIfNeeded = async function () {
-    await Core.clickNavMenuExact('캐릭', '퀘스트');
-    const onQuestPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300);
-    if (!onQuestPage) {
-      Core.log('daily', '⚠ 퀘스트 화면 진입을 확인하지 못해 낚시 퀘스트를 건너뜁니다.');
-      return false;
-    }
-    await Core.humanDelay(500, 900);
-    if (!(await Core.safeClick(() => Core.findButtonByText('주간'), { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 }))) {
-      Core.log('daily', '⚠ "주간" 탭 클릭에 실패해 낚시 퀘스트를 건너뜁니다.');
-      return false;
-    }
-
-    const match = Core.bodyText().match(/낚시광\s*(\d+)\s*\/\s*(\d+)/);
-    if (!match) {
-      Core.log('daily', '⚠ "낚시광" 퀘스트 항목을 찾지 못했습니다.');
-      return false;
-    }
-    const current = parseInt(match[1], 10);
-    const target = parseInt(match[2], 10);
-    if (current >= target) {
-      Core.log('daily', '"낚시광" 퀘스트 이미 완료됨 - 생략');
-      return true;
-    }
-    const remaining = target - current;
-
-    // 피렌트로 이동 (이미 피렌트면 생략)
-    await Core.clickNavMenuExact('마을', '마을 이동');
-    const onTownMovePage = await Core.waitFor(() => location.pathname.startsWith('/town-move'), 15000, 300);
-    if (!onTownMovePage) {
-      Core.log('daily', '⚠ 마을 이동 화면 진입을 확인하지 못해 낚시 퀘스트를 건너뜁니다.');
-      return false;
-    }
-    await Core.humanDelay(500, 900);
-    if (!Core.bodyText().includes('현재 위치는 피렌트')) {
-      const townItem = Core.gameElements('*').find(
-        (el) => el.children.length === 0 && el.textContent.trim() === '피렌트' && Core.isElementVisible(el)
-      );
-      if (!townItem) {
-        Core.log('daily', '⚠ "피렌트" 항목을 찾지 못해 낚시 퀘스트를 건너뜁니다.');
-        return false;
-      }
-      if (!(await Core.safeClick(() => townItem, { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 }))) {
-        Core.log('daily', '⚠ "피렌트" 선택에 실패해 낚시 퀘스트를 건너뜁니다.');
-        return false;
-      }
-      const moveBtn = await Core.retryStep('"이 마을로 이동" 버튼 찾기', () => Core.findButtonByText('이 마을로 이동'));
-      if (!moveBtn) {
-        Core.log('daily', '⚠ "이 마을로 이동" 버튼을 찾지 못해 낚시 퀘스트를 건너뜁니다.');
-        return false;
-      }
-      if (!(await Core.safeClick(() => Core.findButtonByText('이 마을로 이동'), { beforeMin: 500, beforeMax: 900, afterMin: 1200, afterMax: 1800 }))) {
-        Core.log('daily', '⚠ 피렌트 이동에 실패해 낚시 퀘스트를 건너뜁니다.');
-        return false;
-      }
-    }
-
-    await Core.clickNavMenuExact('마을', '낚시터');
-    const onFishingPage = await Core.waitFor(() => location.pathname.startsWith('/fishing'), 15000, 300);
-    if (!onFishingPage) {
-      Core.log('daily', '⚠ 낚시터 화면 진입을 확인하지 못해 낚시 퀘스트를 건너뜁니다.');
-      return false;
-    }
-    await Core.humanDelay(500, 900);
-
-    const readFishCount = () => {
-      const m = Core.bodyText().match(/보유\s*물고기\s*🐟?\s*([\d,]+)/);
-      return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
-    };
-
-    // 통발이 설치되어 있으면 수거해야 낚시가 가능하다.
-    const collectBtn = Core.findButtonByText('통발 수거하기');
-    if (collectBtn) {
-      if (!(await Core.safeClick(() => Core.findButtonByText('통발 수거하기'), { beforeMin: 500, beforeMax: 900, afterMin: 1000, afterMax: 1500 }))) {
-        Core.log('daily', '⚠ 통발 수거에 실패해 낚시 퀘스트를 건너뜁니다.');
-        return false;
-      }
-      Core.log('daily', '통발을 수거했습니다.');
-    }
-
-    const startFish = await Core.waitFor(readFishCount, 8000, 250);
-    if (startFish === null) {
-      Core.log('daily', '⚠ 보유 물고기 수를 읽지 못해 낚시 퀘스트를 건너뜁니다.');
-      return false;
-    }
-    const targetFish = startFish + remaining;
-
-    // 목표 물고기 수에 도달할 때까지 낚시를 진행/재개하며 폴링한다.
-    // 마리당 대략 20~40초 관측됨 - 넉넉히 여유를 두고 타임아웃을 잡는다.
-    const timeoutMs = remaining * 90 * 1000;
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const nowFish = readFishCount();
-      if (nowFish !== null && nowFish >= targetFish) break;
-      const isFishing = !!Core.findButtonByText('낚시 멈추기');
-      if (!isFishing) {
-        const startBtn = Core.gameElements('button').find(
-          (b) => Core.isElementVisible(b) && b.textContent.trim().includes('낚시하기')
-        );
-        if (startBtn) {
-          await Core.safeClick(() => startBtn, { beforeMin: 400, beforeMax: 700, afterMin: 800, afterMax: 1200 });
-          Core.log('daily', `낚시 시작/재개 (현재 물고기: ${nowFish ?? '확인중'}, 목표: ${targetFish})`);
-        }
-      }
-      await Core.sleep(5000);
-    }
-
-    const finalFish = readFishCount();
-    if (finalFish === null || finalFish < targetFish) {
-      Core.log('daily', `⚠ 낚시 제한시간 내 목표 미도달(현재 ${finalFish}, 목표 ${targetFish}) - 다음 실행 시 이어서 진행됩니다.`);
-    } else {
-      Core.log('daily', `낚시 목표 달성 (${finalFish}마리)`);
-    }
-
-    // 낚시 중이면 멈추고, 사용자 지시대로 떠나기 전 통발을 다시 설치한다.
-    const stopBtn = Core.findButtonByText('낚시 멈추기');
-    if (stopBtn) {
-      await Core.safeClick(() => Core.findButtonByText('낚시 멈추기'), { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 });
-    }
-    const installBtn = Core.findButtonByText('통발 설치하기');
-    if (installBtn) {
-      // ⚠ 실전 확인(2026-08): "통발 설치하기" 클릭은 즉시 설치되지 않고
-      // "통발 설치 확인" 다이얼로그(취소/확인)가 먼저 뜬다. 확인을 안
-      // 누르면 통발이 실제로 설치되지 않은 채(버튼이 그대로 남은 채) 끝난다.
-      if (!(await Core.safeClick(() => Core.findButtonByText('통발 설치하기'), { beforeMin: 500, beforeMax: 900, afterMin: 700, afterMax: 1100 }))) {
-        Core.log('daily', '⚠ 통발 재설치에 실패했습니다 - 다음에 직접 확인해주세요.');
-      } else {
-        const dialog = await Core.waitFor(
-          () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d) && d.textContent.includes('통발 설치 확인')) || null,
-          6000,
-          250
-        );
-        const confirmBtn = dialog ? [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '확인') : null;
-        if (!confirmBtn || !(await Core.safeClick(() => confirmBtn, { beforeMin: 400, beforeMax: 700, afterMin: 900, afterMax: 1400 }))) {
-          Core.log('daily', '⚠ 통발 설치 확인창 처리에 실패했습니다 - 다음에 직접 확인해주세요.');
-        } else {
-          Core.log('daily', '통발을 다시 설치했습니다.');
-        }
-      }
-    }
-    return finalFish !== null && finalFish >= targetFish;
-  };
-
   Modules.daily.claimQuestRewardIfReady = async function (tabLabel) {
     await Core.clickNavMenuExact('캐릭', '퀘스트');
     const onQuestPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300);
@@ -824,9 +667,11 @@
       // ⚠ 사용자 요청(2026-08): 주간 퀘스트도 요일 제약(예전엔 주말에만)
       // 없이 매일 확인하고, 일간 퀘스트 보상 받을 때 같이 처리한다.
       // "길드의 용사"(길드 보스 공격)는 길드보스 매크로로 자연히 채워지고,
-      // "꾸준한 수행"과 "낚시광"은 직접 완료시켜야 한다.
+      // "꾸준한 수행"은 직접 완료시킨다. "낚시광"은 자동화를 시도했다가
+      // 사용자 요청으로 다시 뺐다 - 탭이 원격/백그라운드로 밀리면 게임 내
+      // 자동 낚시 타이머 자체가 거의 안 흐르는 현상이 실전에서 확인돼서,
+      // 무인 실행 시 이 단계에서 사실상 멈춘 것처럼 오래 걸릴 수 있었다.
       const cultivationOk = await this.completeCultivationQuestIfNeeded();
-      const fishingOk = await this.completeFishingQuestIfNeeded();
       await this.claimQuestRewardIfReady('주간');
 
       // ⚠ 사용자 요청(2026-08): 길드 보스(히드라) 개인 보상도 일간 퀘스트
@@ -834,7 +679,7 @@
       const guildBossResult = await this.claimGuildBossRewardIfDue();
       Core.log('daily', guildBossResult);
 
-      return craftOk && repairOk && cultivationOk && fishingOk
+      return craftOk && repairOk && cultivationOk
         ? '일간+주간 퀘스트 처리 완료'
         : '일간/주간 퀘스트 일부 처리 실패';
     }
