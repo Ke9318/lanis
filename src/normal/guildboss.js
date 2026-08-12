@@ -103,7 +103,11 @@
   // 실전 확인: 이 아이콘은 aria-label이 없어 텍스트로 찾을 수 없고, 화면
   // 최상단(top<40px)에 있는 버튼 중 가장 오른쪽(right 값 최대)인 것으로 특정함.
   // 모든 길드 보스에 공통되는 진입 경로.
-  Modules.guildboss.goToGuildBossScreen = async function () {
+  // 우측 상단 계정 아이콘(텍스트/aria-label 없는, 상단 네비게이션 바에서
+  // 가장 오른쪽에 위치한 아이콘 버튼) → 드롭다운 "길드" → /guild 화면.
+  // 길드 화면의 모든 하위 기능(보스, 마을효과 명성 등)에서 공통으로 쓰는
+  // 진입 경로라 별도 함수로 분리했다.
+  Modules.guildboss.goToGuildScreen = async function () {
     const findAccountIconBtn = () => {
       const navBtns = Core.gameElements('button').filter((el) => {
         if (!Core.isElementVisible(el)) return false;
@@ -128,6 +132,11 @@
     guildItem.click();
     const onGuildPage = await Core.waitFor(() => location.pathname.replace(/\/$/, '') === '/guild', 10000, 250);
     if (!onGuildPage) throw new Error('길드 화면 진입을 확인하지 못했습니다.');
+    return true;
+  };
+
+  Modules.guildboss.goToGuildBossScreen = async function () {
+    await Modules.guildboss.goToGuildScreen();
     await Core.humanDelay(500, 900);
 
     const bossTab = await Core.retryStep('"보스" 탭 찾기', () => Core.findButtonByText('보스'));

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.84-stable
+// @version      1.13.85-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2622,6 +2622,32 @@
     return '길드 보스 개인 보상 수령 완료';
   };
 
+  // ⚠ 사용자 요청(2026-08, 실전 확인): 길드 화면(/guild, "길드 정보" 탭)에
+  // "마을 효과 명성 받기 (+명성 25)" 버튼이 있으면 눌러서 받는다. 확인창
+  // 없이 즉시 "일일 명성 25을 획득했습니다!"로 처리되고, 받고 나면 버튼
+  // 자체가 화면에서 사라진다(하루 1회로 추정). 버튼 존재 여부만 매번
+  // 확인하면 되므로 별도 날짜 캐시는 필요 없다.
+  Modules.daily.claimGuildTownEffectReputationIfAvailable = async function () {
+    try {
+      await Modules.guildboss.goToGuildScreen();
+    } catch (e) {
+      Core.log('daily', `⚠ 길드 화면 진입 실패(마을효과 명성 확인 생략): ${e.message}`);
+      return '길드 마을효과 명성: 화면 진입 실패';
+    }
+    await Core.humanDelay(500, 900);
+
+    const findClaimBtn = () =>
+      Core.gameElements('button').find((b) => Core.isElementVisible(b) && b.textContent.includes('마을 효과 명성 받기'));
+    const claimBtn = findClaimBtn();
+    if (!claimBtn) {
+      return '길드 마을효과 명성: 받을 것 없음(이미 받았거나 없음)';
+    }
+    if (!(await Core.safeClick(findClaimBtn, { beforeMin: 500, beforeMax: 900, afterMin: 900, afterMax: 1400 }))) {
+      return '길드 마을효과 명성: 수령 버튼 클릭 실패(다음 실행 시 재시도)';
+    }
+    return '길드 마을효과 명성(+25) 수령 완료';
+  };
+
   Modules.daily.runStep = async function (step) {
     if (step === 'weeklyRewards') {
       return await this.claimWeeklyRewardsIfDue();
@@ -2647,6 +2673,10 @@
       // 보상을 받을 때 같이 처리한다.
       const guildBossResult = await this.claimGuildBossRewardIfDue();
       Core.log('daily', guildBossResult);
+
+      // ⚠ 사용자 요청(2026-08): 길드 화면의 "마을 효과 명성 받기"도 같이 확인한다.
+      const townEffectResult = await this.claimGuildTownEffectReputationIfAvailable();
+      Core.log('daily', townEffectResult);
 
       return craftOk && repairOk && cultivationOk
         ? '일간+주간 퀘스트 처리 완료'
@@ -8925,7 +8955,11 @@
   // 실전 확인: 이 아이콘은 aria-label이 없어 텍스트로 찾을 수 없고, 화면
   // 최상단(top<40px)에 있는 버튼 중 가장 오른쪽(right 값 최대)인 것으로 특정함.
   // 모든 길드 보스에 공통되는 진입 경로.
-  Modules.guildboss.goToGuildBossScreen = async function () {
+  // 우측 상단 계정 아이콘(텍스트/aria-label 없는, 상단 네비게이션 바에서
+  // 가장 오른쪽에 위치한 아이콘 버튼) → 드롭다운 "길드" → /guild 화면.
+  // 길드 화면의 모든 하위 기능(보스, 마을효과 명성 등)에서 공통으로 쓰는
+  // 진입 경로라 별도 함수로 분리했다.
+  Modules.guildboss.goToGuildScreen = async function () {
     const findAccountIconBtn = () => {
       const navBtns = Core.gameElements('button').filter((el) => {
         if (!Core.isElementVisible(el)) return false;
@@ -8950,6 +8984,11 @@
     guildItem.click();
     const onGuildPage = await Core.waitFor(() => location.pathname.replace(/\/$/, '') === '/guild', 10000, 250);
     if (!onGuildPage) throw new Error('길드 화면 진입을 확인하지 못했습니다.');
+    return true;
+  };
+
+  Modules.guildboss.goToGuildBossScreen = async function () {
+    await Modules.guildboss.goToGuildScreen();
     await Core.humanDelay(500, 900);
 
     const bossTab = await Core.retryStep('"보스" 탭 찾기', () => Core.findButtonByText('보스'));

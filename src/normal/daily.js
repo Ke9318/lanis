@@ -653,6 +653,32 @@
     return '길드 보스 개인 보상 수령 완료';
   };
 
+  // ⚠ 사용자 요청(2026-08, 실전 확인): 길드 화면(/guild, "길드 정보" 탭)에
+  // "마을 효과 명성 받기 (+명성 25)" 버튼이 있으면 눌러서 받는다. 확인창
+  // 없이 즉시 "일일 명성 25을 획득했습니다!"로 처리되고, 받고 나면 버튼
+  // 자체가 화면에서 사라진다(하루 1회로 추정). 버튼 존재 여부만 매번
+  // 확인하면 되므로 별도 날짜 캐시는 필요 없다.
+  Modules.daily.claimGuildTownEffectReputationIfAvailable = async function () {
+    try {
+      await Modules.guildboss.goToGuildScreen();
+    } catch (e) {
+      Core.log('daily', `⚠ 길드 화면 진입 실패(마을효과 명성 확인 생략): ${e.message}`);
+      return '길드 마을효과 명성: 화면 진입 실패';
+    }
+    await Core.humanDelay(500, 900);
+
+    const findClaimBtn = () =>
+      Core.gameElements('button').find((b) => Core.isElementVisible(b) && b.textContent.includes('마을 효과 명성 받기'));
+    const claimBtn = findClaimBtn();
+    if (!claimBtn) {
+      return '길드 마을효과 명성: 받을 것 없음(이미 받았거나 없음)';
+    }
+    if (!(await Core.safeClick(findClaimBtn, { beforeMin: 500, beforeMax: 900, afterMin: 900, afterMax: 1400 }))) {
+      return '길드 마을효과 명성: 수령 버튼 클릭 실패(다음 실행 시 재시도)';
+    }
+    return '길드 마을효과 명성(+25) 수령 완료';
+  };
+
   Modules.daily.runStep = async function (step) {
     if (step === 'weeklyRewards') {
       return await this.claimWeeklyRewardsIfDue();
@@ -678,6 +704,10 @@
       // 보상을 받을 때 같이 처리한다.
       const guildBossResult = await this.claimGuildBossRewardIfDue();
       Core.log('daily', guildBossResult);
+
+      // ⚠ 사용자 요청(2026-08): 길드 화면의 "마을 효과 명성 받기"도 같이 확인한다.
+      const townEffectResult = await this.claimGuildTownEffectReputationIfAvailable();
+      Core.log('daily', townEffectResult);
 
       return craftOk && repairOk && cultivationOk
         ? '일간+주간 퀘스트 처리 완료'
