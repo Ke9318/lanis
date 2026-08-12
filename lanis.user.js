@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.79-stable
+// @version      1.13.80-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -660,6 +660,19 @@
     let used = 0;
     const maxAttempts = 50;
     for (let i = 0; i < maxAttempts; i++) {
+      // ⚠ 버그 수정(2026-08, 사용자 확인): 실전에서 "보상" 카테고리 상자를
+      // 여러 개 연속으로 사용하던 도중 필터가 "연금" 카테고리로 바뀐 채
+      // 멈추는 사고가 있었다(정확한 계기는 특정 못함 - 게임 화면 자체의
+      // 리렌더링/카테고리 토글 상태 변경일 가능성). 한 번만 설정하고 끝까지
+      // 믿는 대신, 매 반복 시작 시 "보상" 버튼이 실제로 눌려있는지 빠르게
+      // 확인하고 아니면 다시 정렬한다 - 어떤 이유로 필터가 흐트러져도 다음
+      // 아이템을 열기 전에 스스로 바로잡는다.
+      const rewardTabBtn = Core.findButtonByText('보상');
+      if (!rewardTabBtn || rewardTabBtn.getAttribute('aria-pressed') !== 'true') {
+        Core.log(moduleId, '⚠ "보상" 카테고리 필터가 풀려있어 다시 정렬합니다.');
+        await Core.selectOnlyInventoryCategory('보상', moduleId);
+      }
+
       let row = Core.gameElements('tr').find(
         (tr) =>
           [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '사용') &&

@@ -647,6 +647,19 @@
     let used = 0;
     const maxAttempts = 50;
     for (let i = 0; i < maxAttempts; i++) {
+      // ⚠ 버그 수정(2026-08, 사용자 확인): 실전에서 "보상" 카테고리 상자를
+      // 여러 개 연속으로 사용하던 도중 필터가 "연금" 카테고리로 바뀐 채
+      // 멈추는 사고가 있었다(정확한 계기는 특정 못함 - 게임 화면 자체의
+      // 리렌더링/카테고리 토글 상태 변경일 가능성). 한 번만 설정하고 끝까지
+      // 믿는 대신, 매 반복 시작 시 "보상" 버튼이 실제로 눌려있는지 빠르게
+      // 확인하고 아니면 다시 정렬한다 - 어떤 이유로 필터가 흐트러져도 다음
+      // 아이템을 열기 전에 스스로 바로잡는다.
+      const rewardTabBtn = Core.findButtonByText('보상');
+      if (!rewardTabBtn || rewardTabBtn.getAttribute('aria-pressed') !== 'true') {
+        Core.log(moduleId, '⚠ "보상" 카테고리 필터가 풀려있어 다시 정렬합니다.');
+        await Core.selectOnlyInventoryCategory('보상', moduleId);
+      }
+
       let row = Core.gameElements('tr').find(
         (tr) =>
           [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '사용') &&
