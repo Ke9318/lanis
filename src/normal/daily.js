@@ -28,7 +28,6 @@
   const GUILD_BOSS_REWARD_DAY_KEY = 'lrm-guildboss-reward-day-done';
   const DAILY_STEP_LABELS = {
     weeklyRewards: '주간 보상(심층던전+아레나)',
-    guildBossReward: '길드 보스 보상(수·금)',
     dailyQuests: '일간 퀘스트',
     weeklyQuests: '주간 퀘스트',
     attendance: '출석체크',
@@ -659,15 +658,16 @@
     if (step === 'weeklyRewards') {
       return await this.claimWeeklyRewardsIfDue();
     }
-    if (step === 'guildBossReward') {
-      return await this.claimGuildBossRewardIfDue();
-    }
     if (step === 'dailyQuests') {
       // "장인 정신"(아이템 조합), "대장간 이용"(수리) 구현됨. 낚시는 사용자
       // 요청으로 자동화 제외. 다른 항목이 추가되면 이 자리에 이어서 호출한다.
       const craftOk = await this.completeCraftQuestIfNeeded();
       const repairOk = await this.completeRepairQuestIfNeeded();
       await this.claimQuestRewardIfReady('일간');
+      // ⚠ 사용자 요청(2026-08): 길드 보스(히드라) 개인 보상도 일간 퀘스트
+      // 보상을 받을 때 같이 처리한다(원래 weeklyRewards 옆의 별도 단계였음).
+      const guildBossResult = await this.claimGuildBossRewardIfDue();
+      Core.log('daily', guildBossResult);
       return craftOk && repairOk ? '일간 퀘스트 처리 완료' : '일간 퀘스트 일부 처리 실패';
     }
     if (step === 'weeklyQuests') {
@@ -842,7 +842,6 @@
     // 실행한다(매일). 주간 퀘스트(weeklyQuests)는 토·일에만 실행한다.
     const steps = [
       'weeklyRewards',
-      'guildBossReward',
       'attendance',
       ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena', 'preseason']
         .filter((key) => mod.config[key]),
