@@ -647,12 +647,31 @@
     let used = 0;
     const maxAttempts = 50;
     for (let i = 0; i < maxAttempts; i++) {
-      const row = Core.gameElements('tr').find(
+      let row = Core.gameElements('tr').find(
         (tr) =>
           [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '사용') &&
           Core.isElementVisible(tr)
       );
-      if (!row) break;
+      // ⚠ 버그 수정(2026-08, 사용자 확인): 보상 상자 종류가 많으면(실전 확인:
+      // 완성된 이면의 보상/완성된 지하의 보상/이면의 보상/지하의 보상/
+      // 지하의 보상(매우어려움) 등 5종류 이상) 목록이 여러 페이지로 나뉘는데,
+      // 예전엔 현재 페이지에서 "사용" 행을 못 찾으면 곧바로 멈춰서 다음
+      // 페이지에 남은 상자를 전혀 까지 못했다. 다음 페이지로 넘겨서 한 번 더
+      // 찾아본다.
+      if (!row) {
+        const nextPageBtn = Core.gameElements('button').find(
+          (b) => b.getAttribute('aria-label') === 'Go to next page' && !b.disabled && Core.isElementVisible(b)
+        );
+        if (!nextPageBtn) break;
+        nextPageBtn.click();
+        await Core.humanDelay(500, 800);
+        row = Core.gameElements('tr').find(
+          (tr) =>
+            [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '사용') &&
+            Core.isElementVisible(tr)
+        );
+        if (!row) break;
+      }
       const useBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
       if (!(await Core.safeClick(() => useBtn, { beforeMin: 500, beforeMax: 900 }))) {
         throw new Error('보상 상자 "사용" 버튼 클릭에 실패했습니다.');
@@ -682,6 +701,18 @@
       }
       used++;
       Core.log(moduleId, `보상 상자 사용 ${used}개째 완료`);
+
+      // ⚠ 상자를 하나 쓰면 그 종류가 목록에서 통째로 사라지거나 수량이
+      // 바뀌면서 페이지 구성이 흔들릴 수 있다. 안전하게 1페이지로 되돌아가
+      // 처음부터 다시 "사용" 가능한 행을 찾는다(페이지네이션이 없으면
+      // 이 클릭은 그냥 아무 효과 없이 넘어감).
+      const firstPageBtn = Core.gameElements('button').find(
+        (b) => b.getAttribute('aria-label') === 'Go to first page' && !b.disabled && Core.isElementVisible(b)
+      );
+      if (firstPageBtn) {
+        firstPageBtn.click();
+        await Core.humanDelay(300, 500);
+      }
     }
     if (used > 0) {
       Core.log(moduleId, `보상 상자 사용 완료: 총 ${used}개`);
