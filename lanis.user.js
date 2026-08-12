@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.73-stable
+// @version      1.13.74-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -10717,6 +10717,61 @@
     return match ? parseInt(match[1], 10) : null;
   };
 
+  // ⚠ 허무의 황제 전용(2026-08): 페이지 텍스트(매크로 패널 제외)를 읽는
+  // 범용 헬퍼. Core.bodyText()에 해당하는 게 M 스코프엔 없어서 새로 만듦.
+  M.pageText = () => M.queryAll('*').filter((el) => el.children.length === 0).map((el) => el.textContent.trim()).join(' ');
+
+  // ⚠ 허무의 황제 전용(2026-08, 실전 확인): 전투 기록은 최신순으로 나열되지만
+  // "공속↓" 같은 상태이상은 매 턴 나타나는 게 아니라서(실전 확인: 특정 턴엔
+  // 없다가 다음 턴엔 다시 나타남), 로그 컨테이너 전체 텍스트에서 그냥
+  // 첫 매치를 찾으면 오래된 항목의 값을 잘못 집을 수 있다. "턴 N~M" 헤더
+  // 사이 구간만 정확히 잘라 최신 항목 하나만 검사해야 한다.
+  M.getLatestLogEntryText = () => {
+    const logContainer = M.getLogContainer();
+    if (!logContainer) return null;
+    const text = logContainer.textContent;
+    const turnHeaders = [...text.matchAll(/턴\s*\d+~\d+/g)];
+    if (turnHeaders.length === 0) return null;
+    const start = turnHeaders[0].index;
+    const end = turnHeaders.length > 1 ? turnHeaders[1].index : text.length;
+    return text.slice(start, end);
+  };
+
+  // ⚠ 허무의 황제 전용(2026-08, 사용자 확인): "공속"은 공격속도. 정신일도
+  // 딜 단계에서 내게 걸린 공격속도 감소 디버프가 최신 전투 로그에 남아있는
+  // 동안은 1턴씩 추가로 공격해서 디버프를 소진시켜야 한다.
+  M.isMyAttackSpeedDebuffActive = () => {
+    const latest = M.getLatestLogEntryText();
+    return !!(latest && latest.includes('공속↓'));
+  };
+
+  // ⚠ 허무의 황제 전용(2026-08): 캐릭터 카드가 접혀있으면 "물리 공격력"
+  // 등 상세 스탯 텍스트 자체가 DOM에 없다(펼쳐야 렌더링됨). 첫 번째 "HP"
+  // 리프가 내 캐릭터 카드에 속한다(항상 플레이어 카드가 보스 카드보다
+  // 먼저 렌더링됨 - M.getHpMpNumbers도 같은 전제로 작동). 그 조상에서
+  // 가장 가까운 버튼(펼치기 화살표)을 찾아 누른다.
+  M.ensureCharacterCardExpanded = async () => {
+    if (M.pageText().includes('물리 공격력:')) return true;
+    const hpLabels = M.queryAll('*').filter((el) => el.children.length === 0 && el.textContent.trim() === 'HP');
+    if (hpLabels.length === 0) return false;
+    let container = hpLabels[0].parentElement;
+    for (let i = 0; i < 10 && container; i++) {
+      const btn = container.querySelector('button');
+      if (btn) {
+        btn.click();
+        await M.sleep(600);
+        break;
+      }
+      container = container.parentElement;
+    }
+    return M.pageText().includes('물리 공격력:');
+  };
+
+  M.getMyPhysicalAttack = () => {
+    const match = M.pageText().match(/물리\s*공격력:\s*(\d+)/);
+    return match ? parseInt(match[1], 10) : null;
+  };
+
   // ⚠ 타락한 정화자 전용(2026-08, 실전 확인): 목표 어빌리티가 정해진 턴
   // 내에 봉인되지 않으면 "도전 포기" 후 재도전한다. 실전에서 "도전
   // 포기" → 확인창 "포기" → 목록(/personal-boss) 복귀 → 대상 보스
@@ -10891,6 +10946,7 @@
     vineEnt: { label: '지하를 휘감은 엔트' },
     vineWraith: { label: '지하의 망령' },
     corruptedPurifier: { label: '타락한 정화자', hard: true },
+    voidEmperorEmpty: { label: '허무의 황제', hard: true },
   };
   // 임시 실전 테스트 옵션. true인 동안에는 카드에 "클리어"가 표시되어도
   // 자동 완료 처리하지 않고 도전/재도전 버튼을 계속 탐색한다.
@@ -10908,6 +10964,7 @@
       vineEnt: 'runVineEntSword',
       vineWraith: 'runVineWraithSword',
       corruptedPurifier: 'runCorruptedPurifierSword',
+      voidEmperorEmpty: 'runVoidEmperorHardSword',
     },
     인술: {
       fallenGuardian: 'runFallenGuardian',
@@ -12024,7 +12081,7 @@
 
   // 약한 순서 (BOSS_REGISTRY 등록 순서와 동일). 타락한 정화자(HARD)는
   // 체력이 가장 높아 맨 뒤에 둔다.
-  const BOSS_ORDER = ['fallenGuardian', 'voidEmperor', 'vineEnt', 'vineWraith', 'corruptedPurifier'];
+  const BOSS_ORDER = ['fallenGuardian', 'voidEmperor', 'vineEnt', 'vineWraith', 'corruptedPurifier', 'voidEmperorEmpty'];
 
   // ⚠ 버그 수정(2026-08): bossLabel 텍스트가 페이지에 최소 2곳(카드 제목과
   // "이번 주 보상 보스" 요약 배지)에 나타나는데, 기존 코드는 findAllLeavesByExactText가
@@ -12614,6 +12671,9 @@
         <label style="display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer;">
           <input type="checkbox" class="lrm-boss-check" value="corruptedPurifier" style="width:16px; height:16px; cursor:pointer;"> 타락한 정화자 (HARD, 검술 공략만 구현됨·다른 직업 추후 추가)
         </label>
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:8px; cursor:pointer;">
+          <input type="checkbox" class="lrm-boss-check" value="voidEmperorEmpty" style="width:16px; height:16px; cursor:pointer;"> 허무의 황제 (HARD, 검술 공략만 구현됨·다른 직업 추후 추가)
+        </label>
 
         <button id="lrm-boss-ref-run-queue" style="width:100%; margin-bottom:6px; padding:6px; background:#2e7d32; color:#fff; border:none; border-radius:4px; cursor:pointer;">보스 도전</button>
         <button id="lrm-boss-ref-bg-test" style="width:100%; margin-bottom:6px; padding:6px; background:#1565c0; color:#fff; border:none; border-radius:4px; cursor:pointer;">백그라운드 진단 (60초)</button>
@@ -12959,6 +13019,206 @@
       state = M.getHpMpNumbers();
       push(`[딜 ${round}] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
       if (state.boss.hp.cur <= 0) break;
+    }
+
+    await M.closeClearPopupIfAny();
+    push('완료');
+    return log;
+  };
+
+  // --- 허무의 황제 (검술 잡, HARD 전용, 공허의 황제 리스킨) --------------------
+  // ⚠ 사용자 확인(2026-08): 허무의 황제는 공허의 황제(일반)를 재사용한
+  // HARD 보스라 봉인 대상 어빌리티 이름이 동일하다: 타락의가호, 공허의지배,
+  // 차원왜곡.
+  //
+  // 1) 봉인: "봉인" 프리셋, 5턴씩(최대 10턴, 재도전 포함), 내 HP 60% 미만
+  //    이면 회복.
+  // 2) 방깎: "방깎" 프리셋, 5턴씩 반복 - 전투 로그의 "보스: 방↓N"이 500
+  //    이상 될 때까지(HP 50% 미만이면 회복).
+  // 3) 마나흡수: "마나흡수" 프리셋, 5턴씩 반복 - 보스 마나 0 될 때까지
+  //    (HP 50% 미만이면 회복).
+  // 4) 정신일도 진입: "정신일도" 프리셋, 5턴 공격 1회. 최신 전투 로그에
+  //    "공속↓"(공격속도 감소, 내게 걸린 디버프)이 남아있으면 1턴씩 추가
+  //    공격해서 디버프가 로그에서 사라질 때까지 반복.
+  // 5) 극딜 사이클(보스 죽을 때까지 반복):
+  //    a. 내 물리 공격력이 1000 미만이면 정신일도로 1턴씩 추가 공격
+  //    b. 내 HP 100% / MP 85% 이상 될 때까지 회복 반복(극딜 직전 필수 조건)
+  //    c. "극딜" 프리셋 적용 → 공격 스크롤 사용(소진되면 생략하고 계속
+  //       진행) → 5턴 공격
+  //    d. 안 죽었으면 "정신일도"로 복귀해 사이클 반복
+  M.runVoidEmperorHardSword = async ({
+    requiredSeals = ['타락의가호', '공허의지배', '차원왜곡'],
+    sealRoundsPerAttempt = 2, // 5턴씩 2회 = 10턴
+    maxSealAttempts = 5,
+    sealLowHpThreshold = 0.6,
+    phaseLowHpThreshold = 0.5,
+    defenseDropThreshold = 500,
+    maxDefenseRounds = 30,
+    maxManaRounds = 30,
+    spiritFocusMinAttack = 1000,
+    maxAttackWaitTurns = 20,
+    maxDebuffWaitTurns = 20,
+    dealHpThreshold = 1.0,
+    dealMpThreshold = 0.85,
+    maxRecoverRoundsPerCycle = 10,
+    maxDealCycles = 60,
+  } = {}) => {
+    const bossLabel = BOSS_REGISTRY.voidEmperorEmpty.label;
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+
+    // 1단계: 봉인 (재도전 포함)
+    let sealed = new Set();
+    let sealSucceeded = false;
+    for (let attempt = 1; attempt <= maxSealAttempts; attempt++) {
+      M.throwIfStopped();
+      await M.applyBossPreset('봉인');
+      push(`[봉인 시도 ${attempt}] 프리셋 적용`);
+      sealed = M.parseSealedAbilities(requiredSeals);
+      let rounds = 0;
+      while (!requiredSeals.every((a) => sealed.has(a)) && rounds < sealRoundsPerAttempt) {
+        M.throwIfStopped();
+        const state = M.getHpMpNumbers();
+        const hpRatio = state.player.hp.cur / state.player.hp.max;
+        if (hpRatio < sealLowHpThreshold) {
+          await M.clickRecover();
+          push(`[봉인 시도 ${attempt}] 내HP ${Math.round(hpRatio * 100)}% -> 회복`);
+        } else {
+          await M.clickTurn(5);
+          rounds++;
+        }
+        for (const s of M.parseSealedAbilities(requiredSeals)) sealed.add(s);
+        push(`[봉인 시도 ${attempt}, ${rounds}회차] sealed=${[...sealed].join(',')}`);
+      }
+      if (requiredSeals.every((a) => sealed.has(a))) {
+        push('[봉인] 목표 어빌리티 전부 봉인 완료');
+        sealSucceeded = true;
+        break;
+      }
+      if (attempt === maxSealAttempts) break;
+      push(`[봉인 시도 ${attempt}] 10턴 내 봉인 실패 - 도전 포기 후 재도전`);
+      await M.abandonCurrentChallenge();
+      await M.enterBossBattle(bossLabel, { hard: true });
+    }
+    if (!sealSucceeded) {
+      throw new Error(`최대 ${maxSealAttempts}회 재도전에도 봉인(${requiredSeals.join(',')})에 실패했습니다.`);
+    }
+
+    // 2단계: 방깎
+    await M.applyBossPreset('방깎');
+    push('[방깎] 프리셋 적용');
+    let defDrop = M.getLatestBossDefenseDrop() || 0;
+    let defRounds = 0;
+    while (defDrop < defenseDropThreshold && defRounds < maxDefenseRounds) {
+      M.throwIfStopped();
+      const state = M.getHpMpNumbers();
+      const hpRatio = state.player.hp.cur / state.player.hp.max;
+      if (hpRatio < phaseLowHpThreshold) {
+        await M.clickRecover();
+        push(`[방깎] 내HP ${Math.round(hpRatio * 100)}% -> 회복`);
+      } else {
+        await M.clickTurn(5);
+        defRounds++;
+      }
+      defDrop = M.getLatestBossDefenseDrop() ?? defDrop;
+      push(`[방깎 ${defRounds}회차] 방어력감소=${defDrop}`);
+    }
+    if (defDrop < defenseDropThreshold) {
+      push(`[방깎] 경고: 최대 시도 내 방어력감소 ${defenseDropThreshold} 미도달(현재 ${defDrop}), 다음 단계로 진행`);
+    }
+
+    // 3단계: 마나흡수
+    await M.applyBossPreset('마나흡수');
+    push('[마나흡수] 프리셋 적용');
+    let state = M.getHpMpNumbers();
+    let manaRounds = 0;
+    while (state.boss.mp.cur > 0 && manaRounds < maxManaRounds) {
+      M.throwIfStopped();
+      const hpRatio = state.player.hp.cur / state.player.hp.max;
+      if (hpRatio < phaseLowHpThreshold) {
+        await M.clickRecover();
+        push(`[마나흡수] 내HP ${Math.round(hpRatio * 100)}% -> 회복`);
+      } else {
+        await M.clickTurn(5);
+        manaRounds++;
+      }
+      state = M.getHpMpNumbers();
+      push(`[마나흡수 ${manaRounds}회차] bossMp=${state.boss.mp.cur}`);
+    }
+    if (state.boss.mp.cur > 0) {
+      push('[마나흡수] 경고: 최대 시도 내 보스 마나 0 미도달, 다음 단계로 진행');
+    }
+
+    // 4단계: 정신일도 진입 - 5턴 + 공속 디버프 해제 대기
+    await M.applyBossPreset('정신일도');
+    push('[정신일도] 프리셋 적용');
+    await M.clickTurn(5);
+    push('[정신일도] 5턴 공격 완료');
+    let debuffWaitTurns = 0;
+    while (M.isMyAttackSpeedDebuffActive() && debuffWaitTurns < maxDebuffWaitTurns) {
+      M.throwIfStopped();
+      await M.clickTurn(1);
+      debuffWaitTurns++;
+      push(`[정신일도] 공속 감소 디버프 잔존 - 1턴 추가 공격 (${debuffWaitTurns})`);
+    }
+    push('[정신일도] 공속 감소 디버프 해제 확인');
+
+    await M.ensureCharacterCardExpanded();
+
+    // 5단계: 극딜 사이클 반복
+    let scrollExhausted = false;
+    let dealCycle = 0;
+    state = M.getHpMpNumbers();
+    while (state.boss.hp.cur > 0 && dealCycle < maxDealCycles) {
+      M.throwIfStopped();
+      dealCycle++;
+
+      // 5-1. 공격력 1000 이상 될 때까지 1턴씩 (정신일도 프리셋 유지 상태)
+      let atkWaitTurns = 0;
+      let myAtk = M.getMyPhysicalAttack();
+      while (myAtk !== null && myAtk < spiritFocusMinAttack && atkWaitTurns < maxAttackWaitTurns) {
+        M.throwIfStopped();
+        await M.clickTurn(1);
+        atkWaitTurns++;
+        myAtk = M.getMyPhysicalAttack();
+        push(`[극딜 사이클 ${dealCycle}] 공격력 ${myAtk}(목표 ${spiritFocusMinAttack}) - 1턴 추가 (${atkWaitTurns})`);
+      }
+
+      // 5-2. HP 100% / MP 85% 이상 될 때까지 회복 (극딜 직전 필수 조건)
+      let recoverRounds = 0;
+      state = M.getHpMpNumbers();
+      let hpRatio = state.player.hp.cur / state.player.hp.max;
+      let mpRatio = state.player.mp.cur / state.player.mp.max;
+      while ((hpRatio < dealHpThreshold || mpRatio < dealMpThreshold) && recoverRounds < maxRecoverRoundsPerCycle) {
+        M.throwIfStopped();
+        await M.clickRecover();
+        recoverRounds++;
+        state = M.getHpMpNumbers();
+        hpRatio = state.player.hp.cur / state.player.hp.max;
+        mpRatio = state.player.mp.cur / state.player.mp.max;
+        push(`[극딜 사이클 ${dealCycle}] 회복 ${recoverRounds}회차 - HP ${Math.round(hpRatio * 100)}% MP ${Math.round(mpRatio * 100)}%`);
+      }
+
+      // 5-3. 극딜 프리셋 + 스크롤(소진되면 생략) + 5턴
+      await M.applyBossPreset('극딜');
+      push(`[극딜 사이클 ${dealCycle}] 프리셋 적용`);
+      if (!scrollExhausted) {
+        try {
+          await M.useScrolls(['공격']);
+          push(`[극딜 사이클 ${dealCycle}] 공격 스크롤 사용`);
+        } catch (e) {
+          scrollExhausted = true;
+          push(`[극딜 사이클 ${dealCycle}] 스크롤 사용 실패(소진 추정, 이후 스크롤 없이 진행): ${e.message}`);
+        }
+      }
+      await M.clickTurn(5);
+      state = M.getHpMpNumbers();
+      push(`[극딜 사이클 ${dealCycle}] bossHp=${state.boss.hp.cur}`);
+      if (state.boss.hp.cur <= 0) break;
+
+      // 5-4. 다음 사이클을 위해 정신일도로 복귀
+      await M.applyBossPreset('정신일도');
+      push(`[극딜 사이클 ${dealCycle}] 다음 사이클 위해 정신일도 프리셋 복귀`);
     }
 
     await M.closeClearPopupIfAny();
