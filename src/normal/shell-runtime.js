@@ -158,13 +158,14 @@
     raremap: {},
     dungeon: {},
     arena: {},
+    preseason: {},
     deepdungeon: {},
     guildboss: {},
   };
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
-    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'deepdungeon'].forEach((id) => {
+    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'preseason', 'deepdungeon'].forEach((id) => {
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
@@ -177,7 +178,7 @@
       const cycleLabel =
         id === 'dungeon'
           ? `오늘 클리어 ${mod.cycleCount}개`
-          : id === 'arena'
+          : id === 'arena' || id === 'preseason'
           ? `오늘 전투 ${mod.cycleCount}/${mod.config.targetBattles}회`
           : id === 'deepdungeon'
           ? `던전의 주인 도전 ${mod.cycleCount}회`
@@ -316,6 +317,7 @@
     buildRaremapTab(tabContents.raremap);
     buildDungeonTab(tabContents.dungeon);
     buildArenaTab(tabContents.arena);
+    buildPreseasonTab(tabContents.preseason);
     buildDeepDungeonTab(tabContents.deepdungeon);
     buildGuildBossTab(tabContents.guildboss);
     buildBossTab(tabContents.boss);

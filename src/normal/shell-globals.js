@@ -8,6 +8,7 @@
     raremap: '레어맵',
     dungeon: '던전',
     arena: '아레나',
+    preseason: '프리시즌',
     deepdungeon: '심층던전',
     guildboss: '길드보스',
     boss: '보스',

@@ -40,6 +40,8 @@ OUT="lanis.user.js"
   echo ""
   cat src/normal/arena.js
   echo ""
+  cat src/normal/preseason.js
+  echo ""
   cat src/normal/rejob.js
   echo ""
   cat src/normal/autohunt.js
