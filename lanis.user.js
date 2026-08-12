@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.80-stable
+// @version      1.13.81-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -258,6 +258,27 @@
 
   Core.resolveClickable = function (target) {
     return typeof target === 'function' ? target() : target;
+  };
+
+  // ⚠ 실전 확인(2026-08): 인벤토리 카테고리 필터(MUI ToggleButtonGroup)
+  // 버튼은 프로그래밍적 el.click()에 신뢰할 수 없게 반응한다 - 통제된
+  // 테스트에서 el.click()을 여러 번 호출해도 aria-pressed가 전혀 안
+  // 바뀌었는데, 좌표 기반 실제 클릭이나 이 함수처럼 마우스 이벤트
+  // 시퀀스(pointerdown→mousedown→pointerup→mouseup→click)를 직접
+  // 디스패치하면 즉시 정상 반영됨을 확인했다. 이게 원인이 되어 "보상"
+  // 카테고리만 켜려다 "연금"을 끄지 못하고 함께 켜진 채로 남는 사고가
+  // 있었다(사용자가 실전에서 직접 목격). el.click()이 불안정한 컴포넌트
+  // (특히 MUI ToggleButton류)에 대해 이 함수를 사용한다.
+  Core.dispatchRealClick = function (el) {
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+    el.dispatchEvent(new PointerEvent('pointerdown', opts));
+    el.dispatchEvent(new MouseEvent('mousedown', opts));
+    el.dispatchEvent(new PointerEvent('pointerup', opts));
+    el.dispatchEvent(new MouseEvent('mouseup', opts));
+    el.dispatchEvent(new MouseEvent('click', opts));
   };
 
   Core.isElementVisible = function (el) {
@@ -625,15 +646,23 @@
   Core.selectOnlyInventoryCategory = async function (categoryLabel, moduleId) {
     const toggleLabels = ['연금', '책', '보상', '상자', '지도', '기타'];
     for (const label of toggleLabels) {
-      const btn = Core.findButtonByText(label);
-      if (!btn) continue;
-      const pressed = btn.getAttribute('aria-pressed') === 'true';
       const shouldBePressed = label === categoryLabel;
-      if (pressed !== shouldBePressed) {
-        if (!(await Core.safeClick(() => Core.findButtonByText(label), {
-          beforeMin: 300, beforeMax: 600, afterMin: 400, afterMax: 700,
-        }))) {
-          throw new Error(`인벤토리 필터 "${label}" 클릭에 실패했습니다.`);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const btn = Core.findButtonByText(label);
+        if (!btn) break;
+        const pressed = btn.getAttribute('aria-pressed') === 'true';
+        if (pressed === shouldBePressed) break;
+        await Core.humanDelay(300, 600);
+        // ⚠ 실전 확인(2026-08): 이 버튼(MUI ToggleButtonGroup)은 일반
+        // el.click()(Core.safeClick 내부)에 반응 안 할 때가 있다 - 반드시
+        // 실제 마우스 이벤트 시퀀스로 클릭하고, 매번 실제로 반영됐는지
+        // 재확인해서 안 됐으면 재시도한다.
+        Core.dispatchRealClick(btn);
+        await Core.humanDelay(400, 700);
+        const nowPressed = Core.findButtonByText(label)?.getAttribute('aria-pressed') === 'true';
+        if (nowPressed === shouldBePressed) break;
+        if (attempt === 2) {
+          throw new Error(`인벤토리 필터 "${label}" 상태 변경에 실패했습니다(3회 시도).`);
         }
       }
     }
