@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.85-stable
+// @version      1.13.86-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -11766,7 +11766,12 @@
   M.ensureElementForBoss = async (bossLabel) => {
     M.throwIfStopped();
     const startHistoryLength = history.length;
-    const targetElement = M.getBossElementFromList(bossLabel);
+    // ⚠ 버그 수정(2026-08, 실전 확인): 예전엔 getBossElementFromList를
+    // 단발성으로 한 번만 조회해서, 목록 페이지가 아직 렌더링 중이면(예:
+    // HARD 탭 전환 직후) "속성을 읽지 못함" 에러로 큐 전체가 멈췄다. SPA
+    // 렌더 타이밍 문제는 다른 곳(isInBattleScreen 등)처럼 폴링으로
+    // 대응해야 한다.
+    const targetElement = await M.waitFor(() => M.getBossElementFromList(bossLabel), 8000, 300);
     if (!targetElement) throw new Error(`"${bossLabel}"의 오늘 속성을 읽지 못함`);
     // ⚠ 사용자 확인(2026-08): 캐시 키에 bossLabel까지 포함돼 있어서, 오늘
     // 선택한 여러 보스가 전부 같은 속성(예: 전부 "별")이어도 보스가 바뀌면

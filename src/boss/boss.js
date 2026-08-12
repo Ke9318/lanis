@@ -2001,7 +2001,12 @@
   M.ensureElementForBoss = async (bossLabel) => {
     M.throwIfStopped();
     const startHistoryLength = history.length;
-    const targetElement = M.getBossElementFromList(bossLabel);
+    // ⚠ 버그 수정(2026-08, 실전 확인): 예전엔 getBossElementFromList를
+    // 단발성으로 한 번만 조회해서, 목록 페이지가 아직 렌더링 중이면(예:
+    // HARD 탭 전환 직후) "속성을 읽지 못함" 에러로 큐 전체가 멈췄다. SPA
+    // 렌더 타이밍 문제는 다른 곳(isInBattleScreen 등)처럼 폴링으로
+    // 대응해야 한다.
+    const targetElement = await M.waitFor(() => M.getBossElementFromList(bossLabel), 8000, 300);
     if (!targetElement) throw new Error(`"${bossLabel}"의 오늘 속성을 읽지 못함`);
     // ⚠ 사용자 확인(2026-08): 캐시 키에 bossLabel까지 포함돼 있어서, 오늘
     // 선택한 여러 보스가 전부 같은 속성(예: 전부 "별")이어도 보스가 바뀌면
