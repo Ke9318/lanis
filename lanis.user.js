@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.75-stable
+// @version      1.13.76-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -1906,7 +1906,7 @@
   // 사용자가 이 탭에서 직접 시작했을 때만 sessionStorage 허가가 생기며,
   // 정지/탭 종료 시 사라진다.
   const DAILY_AUTH_KEY = 'lrm-daily-explicit-run-auth';
-  const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'boss', 'autohunt', 'deepdungeon'];
+  const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'preseason', 'boss', 'autohunt', 'deepdungeon'];
   // ⚠ 사용자 요청(2026-08): 심층던전/아레나 주간 보상은 그 매크로를 돌리지
   // 않아도 "일일" 실행 시 최우선으로 받아야 하고, 일주일에 한 번만 확인하면
   // 된다. Core.getKstMondayWeekId()가 반환하는 값(매주 월요일 00:00 KST마다
@@ -1920,6 +1920,7 @@
     attendance: '출석체크',
     dungeon: '던전',
     arena: '아레나',
+    preseason: '프리시즌',
     boss: '보스',
     autohunt: '자동사냥',
     deepdungeon: '심층던전',
@@ -2550,6 +2551,17 @@
       }
       return `오늘 아레나 ${count}/${Modules.arena.config.targetBattles}회 확인`;
     }
+    // ⚠ 사용자 요청(2026-08): 프리시즌 기간엔 정규 아레나와 별개로 평일에도
+    // 돌려야 한다. 화면/버튼 구조가 동일해 Modules.arena.readTodayBattleCount
+    // (this 안 쓰는 순수 함수)를 그대로 재사용해 검증한다.
+    if (step === 'preseason') {
+      await this.runCoreModule('preseason');
+      const count = Modules.arena.readTodayBattleCount();
+      if (count === null || count < Modules.preseason.config.targetBattles) {
+        throw new Error(`프리시즌 아레나 목표 횟수 확인 실패: ${count ?? '읽기 실패'}/${Modules.preseason.config.targetBattles}`);
+      }
+      return `오늘 프리시즌 아레나 ${count}/${Modules.preseason.config.targetBattles}회 확인`;
+    }
     if (step === 'boss') {
       const boss = await Core.waitFor(() => window.__bossMacro || null, 10000, 250, null);
       if (!boss || typeof boss.runDailySelectedBosses !== 'function') {
@@ -2678,7 +2690,7 @@
     const steps = [
       'weeklyRewards',
       'attendance',
-      ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena']
+      ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena', 'preseason']
         .filter((key) => mod.config[key]),
       'dailyQuests',
       ...(Modules.arena.isWeekend() ? ['weeklyQuests'] : []),
@@ -2776,7 +2788,7 @@
     Core.loadModuleConfig('daily', DAILY_CONFIG_KEYS);
 
     const intro = document.createElement('div');
-    intro.textContent = '출석체크를 먼저 수행한 뒤 체크한 작업을 던전 → 보스 → 자동사냥 → 심층던전 → 아레나 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
+    intro.textContent = '출석체크를 먼저 수행한 뒤 체크한 작업을 던전 → 보스 → 자동사냥 → 심층던전 → 아레나 → 프리시즌 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
     intro.style.cssText = 'color:#ccc; font-size:11px; line-height:1.5; margin-bottom:8px;';
     container.appendChild(intro);
 
@@ -2787,6 +2799,7 @@
       ['autohunt', '자동사냥 — 설정한 행동력 제한까지'],
       ['deepdungeon', '심층던전 — 주간 누적 피해 100만까지'],
       ['arena', '아레나 — 설정한 오늘 총 전투 횟수까지'],
+      ['preseason', '프리시즌 — 요일 제약 없이 설정한 오늘 총 전투 횟수까지'],
     ].forEach(([key, text]) => {
       const row = document.createElement('label');
       row.style.cssText = 'display:flex; align-items:flex-start; gap:7px; margin:7px 0; cursor:pointer;';
