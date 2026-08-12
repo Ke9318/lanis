@@ -1883,3 +1883,11 @@
     return `${y}-${m}-${d}`;
   };
 
+  // ⚠ 사용자 요청(2026-08): 길드 보스(히드라)는 화·목에 소환되고, 개인
+  // 보상은 다음날(수·금)에 받아야 한다. KST(UTC+9) 기준 요일(0=일 ~ 6=토)을
+  // 반환한다.
+  Core.getKstDayOfWeek = function () {
+    const kst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+    return kst.getUTCDay();
+  };
+

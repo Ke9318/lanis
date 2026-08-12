@@ -25,8 +25,10 @@
   // 바뀜)을 여기에 저장해, 이미 확인한 주라면 API 호출조차 다시 하지 않는다.
   const DD_REWARD_WEEK_KEY = 'lrm-deepdungeon-reward-week-done';
   const ARENA_REWARD_WEEK_KEY = 'lrm-arena-reward-week-done';
+  const GUILD_BOSS_REWARD_DAY_KEY = 'lrm-guildboss-reward-day-done';
   const DAILY_STEP_LABELS = {
     weeklyRewards: '주간 보상(심층던전+아레나)',
+    guildBossReward: '길드 보스 보상(수·금)',
     dailyQuests: '일간 퀘스트',
     weeklyQuests: '주간 퀘스트',
     attendance: '출석체크',
@@ -617,9 +619,48 @@
     return results.join(' / ');
   };
 
+  // ⚠ 사용자 요청(2026-08): 길드 보스(히드라)는 화·목에 길드마스터가
+  // 소환하고, 개인 보상은 레이드가 끝난 뒤 그 화면(/guild/boss)에서
+  // "개인 보상 수령하기"로 받는다. 화·목 다음날인 수·금에 확인해야 한다
+  // (실전 확인: 레이드 종료 후에도 결과·보상 화면은 계속 접근 가능하고,
+  // 수령하면 확인창 없이 즉시 처리되며 버튼이 "개인 보상 수령 완료"로
+  // 바뀜). 하루에 여러 번 일일을 돌려도 같은 날 재확인 안 하도록 KST
+  // 날짜로 캐시한다.
+  Modules.daily.claimGuildBossRewardIfDue = async function () {
+    const kstDay = Core.getKstDayOfWeek();
+    if (kstDay !== 3 && kstDay !== 5) {
+      return '길드 보스 보상: 오늘은 확인 요일이 아님(수·금만 확인)';
+    }
+    const todayKey = Modules.arena.todayKey();
+    if (localStorage.getItem(GUILD_BOSS_REWARD_DAY_KEY) === todayKey) {
+      return '길드 보스 보상: 오늘 이미 확인함';
+    }
+
+    try {
+      await Modules.guildboss.goToGuildBossScreen();
+    } catch (e) {
+      Core.log('daily', `⚠ 길드 보스 화면 진입 실패(이번 주 소환이 없었을 수 있음): ${e.message}`);
+      return '길드 보스 보상: 화면 진입 실패(다음 실행 시 재시도)';
+    }
+
+    const claimBtn = Core.findButtonByText('개인 보상 수령하기');
+    if (!claimBtn) {
+      localStorage.setItem(GUILD_BOSS_REWARD_DAY_KEY, todayKey);
+      return '길드 보스 개인 보상: 받을 것 없음(이미 수령했거나 보상 없음)';
+    }
+    if (!(await Core.safeClick(() => claimBtn, { beforeMin: 500, beforeMax: 900, afterMin: 1000, afterMax: 1500 }))) {
+      return '길드 보스 보상: 수령 버튼 클릭 실패(다음 실행 시 재시도)';
+    }
+    localStorage.setItem(GUILD_BOSS_REWARD_DAY_KEY, todayKey);
+    return '길드 보스 개인 보상 수령 완료';
+  };
+
   Modules.daily.runStep = async function (step) {
     if (step === 'weeklyRewards') {
       return await this.claimWeeklyRewardsIfDue();
+    }
+    if (step === 'guildBossReward') {
+      return await this.claimGuildBossRewardIfDue();
     }
     if (step === 'dailyQuests') {
       // "장인 정신"(아이템 조합), "대장간 이용"(수리) 구현됨. 낚시는 사용자
@@ -801,6 +842,7 @@
     // 실행한다(매일). 주간 퀘스트(weeklyQuests)는 토·일에만 실행한다.
     const steps = [
       'weeklyRewards',
+      'guildBossReward',
       'attendance',
       ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena', 'preseason']
         .filter((key) => mod.config[key]),
