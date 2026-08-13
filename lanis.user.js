@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.86-stable
+// @version      1.13.87-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -3376,6 +3376,87 @@
     }
   };
 
+  // ⚠ 사용자 요청(2026-08): 여름 이벤트 한정 "햇살 토큰"을 인벤토리에서
+  // 찾아 "사용 가능 상태"로 전환하는 일회성 액션. 프리시즌 탭에 묶어두고
+  // 프리시즌이 끝나면(여름 이벤트도 같이 끝날 것으로 예상) 이 로직도 함께
+  // 폐기한다. 자동 반복 매크로가 아니라 버튼 클릭 시 즉시 실행되는 1회성
+  // 액션이다.
+  //
+  // 실전 확인: "사용" 클릭 시 확인창이 뜨고, 수량 입력칸은 이미 그 아이템의
+  // 1회 사용 최대치(실전 확인: 50개)로 자동 채워져 있다(수정 불필요, 손대면
+  // 안 됨 - 보상 상자 사용 로직에서 겪은 것과 동일한 함정). "사용" 확정하면
+  // "햇살 토큰 N개를 사용 가능 상태로 전환했습니다"로 즉시 처리되고, 그
+  // 행이 목록에서 갱신된다(수량이 줄거나 완전히 사라짐). 보유 수량이
+  // 많으면(예: 547개) 여러 번 반복해야 다 소진된다.
+  Modules.preseason.useSunshineTokens = async function () {
+    Core.log('preseason', '"햇살 토큰" 사용 시작');
+    await Core.clickNavMenuExact('캐릭', '인벤토리');
+    const onInventoryPage = await Core.waitFor(() => location.pathname.startsWith('/inventory'), 15000, 300);
+    if (!onInventoryPage) throw new Error('인벤토리 화면 진입을 확인하지 못했습니다.');
+    await Core.humanDelay(500, 900);
+
+    if (!(await Core.safeClick(() => Core.findButtonByText('소모품'), { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 }))) {
+      throw new Error('"소모품" 탭 클릭에 실패했습니다.');
+    }
+
+    const findTokenRow = () => Core.gameElements('tr').find((tr) => tr.textContent.includes('햇살 토큰') && Core.isElementVisible(tr));
+
+    let usedCycles = 0;
+    const maxCycles = 30; // 1회당 최대 50개 * 30회 = 최대 1500개까지 대응
+    for (; usedCycles < maxCycles; usedCycles++) {
+      // 이전 사용으로 목록/페이지 구성이 바뀔 수 있으니 매번 1페이지로 복귀 후 탐색
+      const firstPageBtn = Core.gameElements('button').find(
+        (b) => b.getAttribute('aria-label') === 'Go to first page' && !b.disabled && Core.isElementVisible(b)
+      );
+      if (firstPageBtn) {
+        firstPageBtn.click();
+        await Core.humanDelay(300, 500);
+      }
+
+      let row = findTokenRow();
+      if (!row) {
+        for (let page = 0; page < 20 && !row; page++) {
+          const nextPageBtn = Core.gameElements('button').find(
+            (b) => b.getAttribute('aria-label') === 'Go to next page' && !b.disabled && Core.isElementVisible(b)
+          );
+          if (!nextPageBtn) break;
+          nextPageBtn.click();
+          await Core.humanDelay(400, 700);
+          row = findTokenRow();
+        }
+      }
+      if (!row) break; // 더 이상 없음 = 소진 완료
+
+      const useBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
+      if (!useBtn) throw new Error('"햇살 토큰" 사용 버튼을 찾지 못했습니다.');
+      if (!(await Core.safeClick(() => useBtn, { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1000 }))) {
+        throw new Error('"햇살 토큰" 사용 버튼 클릭에 실패했습니다.');
+      }
+
+      const dialog = await Core.waitFor(
+        () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d) && d.textContent.includes('햇살 토큰을(를) 사용하시겠습니까')) || null,
+        6000,
+        250
+      );
+      if (!dialog) throw new Error('"햇살 토큰" 사용 확인창을 찾지 못했습니다.');
+
+      // ⚠ 수량 입력칸은 이미 1회 사용 최대치로 채워져 있다 - 절대 건드리지 않는다.
+      const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
+      if (!confirmBtn) throw new Error('"햇살 토큰" 사용 확인 버튼을 찾지 못했습니다.');
+      if (confirmBtn.disabled) throw new Error('"햇살 토큰" 사용 확인 버튼이 비활성화 상태입니다.');
+      if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 500, beforeMax: 900, afterMin: 900, afterMax: 1400 }))) {
+        throw new Error('"햇살 토큰" 사용을 확정하지 못했습니다.');
+      }
+      Core.log('preseason', `"햇살 토큰" 사용 ${usedCycles + 1}회차 완료`);
+    }
+
+    if (usedCycles === 0) {
+      Core.log('preseason', '"햇살 토큰"이 없거나 이미 전부 사용했습니다.');
+    } else {
+      Core.log('preseason', `"햇살 토큰" 사용 완료 (총 ${usedCycles}회 반복)`);
+    }
+  };
+
   function buildPreseasonTab(container) {
     const mod = Modules.preseason;
     const refs = UIRefs.preseason;
@@ -3429,6 +3510,35 @@
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
     refs.inputs = [countInput];
+
+    // ⚠ 사용자 요청(2026-08): "햇살 토큰"(여름 이벤트 한정) 일괄 사용
+    // 버튼. 자동 반복 매크로가 아니라 눌렀을 때 그 자리에서 바로 실행되는
+    // 1회성 액션이라 시작/정지 상태와 무관하게 별도로 둔다.
+    const tokenBtnRow = document.createElement('div');
+    tokenBtnRow.style.cssText = 'margin-top:10px; padding-top:10px; border-top:1px solid #333;';
+    const tokenLabel = document.createElement('div');
+    tokenLabel.textContent = '햇살 토큰 일괄 사용 (여름 이벤트 한정, 이벤트 종료 시 같이 제거될 기능)';
+    tokenLabel.style.cssText = 'font-size:11px; color:#ccc; margin-bottom:5px;';
+    const tokenBtn = document.createElement('button');
+    tokenBtn.textContent = '햇살 토큰 사용';
+    tokenBtn.style.cssText = btnStyle('#8e5cf7');
+    const tokenStatusEl = document.createElement('span');
+    tokenStatusEl.textContent = '';
+    tokenStatusEl.style.cssText = 'margin-left:8px; font-size:11px; color:#aaa;';
+    tokenBtn.addEventListener('click', async () => {
+      tokenBtn.disabled = true;
+      tokenStatusEl.textContent = '사용 중...';
+      try {
+        await Modules.preseason.useSunshineTokens();
+        tokenStatusEl.textContent = '완료';
+      } catch (e) {
+        tokenStatusEl.textContent = '실패: ' + e.message;
+        Core.log('preseason', `⚠ 햇살 토큰 사용 실패: ${e.message}`);
+      }
+      tokenBtn.disabled = false;
+    });
+    tokenBtnRow.append(tokenLabel, tokenBtn, tokenStatusEl);
+    container.appendChild(tokenBtnRow);
   }
 
   // -------------------------- 모듈 1: 재전직 --------------------------
