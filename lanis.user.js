@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.89-stable
+// @version      1.13.90-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -13392,17 +13392,11 @@
       throw new Error(`최대 ${maxSealAttempts}회 재도전에도 봉인(${requiredSeals.join(',')})에 실패했습니다.`);
     }
 
-    // ⚠ 사용자 확인(2026-08): 토요일은 화면에 표시되는 오늘 속성을 읽지
-    // 않고 항상 "빛"으로 고정한다(목요일은 기존처럼 화면에서 읽음).
-    const kstDay = M.getKstDayOfWeek();
-    let element;
-    if (kstDay === 6) {
-      element = '빛';
-      push('[속성] 토요일 - "빛"으로 고정');
-    } else {
-      element = M.getBossElementInBattle(bossLabel);
-      if (!element) throw new Error('보스 속성을 화면에서 확인하지 못했습니다.');
-    }
+    // ⚠ 사용자 확인(2026-08): 토요일은 보스의 실제 오늘 속성 자체가 항상
+    // "빛"으로 고정되어 있다(게임 자체의 요일별 로테이션). 그래서 목요일과
+    // 동일하게 화면에서 그대로 읽으면 되고, 별도 하드코딩은 불필요하다.
+    const element = M.getBossElementInBattle(bossLabel);
+    if (!element) throw new Error('보스 속성을 화면에서 확인하지 못했습니다.');
 
     // 2단계: 방깎
     const defBreakPresetName = `${element} 방깎`;
