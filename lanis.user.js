@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.87-stable
+// @version      1.13.88-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -12663,12 +12663,12 @@
       // 과제만 채우던 걸, 조건이 맞으면 실제 정화자 전투로 대체한다 - 이러면
       // 일일 도전과제도 채워지고 실제 보스 처치·보상도 같이 얻는다. 조건:
       // (0) 사용자가 체크박스에서 정화자를 선택해뒀음, (1) 오늘 요일에 구현된
-      // 공략 패턴이 있음(월/화/일만 - 목/토 방깎 패턴은 아직 미구현이라 여기
-      // 넣지 않음, 나중에 추가되면 이 배열만 늘리면 됨), (2) 현재 선택된
-      // 직업에 정화자 로직이 등록돼 있음(현재 검술만), (3) 오늘 정화자를
-      // 아직 안 잡았음. 넷 다 맞으면 필러 대신 실전 투입한다.
+      // 공략 패턴이 있음(월/화/일 봉인즉시딜 패턴 + 목/토 방깎 패턴 둘 다
+      // 구현됨, 수/금은 여전히 미구현), (2) 현재 선택된 직업에 정화자
+      // 로직이 등록돼 있음(현재 검술만), (3) 오늘 정화자를 아직 안 잡았음.
+      // 넷 다 맞으면 필러 대신 실전 투입한다.
       const purifierUserSelected = loadSelectedBosses().includes('corruptedPurifier');
-      const IMPLEMENTED_PURIFIER_DAYS = [0, 1, 2]; // KST getUTCDay 기준: 일=0, 월=1, 화=2
+      const IMPLEMENTED_PURIFIER_DAYS = [0, 1, 2, 4, 6]; // KST getUTCDay 기준: 일=0,월=1,화=2,목=4,토=6
       const todayKstDay = M.getKstDayOfWeek();
       let purifierRunName = null;
       try {
@@ -13228,7 +13228,12 @@
   //    이상이면 공격 스크롤(5턴 지속) 1개 사용. 스크롤 효과가 끝나는
   //    5공격턴마다 다시 방↓400 조건을 확인해 반복 사용(스크롤 소진되면
   //    이후로는 그냥 공격만 반복). 보스 죽을 때까지 반복.
-  M.runCorruptedPurifierSword = async ({
+  // ⚠ 사용자 확인(2026-08): 월/화/일 패턴. 봉인 완료 후 바로 오늘 속성
+  // 딜 프리셋으로 전환해 1턴씩 공격(방↓400 이상일 때마다 공격 스크롤
+  // 재사용). 목/토 패턴(방깎 단계가 별도로 있음)과는 완전히 다른 흐름이라
+  // 별도 함수로 유지하고, M.runCorruptedPurifierSword가 요일을 보고 이
+  // 함수와 목/토 패턴 중 하나로 위임한다.
+  M.runCorruptedPurifierSwordSealPattern = async ({
     requiredSeals = ['불굴', '엔드 블로킹'],
     sealRoundsPerAttempt = 2, // 5턴씩 2회 = 10턴
     maxSealAttempts = 5,
@@ -13324,6 +13329,146 @@
     await M.closeClearPopupIfAny();
     push('완료');
     return log;
+  };
+
+  // ⚠ 사용자 확인(2026-08): 목/토 패턴. 봉인은 월/화/일과 완전히 동일
+  // (불굴+엔드 블로킹, HP 65% 이하면 회복). 봉인 완료 후 "{오늘속성} 방깎"
+  // 프리셋으로 전환해 5턴씩 반복(HP 65% 이하면 회복) - 전투 로그의
+  // "방↓N"이 400 이상 될 때까지. 그 다음 "{오늘속성} 딜" 프리셋으로 전환해
+  // 공격 스크롤을 매번 사용하고 5턴 공격 반복(HP<70% 또는 MP<85%면
+  // 회복) - 스크롤이 소진되면 스크롤 없이 5턴 공격만 계속 반복.
+  // 실전 검증(2026-08, 바람 속성): 방깎 2사이클 만에 방↓540(400 이상)
+  // 도달, 딜 2사이클로 보스 HP 100%→52%까지 감소 확인.
+  M.runCorruptedPurifierSwordDefenseBreakPattern = async ({
+    requiredSeals = ['불굴', '엔드 블로킹'],
+    sealRoundsPerAttempt = 2, // 5턴씩 2회 = 10턴
+    maxSealAttempts = 5,
+    sealLowHpThreshold = 0.65,
+    defBreakLowHpThreshold = 0.65,
+    defenseDropThreshold = 400,
+    maxDefRounds = 30,
+    dealHpThreshold = 0.7,
+    dealMpThreshold = 0.85,
+    maxDealRounds = 200,
+  } = {}) => {
+    const bossLabel = BOSS_REGISTRY.corruptedPurifier.label;
+    const log = [];
+    const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+
+    // 1단계: 봉인 (월/화/일 패턴과 완전히 동일)
+    let sealed = new Set();
+    let sealSucceeded = false;
+    for (let attempt = 1; attempt <= maxSealAttempts; attempt++) {
+      M.throwIfStopped();
+      await M.applyBossPreset('봉인');
+      push(`[봉인 시도 ${attempt}] 프리셋 적용`);
+      sealed = M.parseSealedAbilities(requiredSeals);
+      let rounds = 0;
+      while (!requiredSeals.every((a) => sealed.has(a)) && rounds < sealRoundsPerAttempt) {
+        M.throwIfStopped();
+        const state = M.getHpMpNumbers();
+        const hpRatio = state.player.hp.cur / state.player.hp.max;
+        if (hpRatio < sealLowHpThreshold) {
+          await M.clickRecover();
+          push(`[봉인 시도 ${attempt}] 내HP ${Math.round(hpRatio * 100)}% -> 회복`);
+        } else {
+          await M.clickTurn(5);
+          rounds++;
+        }
+        for (const s of M.parseSealedAbilities(requiredSeals)) sealed.add(s);
+        push(`[봉인 시도 ${attempt}, ${rounds}회차] sealed=${[...sealed].join(',')}`);
+      }
+      if (requiredSeals.every((a) => sealed.has(a))) {
+        push('[봉인] 목표 어빌리티 전부 봉인 완료');
+        sealSucceeded = true;
+        break;
+      }
+      if (attempt === maxSealAttempts) break;
+      push(`[봉인 시도 ${attempt}] 10턴 내 봉인 실패 - 도전 포기 후 재도전`);
+      await M.abandonCurrentChallenge();
+      await M.enterBossBattle(bossLabel, { hard: true });
+    }
+    if (!sealSucceeded) {
+      throw new Error(`최대 ${maxSealAttempts}회 재도전에도 봉인(${requiredSeals.join(',')})에 실패했습니다.`);
+    }
+
+    // 오늘 보스 속성 확인 (방깎/딜 프리셋 이름에 필요)
+    const element = M.getBossElementInBattle(bossLabel);
+    if (!element) throw new Error('보스 속성을 화면에서 확인하지 못했습니다.');
+
+    // 2단계: 방깎
+    const defBreakPresetName = `${element} 방깎`;
+    await M.applyBossPreset(defBreakPresetName);
+    push(`[방깎] 프리셋 "${defBreakPresetName}" 적용`);
+    let defDrop = M.getLatestBossDefenseDrop() || 0;
+    let defRounds = 0;
+    while (defDrop < defenseDropThreshold && defRounds < maxDefRounds) {
+      M.throwIfStopped();
+      const state = M.getHpMpNumbers();
+      const hpRatio = state.player.hp.cur / state.player.hp.max;
+      if (hpRatio < defBreakLowHpThreshold) {
+        await M.clickRecover();
+        push(`[방깎] 내HP ${Math.round(hpRatio * 100)}% -> 회복`);
+      } else {
+        await M.clickTurn(5);
+        defRounds++;
+      }
+      defDrop = M.getLatestBossDefenseDrop() ?? defDrop;
+      push(`[방깎 ${defRounds}회차] 방어력감소=${defDrop}`);
+    }
+    if (defDrop < defenseDropThreshold) {
+      push(`[방깎] 경고: 최대 시도 내 방어력감소 ${defenseDropThreshold} 미도달(현재 ${defDrop}), 다음 단계로 진행`);
+    }
+
+    // 3단계: 딜 (매번 공격 스크롤 사용 + 5턴, 소진되면 스크롤 없이 5턴만)
+    const dealPresetName = `${element} 딜`;
+    await M.applyBossPreset(dealPresetName);
+    push(`[딜] 프리셋 "${dealPresetName}" 적용`);
+
+    let scrollExhausted = false;
+    let round = 0;
+    let state = M.getHpMpNumbers();
+    while (state.boss.hp.cur > 0 && round < maxDealRounds) {
+      M.throwIfStopped();
+      round++;
+      const hpRatio = state.player.hp.cur / state.player.hp.max;
+      const mpRatio = state.player.mp.cur / state.player.mp.max;
+      if (hpRatio < dealHpThreshold || mpRatio < dealMpThreshold) {
+        await M.clickRecover();
+        push(`[딜 ${round}] HP ${Math.round(hpRatio * 100)}% / MP ${Math.round(mpRatio * 100)}% -> 회복`);
+      } else {
+        if (!scrollExhausted) {
+          try {
+            await M.useScrolls(['공격']);
+            push(`[딜 ${round}] 공격 스크롤 사용`);
+          } catch (e) {
+            scrollExhausted = true;
+            push(`[딜 ${round}] 스크롤 사용 실패(소진 추정, 이후 스크롤 없이 진행): ${e.message}`);
+          }
+        }
+        await M.clickTurn(5);
+      }
+      state = M.getHpMpNumbers();
+      push(`[딜 ${round}] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
+      if (state.boss.hp.cur <= 0) break;
+    }
+
+    await M.closeClearPopupIfAny();
+    push('완료');
+    return log;
+  };
+
+  // ⚠ 사용자 요청(2026-08): 요일에 따라 서로 다른 공략 패턴(월/화/일 vs
+  // 목/토)을 자동으로 선택하는 진입점. BOSS_RUN_BY_JOB 등록/UI/필러
+  // 대체 로직은 이 이름 하나만 참조하므로, 등록부는 건드리지 않고 여기서만
+  // 요일별 위임 처리한다.
+  M.runCorruptedPurifierSword = async (options = {}) => {
+    const kstDay = M.getKstDayOfWeek();
+    if (kstDay === 4 || kstDay === 6) {
+      // 목=4, 토=6 (KST getUTCDay 기준)
+      return await M.runCorruptedPurifierSwordDefenseBreakPattern(options);
+    }
+    return await M.runCorruptedPurifierSwordSealPattern(options);
   };
 
   // --- 허무의 황제 (검술 잡, HARD 전용, 공허의 황제 리스킨) --------------------
