@@ -748,6 +748,14 @@
       if (count === null || count < Modules.preseason.config.targetBattles) {
         throw new Error(`프리시즌 아레나 목표 횟수 확인 실패: ${count ?? '읽기 실패'}/${Modules.preseason.config.targetBattles}`);
       }
+      // ⚠ 사용자 요청(2026-08): "햇살 토큰"(여름 이벤트 한정) 일괄 사용도
+      // 프리시즌 단계에 묶어서 일일 매크로 실행 시 같이 처리한다. 실패해도
+      // 이미 완료된 프리시즌 전투 자체는 성공으로 보고한다.
+      try {
+        await Modules.preseason.useSunshineTokens();
+      } catch (e) {
+        Core.log('preseason', `⚠ 햇살 토큰 자동 사용 실패(프리시즌 전투 자체는 완료됨): ${e.message}`);
+      }
       return `오늘 프리시즌 아레나 ${count}/${Modules.preseason.config.targetBattles}회 확인`;
     }
     if (step === 'boss') {
