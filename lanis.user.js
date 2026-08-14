@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.96-stable
+// @version      1.13.97-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5794,12 +5794,18 @@
       if (!rareBtn) break;
       const beforeText = rareBtn.textContent.trim();
       Core.log('raremap', `레어맵 발견: "${beforeText}" → 클릭`);
-      const clicked = await Core.safeClick(() => this.getRareMapButton(), { beforeMin: 600, beforeMax: 1300 });
+      // ⚠ 사용자 확인(2026-08): 클릭 직전마다 600~1300ms를 기다리던 건
+      // 불필요한 이중 대기였다 - 바로 아래 waitFor가 이미 "버튼이 실제로
+      // 바뀌어 클릭 가능해진 시점"을 폴링으로 감지하고 나서야 루프가
+      // 돌아오므로, 그 위에 또 사람처럼 보이려는 랜덤 대기를 얹는 건
+      // 오히려 실제 사람보다 느리게 만든다(쿨이 끝나면 바로 누르는 게
+      // 자연스러움). 완전히 0ms로는 하지 않고 최소한의 짧은 지터만 둔다.
+      const clicked = await Core.safeClick(() => this.getRareMapButton(), { beforeMin: 80, beforeMax: 200 });
       if (!clicked) break;
       const changed = await Core.waitFor(() => {
         const next = this.getRareMapButton();
         return !next || next.textContent.trim() !== beforeText ? true : null;
-      }, 10000, 400);
+      }, 10000, 200);
       if (!changed) {
         unchangedCount++;
         // 텍스트가 같아도 클릭 자체는 매번 성공했으므로, 같은 종류 레어맵이
