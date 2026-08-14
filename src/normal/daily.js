@@ -791,11 +791,30 @@
       return await this.claimWeeklyRewardsIfDue();
     }
     if (step === 'dailyQuests') {
+      // ⚠ 버그 수정(2026-08, 사용자 확인): 예전엔 아래 하위 작업들을 개별
+      // try/catch 없이 순차로 그냥 await했다. 이러면 앞쪽 작업(특히
+      // completeCraftQuestIfNeeded가 맨 처음이라 가장 취약) 중 하나가
+      // Core.clickNavMenuExact 같은 공용 헬퍼의 예외(메뉴 버튼/항목을
+      // 못 찾음 - 예: 이전 단계(던전/보스 등)가 화면을 이상한 상태로
+      // 남겨서 발생)를 만나면, 그 즉시 dailyQuests 전체가 중단되고 뒤에
+      // 있던 나머지(특히 주간 퀘스트 확인·수령)가 통째로 스킵됐다(사용자가
+      // "일일 돌렸는데 주간 퀘스트를 안 받은 계정이 있다"고 실전에서
+      // 발견). 이제 각 하위 작업을 개별 try/catch로 감싸서, 하나가
+      // 실패해도 나머지는 계속 시도한다.
+      const runSubTask = async (name, fn) => {
+        try {
+          return await fn();
+        } catch (e) {
+          Core.log('daily', `⚠ [dailyQuests] "${name}" 실패(다음 작업은 계속 진행): ${e.message}`);
+          return false;
+        }
+      };
+
       // "장인 정신"(아이템 조합), "대장간 이용"(수리) 구현됨. 다른 항목이
       // 추가되면 이 자리에 이어서 호출한다.
-      const craftOk = await this.completeCraftQuestIfNeeded();
-      const repairOk = await this.completeRepairQuestIfNeeded();
-      await this.claimQuestRewardIfReady('일간');
+      const craftOk = await runSubTask('아이템 조합', () => this.completeCraftQuestIfNeeded());
+      const repairOk = await runSubTask('장비 수리', () => this.completeRepairQuestIfNeeded());
+      await runSubTask('일간 보상 수령', () => this.claimQuestRewardIfReady('일간'));
 
       // ⚠ 사용자 요청(2026-08): 주간 퀘스트도 요일 제약(예전엔 주말에만)
       // 없이 매일 확인하고, 일간 퀘스트 보상 받을 때 같이 처리한다.
@@ -804,27 +823,27 @@
       // 사용자 요청으로 다시 뺐다 - 탭이 원격/백그라운드로 밀리면 게임 내
       // 자동 낚시 타이머 자체가 거의 안 흐르는 현상이 실전에서 확인돼서,
       // 무인 실행 시 이 단계에서 사실상 멈춘 것처럼 오래 걸릴 수 있었다.
-      const cultivationOk = await this.completeCultivationQuestIfNeeded();
-      await this.claimQuestRewardIfReady('주간');
+      const cultivationOk = await runSubTask('꾸준한 수행', () => this.completeCultivationQuestIfNeeded());
+      await runSubTask('주간 보상 수령', () => this.claimQuestRewardIfReady('주간'));
 
       // ⚠ 사용자 요청(2026-08): 길드 보스(히드라) 개인 보상도 일간 퀘스트
       // 보상을 받을 때 같이 처리한다.
-      const guildBossResult = await this.claimGuildBossRewardIfDue();
-      Core.log('daily', guildBossResult);
+      const guildBossResult = await runSubTask('길드 보스 보상', () => this.claimGuildBossRewardIfDue());
+      if (guildBossResult) Core.log('daily', guildBossResult);
 
       // ⚠ 사용자 요청(2026-08): 길드 화면의 "마을 효과 명성 받기"도 같이 확인한다.
-      const townEffectResult = await this.claimGuildTownEffectReputationIfAvailable();
-      Core.log('daily', townEffectResult);
+      const townEffectResult = await runSubTask('길드 마을효과 명성', () => this.claimGuildTownEffectReputationIfAvailable());
+      if (townEffectResult) Core.log('daily', townEffectResult);
 
       // ⚠ 사용자 요청(2026-08, 실전 확인): 레드닷(안 읽은 메일 배지)이 있을
       // 때만 편지함에 들어가서 안 읽은 메일을 전부 읽고, 첨부 아이템이
       // 있으면 같이 수령한다.
-      const mailResult = await this.checkMailIfDue();
-      Core.log('daily', mailResult);
+      const mailResult = await runSubTask('메일함 확인', () => this.checkMailIfDue());
+      if (mailResult) Core.log('daily', mailResult);
 
       return craftOk && repairOk && cultivationOk
         ? '일간+주간 퀘스트 처리 완료'
-        : '일간/주간 퀘스트 일부 처리 실패';
+        : '일간/주간 퀘스트 일부 처리 실패(로그에서 어느 항목인지 확인)';
     }
     if (step === 'attendance') {
       return await this.runAttendance();
