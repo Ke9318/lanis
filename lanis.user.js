@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.92-stable
+// @version      1.13.93-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2483,28 +2483,30 @@
     // 재료가 여러 경로(같은 완제품 이름의 서로 다른 레시피 행)로 존재할 수
     // 있다(예: "가죽끈"은 재료가 "가죽"인 행과 "낡은 가죽끈"인 행 둘 다 있음).
     // 이런 경우 모든 행을 순서대로 시도한다.
+    //
+    // ⚠ 버그 수정(2026-08, 사용자 확인): 예전엔 텍스트가 label과 정확히
+    // 일치하는 모든 leaf를 찾아 레시피 행으로 오인했는데, 이러면 "낡은
+    // 가죽끈"처럼 결과물 칸뿐 아니라 다른 레시피의 "필요 재료" 칸에도 같은
+    // 이름이 나오는 경우 그 재료 칸까지 레시피 후보로 잘못 집어서, 조합을
+    // 의도치 않게 2번 시도하는 사고가 있었다(실전 확인: 낡은 가죽끈이
+    // "2회 조합됐다"는 게임 메시지). 실제 목록은 <tr><td>결과물</td>
+    // <td>필요재료</td><td>버튼</td></tr> 테이블 구조이므로, 첫 번째 td
+    // (결과물 칸)만 label과 비교해야 정확하다.
     const tryCraft = async (label) => {
-      const findAllRecipeButtons = () => {
-        const all = Core.gameElements('*');
-        const headings = all.filter((el) => el.children.length === 0 && el.textContent.trim() === label);
-        const buttons = [];
-        for (const heading of headings) {
-          const idx = all.indexOf(heading);
-          for (let i = idx + 1; i < Math.min(idx + 30, all.length); i++) {
-            const el = all[i];
-            if (el.tagName === 'BUTTON' && ['선택', '확인'].includes(el.textContent.trim()) && Core.isElementVisible(el)) {
-              buttons.push(el);
-              break;
-            }
-          }
-        }
-        return buttons;
-      };
-      const count = findAllRecipeButtons().length;
-      for (let variant = 0; variant < count; variant++) {
-        const getBtn = () => findAllRecipeButtons()[variant] || null;
-        const recipeBtn = getBtn();
-        if (!recipeBtn) continue;
+      const findRecipeRows = () =>
+        Core.gameElements('tr').filter((tr) => {
+          const firstCell = tr.querySelector('td');
+          return firstCell && firstCell.textContent.trim() === label && Core.isElementVisible(tr);
+        });
+      const rowCount = findRecipeRows().length;
+      for (let variant = 0; variant < rowCount; variant++) {
+        const getRow = () => findRecipeRows()[variant] || null;
+        const getBtn = () => {
+          const row = getRow();
+          if (!row) return null;
+          return [...row.querySelectorAll('button')].find((b) => ['선택', '확인'].includes(b.textContent.trim()));
+        };
+        if (!getBtn()) continue;
         if (!(await Core.safeClick(getBtn, { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 }))) continue;
 
         const dialog = await Core.waitFor(
@@ -2514,16 +2516,30 @@
         );
         if (!dialog) continue;
 
-        const match = dialog.textContent.match(/최대\s*(\d+)\s*개\s*조합\s*가능/);
-        const maxCount = match ? parseInt(match[1], 10) : 0;
-        if (maxCount >= 1) {
-          const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '조합');
-          if (confirmBtn) {
-            confirmBtn.click();
-            await Core.humanDelay(1000, 1600);
-            Core.log('daily', `일일 퀘스트용 아이템 조합 완료: ${label}`);
-            return true;
-          }
+        // ⚠ 실전 확인(2026-08): 조합 확인창은 레시피에 따라 두 형식이다.
+        //   1) 고정 필요 재료 개수(예: "금의 상자" - 조각 6개, 성공률
+        //      100%) - 재료가 충분하면 바로 "조합" 버튼이 활성화된다.
+        //   2) 투입 수량을 라디오로 선택(예: "가죽끈" - 4개 100%/3개
+        //      85%/2개 70%) - 라디오를 하나 선택해야 "조합" 버튼이
+        //      활성화된다.
+        // 두 형식 모두 "조합" 버튼 클릭 = 정확히 1회 시도다. "N개 투입"은
+        // "N회 시도"가 아니라 "1회 시도에 재료 N개를 써서 성공률을 높인다"
+        // 는 뜻임을 실전으로 확인했다(2개 옵션으로 1회 시도 → "조합에
+        // 실패했습니다" 메시지 정확히 1번, 골드·재료도 1회분만 소모).
+        // 라디오가 있으면 재료를 아끼기 위해 가장 낮은 투입량(화면에
+        // 나열된 순서상 마지막 옵션, 성공률도 가장 낮음)을 선택한다.
+        const radios = [...dialog.querySelectorAll('input[type="radio"]')];
+        if (radios.length > 0) {
+          radios[radios.length - 1].click();
+          await Core.humanDelay(300, 500);
+        }
+
+        const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '조합');
+        if (confirmBtn && !confirmBtn.disabled) {
+          confirmBtn.click();
+          await Core.humanDelay(1000, 1600);
+          Core.log('daily', `일일 퀘스트용 아이템 조합 시도 완료: ${label}`);
+          return true;
         }
         const cancelBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
         if (cancelBtn) cancelBtn.click();
