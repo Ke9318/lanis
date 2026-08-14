@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.94-stable
+// @version      1.13.95-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -13785,8 +13785,13 @@
       }
 
       // 5-3. 극딜 프리셋 + 스크롤(소진되면 생략) + 5턴
-      await M.applyBossPreset('극딜');
-      push(`[극딜 사이클 ${dealCycle}] 프리셋 적용`);
+      // ⚠ 사용자 요청(2026-08, 실전 확인): 오늘 보스 속성이 "별"이면 일반
+      // "극딜" 대신 전용 "별 극딜" 프리셋을 쓴다(실전 확인: "이 보스 전용"
+      // 프리셋 목록에 "극딜"과 "별 극딜"이 서로 다른 항목으로 존재함).
+      const todayElement = M.getBossElementInBattle(bossLabel);
+      const dealPresetName = todayElement === '별' ? '별 극딜' : '극딜';
+      await M.applyBossPreset(dealPresetName);
+      push(`[극딜 사이클 ${dealCycle}] 프리셋 "${dealPresetName}" 적용`);
       if (!scrollExhausted) {
         try {
           await M.useScrolls(['공격']);
