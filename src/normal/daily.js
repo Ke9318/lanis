@@ -695,6 +695,97 @@
     return '길드 마을효과 명성(+25) 수령 완료';
   };
 
+  // ⚠ 사용자 요청(2026-08, 실전 확인): 편지함에 매번 들어가지 않고, 먼저
+  // 계정 드롭다운의 "편지" 메뉴 항목에 붙는 레드닷(MUI Badge,
+  // .MuiBadge-badge)이 있을 때만 편지함에 들어간다. 안 읽은 메일은
+  // fontWeight가 700(굵게)으로 표시되고, 클릭해서 열면 즉시 읽음 처리되며
+  // (fontWeight가 400으로 바뀜), 첨부 아이템이 있는 메일은 목록 행에
+  // svg[aria-label="미수령 아이템 있음"] 아이콘이 붙고 상세 다이얼로그에
+  // "아이템 수령하기" 버튼이 뜬다(확인창 없이 즉시 수령 처리됨).
+  Modules.daily.checkMailIfDue = async function () {
+    const findAccountIconBtn = () => {
+      const navBtns = Core.gameElements('button').filter((el) => {
+        if (!Core.isElementVisible(el)) return false;
+        const r = el.getBoundingClientRect();
+        return r.top < 40 && r.top >= 0;
+      });
+      if (navBtns.length === 0) return null;
+      return navBtns.reduce((a, b) => (a.getBoundingClientRect().right > b.getBoundingClientRect().right ? a : b));
+    };
+    const accountBtn = await Core.waitFor(findAccountIconBtn, 10000, 250);
+    if (!accountBtn) {
+      return '메일함: 계정 아이콘을 찾지 못해 확인 생략';
+    }
+    if (!(await Core.safeClick(findAccountIconBtn, { beforeMin: 400, beforeMax: 700, afterMin: 600, afterMax: 1000 }))) {
+      return '메일함: 계정 아이콘 클릭 실패로 확인 생략';
+    }
+
+    const mailItem = await Core.waitFor(
+      () => Core.gameElements('[role="menuitem"]').find((el) => el.textContent.trim().startsWith('편지') && Core.isElementVisible(el)),
+      8000,
+      200
+    );
+    if (!mailItem) {
+      return '메일함: "편지" 메뉴 항목을 찾지 못해 확인 생략';
+    }
+
+    // 레드닷(안 읽은 메일 배지)이 없으면 편지함 자체에 들어가지 않는다.
+    const badge = mailItem.querySelector('.MuiBadge-badge');
+    if (!badge || !badge.textContent.trim()) {
+      // 드롭다운을 연 채로 두지 않도록 닫는다.
+      document.body.click();
+      return '메일함: 안 읽은 메일 없음(레드닷 없음) - 진입 생략';
+    }
+    const unreadCountAtStart = parseInt(badge.textContent.trim(), 10) || 0;
+
+    mailItem.click();
+    const onMailPage = await Core.waitFor(() => location.pathname.startsWith('/mail'), 15000, 300);
+    if (!onMailPage) {
+      return '메일함: 화면 진입을 확인하지 못함';
+    }
+    await Core.humanDelay(500, 900);
+
+    let processed = 0;
+    let claimedAttachments = 0;
+    const maxIterations = 50;
+    for (let i = 0; i < maxIterations; i++) {
+      const rows = Core.gameElements('tr').filter((tr) => tr.querySelector('td') && Core.isElementVisible(tr));
+      const unreadRow = rows.find((tr) => getComputedStyle(tr.querySelector('td')).fontWeight === '700');
+      if (!unreadRow) break;
+
+      const hasAttachment = !!unreadRow.querySelector('svg[aria-label="미수령 아이템 있음"]');
+      if (!(await Core.safeClick(() => unreadRow, { beforeMin: 400, beforeMax: 700, afterMin: 800, afterMax: 1200 }))) {
+        break;
+      }
+      processed++;
+
+      const dialog = await Core.waitFor(
+        () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d)) || null,
+        6000,
+        250
+      );
+      if (dialog) {
+        if (hasAttachment) {
+          const claimBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '아이템 수령하기');
+          if (claimBtn) {
+            claimBtn.click();
+            await Core.humanDelay(900, 1400);
+            claimedAttachments++;
+          }
+        }
+        const closeBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '닫기');
+        if (closeBtn) closeBtn.click();
+        await Core.humanDelay(400, 700);
+      }
+    }
+
+    Core.log(
+      'daily',
+      `메일함: 안 읽은 메일 ${unreadCountAtStart}건 확인, 읽음 처리 ${processed}건, 첨부 아이템 수령 ${claimedAttachments}건`
+    );
+    return `메일함: ${processed}건 읽음 처리(첨부 수령 ${claimedAttachments}건)`;
+  };
+
   Modules.daily.runStep = async function (step) {
     if (step === 'weeklyRewards') {
       return await this.claimWeeklyRewardsIfDue();
@@ -724,6 +815,12 @@
       // ⚠ 사용자 요청(2026-08): 길드 화면의 "마을 효과 명성 받기"도 같이 확인한다.
       const townEffectResult = await this.claimGuildTownEffectReputationIfAvailable();
       Core.log('daily', townEffectResult);
+
+      // ⚠ 사용자 요청(2026-08, 실전 확인): 레드닷(안 읽은 메일 배지)이 있을
+      // 때만 편지함에 들어가서 안 읽은 메일을 전부 읽고, 첨부 아이템이
+      // 있으면 같이 수령한다.
+      const mailResult = await this.checkMailIfDue();
+      Core.log('daily', mailResult);
 
       return craftOk && repairOk && cultivationOk
         ? '일간+주간 퀘스트 처리 완료'
