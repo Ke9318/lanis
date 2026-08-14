@@ -3523,61 +3523,78 @@
     const element = M.getBossElementInBattle(bossLabel);
     if (!element) throw new Error('보스 속성을 화면에서 확인하지 못했습니다.');
 
-    // 2단계: 방깎
     const defBreakPresetName = `${element} 방깎`;
-    await M.applyBossPreset(defBreakPresetName);
-    push(`[방깎] 프리셋 "${defBreakPresetName}" 적용`);
-    let defDrop = M.getLatestBossDefenseDrop() || 0;
-    let defRounds = 0;
-    while (defDrop < defenseDropThreshold && defRounds < maxDefRounds) {
-      M.throwIfStopped();
-      const state = M.getHpMpNumbers();
-      const hpRatio = state.player.hp.cur / state.player.hp.max;
-      if (hpRatio < defBreakLowHpThreshold) {
-        await M.clickRecover();
-        push(`[방깎] 내HP ${Math.round(hpRatio * 100)}% -> 회복`);
-      } else {
-        await M.clickTurn(5);
-        defRounds++;
-      }
-      defDrop = M.getLatestBossDefenseDrop() ?? defDrop;
-      push(`[방깎 ${defRounds}회차] 방어력감소=${defDrop}`);
-    }
-    if (defDrop < defenseDropThreshold) {
-      push(`[방깎] 경고: 최대 시도 내 방어력감소 ${defenseDropThreshold} 미도달(현재 ${defDrop}), 다음 단계로 진행`);
-    }
-
-    // 3단계: 딜 (매번 공격 스크롤 사용 + 5턴, 소진되면 스크롤 없이 5턴만)
     const dealPresetName = `${element} 딜`;
-    await M.applyBossPreset(dealPresetName);
-    push(`[딜] 프리셋 "${dealPresetName}" 적용`);
 
+    // ⚠ 사용자 확인(2026-08, 실전 확인): 정화자는 허무의 황제와 달리
+    // 방어력 감소가 영구 누적이 아니라 일정 턴이 지나면 자연 회복된다
+    // (실전 확인: 방↓540까지 쌓았다가 몇 턴 지나자 방↓188로 줄고 보스
+    // 체력이 4.4%에서 29.2%로 다시 올라가는 것까지 확인함). 그래서
+    // "방깎 한 번 400 채우고 그 뒤로 계속 딜만" 방식이 아니라, 방깎↔딜을
+    // 보스가 죽을 때까지 계속 오간다: 방깎 프리셋으로 5턴씩 반복해 방↓400
+    // 이상 만들고 → 딜 프리셋으로 전환해 스크롤(소진되면 생략)+5턴 공격을
+    // 딱 1번만 하고 → 다시 방깎 프리셋으로 돌아가 반복.
     let scrollExhausted = false;
-    let round = 0;
+    let cycle = 0;
     let state = M.getHpMpNumbers();
-    while (state.boss.hp.cur > 0 && round < maxDealRounds) {
+    while (state.boss.hp.cur > 0 && cycle < maxDealRounds) {
       M.throwIfStopped();
-      round++;
-      const hpRatio = state.player.hp.cur / state.player.hp.max;
-      const mpRatio = state.player.mp.cur / state.player.mp.max;
-      if (hpRatio < dealHpThreshold || mpRatio < dealMpThreshold) {
-        await M.clickRecover();
-        push(`[딜 ${round}] HP ${Math.round(hpRatio * 100)}% / MP ${Math.round(mpRatio * 100)}% -> 회복`);
-      } else {
-        if (!scrollExhausted) {
-          try {
-            await M.useScrolls(['공격']);
-            push(`[딜 ${round}] 공격 스크롤 사용`);
-          } catch (e) {
-            scrollExhausted = true;
-            push(`[딜 ${round}] 스크롤 사용 실패(소진 추정, 이후 스크롤 없이 진행): ${e.message}`);
-          }
+      cycle++;
+
+      // 방깎 단계: 방↓400 이상 될 때까지 5턴씩 반복
+      await M.applyBossPreset(defBreakPresetName);
+      push(`[사이클 ${cycle}] "${defBreakPresetName}" 프리셋 적용`);
+      let defDrop = M.getLatestBossDefenseDrop() || 0;
+      let defRounds = 0;
+      while (defDrop < defenseDropThreshold && defRounds < maxDefRounds) {
+        M.throwIfStopped();
+        const s = M.getHpMpNumbers();
+        const hpRatio = s.player.hp.cur / s.player.hp.max;
+        if (hpRatio < defBreakLowHpThreshold) {
+          await M.clickRecover();
+          push(`[사이클 ${cycle}, 방깎] 내HP ${Math.round(hpRatio * 100)}% -> 회복`);
+        } else {
+          await M.clickTurn(5);
+          defRounds++;
         }
-        await M.clickTurn(5);
+        defDrop = M.getLatestBossDefenseDrop() ?? defDrop;
+        push(`[사이클 ${cycle}, 방깎 ${defRounds}회차] 방어력감소=${defDrop}`);
+      }
+      if (defDrop < defenseDropThreshold) {
+        push(`[사이클 ${cycle}] 경고: 최대 시도 내 방어력감소 ${defenseDropThreshold} 미도달(현재 ${defDrop}), 딜 단계로 진행`);
       }
       state = M.getHpMpNumbers();
-      push(`[딜 ${round}] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
       if (state.boss.hp.cur <= 0) break;
+
+      // 딜 단계: HP 70% 미만 또는 MP 85% 미만이면 조건 맞을 때까지 회복,
+      // 그 후 스크롤(소진되면 생략) + 5턴 공격 딱 1회만 하고 방깎으로 복귀
+      await M.applyBossPreset(dealPresetName);
+      push(`[사이클 ${cycle}] "${dealPresetName}" 프리셋 적용`);
+      let recoverRounds = 0;
+      state = M.getHpMpNumbers();
+      let hpRatio = state.player.hp.cur / state.player.hp.max;
+      let mpRatio = state.player.mp.cur / state.player.mp.max;
+      while ((hpRatio < dealHpThreshold || mpRatio < dealMpThreshold) && recoverRounds < 10) {
+        M.throwIfStopped();
+        await M.clickRecover();
+        recoverRounds++;
+        state = M.getHpMpNumbers();
+        hpRatio = state.player.hp.cur / state.player.hp.max;
+        mpRatio = state.player.mp.cur / state.player.mp.max;
+        push(`[사이클 ${cycle}, 딜] 회복 ${recoverRounds}회차 - HP ${Math.round(hpRatio * 100)}% MP ${Math.round(mpRatio * 100)}%`);
+      }
+      if (!scrollExhausted) {
+        try {
+          await M.useScrolls(['공격']);
+          push(`[사이클 ${cycle}] 공격 스크롤 사용`);
+        } catch (e) {
+          scrollExhausted = true;
+          push(`[사이클 ${cycle}] 스크롤 사용 실패(소진 추정, 이후 스크롤 없이 진행): ${e.message}`);
+        }
+      }
+      await M.clickTurn(5);
+      state = M.getHpMpNumbers();
+      push(`[사이클 ${cycle}] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
     }
 
     await M.closeClearPopupIfAny();
