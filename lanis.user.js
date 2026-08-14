@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.97-stable
+// @version      1.13.98-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -12256,7 +12256,7 @@
   //     스킬화면 오류·페이지 이동 등으로 어쩌다 전투화면을 벗어난 것도
   //     성공으로 오판할 수 있어(실전 지적됨), 반드시 보스 함수 자신이 보고한
   //     cleared 값을 근거로 삼는다.
-  M.driveToBossAndRun = async (key, jobOverride = null) => {
+  M.driveToBossAndRun = async (key, jobOverride = null, forceChallenge = false) => {
     M.assertBossRunAuthorized();
     const entry = BOSS_REGISTRY[key];
     if (!entry) return { entered: false, cleared: false };
@@ -12331,7 +12331,15 @@
           // 속성돌을 사용하기 전에 주간 8단계 보상 상태부터 확인한다.
           // 보상이 모두 달성된 보스라면 오늘 속성으로 바꿀 이유가 없으므로
           // 속성 확인/인벤토리 이동 자체를 생략한다.
-          if (!ALLOW_CLEARED_BOSS_TEST) {
+          // ⚠ 버그 수정(2026-08, 사용자 확인): 이 스킵 로직은 원래 "일일
+          // 매크로가 이미 보상 다 받은 보스는 굳이 또 안 잡아도 된다"는
+          // 의도인데, 직접 "보스 도전" 버튼으로 돌릴 때도 continueBossQueue를
+          // 공유하다 보니 그대로 걸려서, 보상이 이미 소진된 보스를 일부러
+          // 다시 잡으려는(예: 로직 검증, 반복 테스트) 직접 실행까지 도전
+          // 자체를 시작 못 하고 조용히 스킵되는 문제가 있었다. forceChallenge
+          // (직접 버튼 경로에서만 true)가 켜져 있으면 보상 소진 여부와 무관
+          // 하게 항상 실제로 도전한다.
+          if (!ALLOW_CLEARED_BOSS_TEST && !forceChallenge) {
             const rewardProgress = await M.getWeeklyRewardProgress(entry.label);
             if (!rewardProgress) {
               throw new Error(`"${entry.label}" 주간 보상 상태를 읽지 못해 속성 변경 전에 안전하게 중단`);
@@ -12887,7 +12895,7 @@
   };
 
   // 선택한 보스들을 약한 순서대로 정렬해 큐에 저장하고 시작
-  M.startBossQueue = async (selectedKeys) => {
+  M.startBossQueue = async (selectedKeys, { forceChallenge = false } = {}) => {
     if (M.isRunning) {
       if (M.uiLog) M.uiLog('⛔ 이미 실행 중이라 새 요청을 무시함');
       return;
@@ -12907,6 +12915,7 @@
         job: detected.job,
         className: detected.className,
         authId: auth.id,
+        forceChallenge,
       };
       localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
       await M.continueBossQueue();
@@ -12936,7 +12945,7 @@
       const entry = BOSS_REGISTRY[key];
       if (M.uiLog) M.uiLog(`▶▶ [큐] "${entry.label}" 도전 시작 (남은 ${q.remaining.length}개)`);
 
-      const result = await M.driveToBossAndRun(key, q.job || M.getSelectedJob());
+      const result = await M.driveToBossAndRun(key, q.job || M.getSelectedJob(), !!q.forceChallenge);
       if (!M.isBossRunAuthorized(q.authId)) return;
 
       const raw2 = localStorage.getItem(QUEUE_KEY);
@@ -13174,7 +13183,7 @@
       setRunningState(true);
       M.uiLog(`▶ 보스 도전 시작 (선택: ${checked.length}개)`);
       try {
-        await M.startBossQueue(checked);
+        await M.startBossQueue(checked, { forceChallenge: true });
         // ⚠ 실전 확인: 이 "보스 도전" 버튼 경로는 startBossQueue만 호출하고 끝나서,
         // 보상 자동 수령(M.claimBossRewardsAndVerify)이 "일일" 탭의
         // runDailySelectedBosses 경로에서만 호출되고 여기서는 전혀 호출되지
