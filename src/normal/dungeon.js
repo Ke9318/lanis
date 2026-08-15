@@ -1014,16 +1014,32 @@
     mod.cycleCount = mod.loadClearCount();
     Core.log('dungeon', `던전 자동클리어 시작 (오늘 이미 클리어한 던전: ${mod.cycleCount}개)`);
 
-    // ⚠ 사용자 요청(2026-08): 프리셋/속성 확인(필요시 속성돌 소모)을 먼저 하고
-    // 나서 "오늘 할 던전이 남았는지"를 확인하던 순서를, 반대로 바꾼다. 이미
-    // 오늘 할 게 없는 상태에서 일일을 돌리면 실제로는 아무것도 안 하면서
-    // 속성돌만 낭비하는 문제가 있었다. 이제 "할 일이 있는지"부터 확인하고,
-    // 있을 때만 프리셋/속성을 맞춘다.
+    // ⚠ 버그 수정(2026-08, 사용자 확인): 예전엔 "재시작 시점에 마침 열려
+    // 있던 페이지"만 보고 재개 여부(detectResumeDungeon)를 판정했다. 정지
+    // 후 다시 시작할 때 사용자가 던전 화면이 아닌 다른 곳에 있으면 이
+    // 판정이 항상 실패(null)하고, 그러면 "새 큐 스캔" 경로(구 버전
+    // goToDungeonSelect)로 빠지는데, 그 함수는 "일일 던전" 텍스트만
+    // 성공으로 봤다 - 그런데 실제로 진행 중인 던전이 있으면 "전투 > 던전"
+    // 메뉴 클릭이 목록이 아니라 진행 화면으로 곧바로 이동시켜버려서(§0-6
+    // 참고 패턴과 동일) 15초 내내 기다리다 실패하고, 그 실패 여부를 체크도
+    // 안 한 채 scanEligibleDungeons를 불러 목록 카드를 하나도 못 찾아 빈
+    // 큐가 되어 "입장 가능한 던전이 없습니다"로 조기 종료됐다(실전 확인:
+    // 던전 도중 정지 후 재시작하면 이어하지 않고 그냥 멈춤). 이제 먼저
+    // 실제로 "전투 > 던전" 메뉴로 이동해(목록/진행 화면 둘 다 인정하는
+    // goToDungeonScreen) 게임이 데려다주는 화면을 보고 나서 재개 여부를
+    // 판정한다 - 재시작 시점에 사용자가 어느 페이지에 있었든 무관해진다.
+    const navigated = await mod.goToDungeonScreen();
+    if (!mod.running) return;
+    if (!navigated) {
+      Core.notifyStopped('dungeon', '던전 화면 진입을 확인하지 못해 정지합니다.');
+      return;
+    }
+
     const resumeDungeon = mod.detectResumeDungeon();
     let queue = [];
     if (!resumeDungeon) {
-      await mod.goToDungeonSelect();
-      if (!mod.running) return;
+      // 이미 위에서 던전 화면(목록)에 도착해 있으므로 다시 메뉴를 누를
+      // 필요가 없다.
       queue = mod.scanEligibleDungeons();
       if (queue.length === 0) {
         Core.log('dungeon', '입장 가능한 던전이 없습니다 (전부 완료됐거나 입장권이 없음). 정지합니다.');
