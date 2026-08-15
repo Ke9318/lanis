@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.5-stable
+// @version      1.14.6-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2843,11 +2843,24 @@
     }
     if (step === 'arena') {
       await this.runCoreModule('arena');
+      // ⚠ 버그 수정(2026-08, 사용자 확인): 프리시즌 기간엔 에너지가 절대
+      // 유료로 안 바뀌므로(게임 규칙), mainLoop와 동일하게 프리시즌
+      // 여부에 따라 검증 기준을 분기한다 - 아니면 프리시즌 기간에 정상
+      // 완료(보석 150/150)된 것도 "무료 전투가 남아있다"며 오판해 실패로
+      // 처리될 수 있다.
+      const count = Modules.arena.readTodayBattleCount();
+      const isPreseason = Core.bodyText().includes('프리시즌');
+      if (isPreseason) {
+        const gemProgress = Modules.arena.readPreseasonGemProgress();
+        if (!gemProgress || gemProgress.current < gemProgress.max) {
+          throw new Error(`아레나(프리시즌) 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}`);
+        }
+        return `오늘 아레나 ${count}회 완료(프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 확인)`;
+      }
       // ⚠ 사용자 요청(2026-08): 고정 목표 횟수 대신 "다음 전투 에너지
       // 비용이 무료가 아니게 됐는지"로 완료를 판정한다(정규 아레나는 하루
       // 20회부터 유료 전환).
       const energyCost = Modules.arena.readNextBattleEnergyCost();
-      const count = Modules.arena.readTodayBattleCount();
       if (!energyCost || energyCost.isFree) {
         throw new Error(`아레나 완료 확인 실패: 아직 무료 전투가 남아있거나 확인 못함 (오늘 ${count ?? '읽기 실패'}회)`);
       }
@@ -3356,15 +3369,38 @@
       mod.cycleCount = before;
       Core.updateModuleButtons();
 
-      // ⚠ 사용자 요청(2026-08): 고정 횟수 대신, 다음 전투 에너지 비용이
-      // "무료"인 동안만 계속 돈다. 무료가 아니게 된 순간 정지한다(보통
-      // 20회 지점).
-      const energyCost = mod.readNextBattleEnergyCost();
-      if (!energyCost) throw new Error('아레나의 "다음 전투 에너지 비용"을 읽지 못했습니다.');
-      if (!energyCost.isFree) {
-        mod.clearResume();
-        Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (에너지 비용이 "${energyCost.raw}"로 전환됨 - 무료 전투 소진)`);
-        return;
+      // ⚠ 버그 수정(2026-08, 사용자 확인 - 실전에서 오늘 전투 248회까지
+      // 멈추지 않고 도는 것 확인됨): 프리시즌 기간에는 "다음 전투 에너지
+      // 비용"이 몇 번을 싸우든 절대 "무료"에서 바뀌지 않는다(게임 규칙:
+      // "프리시즌 기간에는 에너지가 소모되지 않으며"). 그래서 정규 아레나
+      // 매크로가 프리시즌 기간 중에 실행되면(예: 토요일이 마침 프리시즌
+      // 기간과 겹칠 때) "무료가 아니게 될 때까지"라는 정지 조건이 절대
+      // 성립하지 않아 무한 루프에 빠졌다. 프리시즌 기간이면 에너지 체크
+      // 대신 "오늘 받은 프리시즌 보석" 진행률로 정지 조건을 판단한다
+      // (이벤트 탭의 프리시즌 매크로와 동일한 기준).
+      const isPreseason = Core.bodyText().includes('프리시즌');
+      if (isPreseason) {
+        const gemProgress = mod.readPreseasonGemProgress();
+        if (!gemProgress) throw new Error('프리시즌 기간인데 오늘 받은 프리시즌 보석 진행률을 읽지 못했습니다.');
+        if (gemProgress.current >= gemProgress.max) {
+          mod.clearResume();
+          Core.notifyCompleted(
+            'arena',
+            `오늘 프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 완료 (전투 ${before}회) - 프리시즌 기간이라 보석 기준으로 정지`
+          );
+          return;
+        }
+      } else {
+        // ⚠ 사용자 요청(2026-08): 고정 횟수 대신, 다음 전투 에너지 비용이
+        // "무료"인 동안만 계속 돈다. 무료가 아니게 된 순간 정지한다(보통
+        // 20회 지점). 프리시즌이 아닐 때만 유효한 판정이다(위 참고).
+        const energyCost = mod.readNextBattleEnergyCost();
+        if (!energyCost) throw new Error('아레나의 "다음 전투 에너지 비용"을 읽지 못했습니다.');
+        if (!energyCost.isFree) {
+          mod.clearResume();
+          Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (에너지 비용이 "${energyCost.raw}"로 전환됨 - 무료 전투 소진)`);
+          return;
+        }
       }
 
       // ⚠ 사용자 요청(2026-08): 기존엔 마지막 공격 시각부터 고정 35초를 무조건

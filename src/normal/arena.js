@@ -196,15 +196,38 @@
       mod.cycleCount = before;
       Core.updateModuleButtons();
 
-      // ⚠ 사용자 요청(2026-08): 고정 횟수 대신, 다음 전투 에너지 비용이
-      // "무료"인 동안만 계속 돈다. 무료가 아니게 된 순간 정지한다(보통
-      // 20회 지점).
-      const energyCost = mod.readNextBattleEnergyCost();
-      if (!energyCost) throw new Error('아레나의 "다음 전투 에너지 비용"을 읽지 못했습니다.');
-      if (!energyCost.isFree) {
-        mod.clearResume();
-        Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (에너지 비용이 "${energyCost.raw}"로 전환됨 - 무료 전투 소진)`);
-        return;
+      // ⚠ 버그 수정(2026-08, 사용자 확인 - 실전에서 오늘 전투 248회까지
+      // 멈추지 않고 도는 것 확인됨): 프리시즌 기간에는 "다음 전투 에너지
+      // 비용"이 몇 번을 싸우든 절대 "무료"에서 바뀌지 않는다(게임 규칙:
+      // "프리시즌 기간에는 에너지가 소모되지 않으며"). 그래서 정규 아레나
+      // 매크로가 프리시즌 기간 중에 실행되면(예: 토요일이 마침 프리시즌
+      // 기간과 겹칠 때) "무료가 아니게 될 때까지"라는 정지 조건이 절대
+      // 성립하지 않아 무한 루프에 빠졌다. 프리시즌 기간이면 에너지 체크
+      // 대신 "오늘 받은 프리시즌 보석" 진행률로 정지 조건을 판단한다
+      // (이벤트 탭의 프리시즌 매크로와 동일한 기준).
+      const isPreseason = Core.bodyText().includes('프리시즌');
+      if (isPreseason) {
+        const gemProgress = mod.readPreseasonGemProgress();
+        if (!gemProgress) throw new Error('프리시즌 기간인데 오늘 받은 프리시즌 보석 진행률을 읽지 못했습니다.');
+        if (gemProgress.current >= gemProgress.max) {
+          mod.clearResume();
+          Core.notifyCompleted(
+            'arena',
+            `오늘 프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 완료 (전투 ${before}회) - 프리시즌 기간이라 보석 기준으로 정지`
+          );
+          return;
+        }
+      } else {
+        // ⚠ 사용자 요청(2026-08): 고정 횟수 대신, 다음 전투 에너지 비용이
+        // "무료"인 동안만 계속 돈다. 무료가 아니게 된 순간 정지한다(보통
+        // 20회 지점). 프리시즌이 아닐 때만 유효한 판정이다(위 참고).
+        const energyCost = mod.readNextBattleEnergyCost();
+        if (!energyCost) throw new Error('아레나의 "다음 전투 에너지 비용"을 읽지 못했습니다.');
+        if (!energyCost.isFree) {
+          mod.clearResume();
+          Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (에너지 비용이 "${energyCost.raw}"로 전환됨 - 무료 전투 소진)`);
+          return;
+        }
       }
 
       // ⚠ 사용자 요청(2026-08): 기존엔 마지막 공격 시각부터 고정 35초를 무조건

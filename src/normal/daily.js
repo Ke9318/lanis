@@ -865,11 +865,24 @@
     }
     if (step === 'arena') {
       await this.runCoreModule('arena');
+      // ⚠ 버그 수정(2026-08, 사용자 확인): 프리시즌 기간엔 에너지가 절대
+      // 유료로 안 바뀌므로(게임 규칙), mainLoop와 동일하게 프리시즌
+      // 여부에 따라 검증 기준을 분기한다 - 아니면 프리시즌 기간에 정상
+      // 완료(보석 150/150)된 것도 "무료 전투가 남아있다"며 오판해 실패로
+      // 처리될 수 있다.
+      const count = Modules.arena.readTodayBattleCount();
+      const isPreseason = Core.bodyText().includes('프리시즌');
+      if (isPreseason) {
+        const gemProgress = Modules.arena.readPreseasonGemProgress();
+        if (!gemProgress || gemProgress.current < gemProgress.max) {
+          throw new Error(`아레나(프리시즌) 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}`);
+        }
+        return `오늘 아레나 ${count}회 완료(프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 확인)`;
+      }
       // ⚠ 사용자 요청(2026-08): 고정 목표 횟수 대신 "다음 전투 에너지
       // 비용이 무료가 아니게 됐는지"로 완료를 판정한다(정규 아레나는 하루
       // 20회부터 유료 전환).
       const energyCost = Modules.arena.readNextBattleEnergyCost();
-      const count = Modules.arena.readTodayBattleCount();
       if (!energyCost || energyCost.isFree) {
         throw new Error(`아레나 완료 확인 실패: 아직 무료 전투가 남아있거나 확인 못함 (오늘 ${count ?? '읽기 실패'}회)`);
       }
