@@ -1612,6 +1612,46 @@
     return !!(heading && turnBtn);
   };
 
+  // 보스 카드의 속성/처치 상태/도전 버튼을 읽기 전에 해당 난이도 탭이
+  // 실제로 선택되고 대상 카드가 렌더링됐는지 확인한다. HARD 보스는 기존에
+  // 속성 확인을 먼저 수행해 일반 탭에서 카드를 찾지 못한 채 중단됐다.
+  M.ensureBossDifficultyTab = async (bossLabel, { hard = false } = {}) => {
+    M.throwIfStopped();
+    const targetTabLabel = hard ? 'HARD' : '일반';
+    const targetTab = await M.waitFor(
+      () => M.queryAll('button').find(
+        (button) =>
+          M.isVisible(button) &&
+          button.textContent.trim() === targetTabLabel
+      ) || null,
+      8000,
+      200
+    );
+    if (!targetTab) {
+      throw new Error(`보스 목록의 "${targetTabLabel}" 탭을 찾지 못했습니다.`);
+    }
+
+    const isSelected = () =>
+      targetTab.getAttribute('aria-pressed') === 'true' ||
+      targetTab.getAttribute('aria-selected') === 'true';
+    if (!isSelected()) {
+      M.throwIfStopped();
+      targetTab.click();
+    }
+
+    const cardReady = await M.waitFor(
+      () => M.findBossCardActionButton(bossLabel) || null,
+      10000,
+      200
+    );
+    if (!cardReady) {
+      throw new Error(
+        `"${targetTabLabel}" 탭 전환 후 "${bossLabel}" 카드 렌더링을 확인하지 못했습니다.`
+      );
+    }
+    return cardReady;
+  };
+
   // 개인 보스 목록 페이지 상단의 "이번 주 보상 보스" 배지에도 보스 이름이
   // 뜨기 때문에, 페이지에 같은 이름 텍스트가 2번 이상 나올 수 있다(배지 1번 +
   // 실제 카드 제목 1번). findLeafByExactText는 첫 번째 일치만 반환하므로
@@ -1998,9 +2038,10 @@
 
   // 모든 직업 공통 전처리: 보스 목록의 오늘 속성과 내 정보의 캐릭터 속성을
   // 비교하고, 다르면 인벤토리에서 해당 속성의 돌을 한 개 사용한 뒤 재검증한다.
-  M.ensureElementForBoss = async (bossLabel) => {
+  M.ensureElementForBoss = async (bossLabel, { hard = false } = {}) => {
     M.throwIfStopped();
     const startHistoryLength = history.length;
+    await M.ensureBossDifficultyTab(bossLabel, { hard });
     // ⚠ 버그 수정(2026-08, 실전 확인): 예전엔 getBossElementFromList를
     // 단발성으로 한 번만 조회해서, 목록 페이지가 아직 렌더링 중이면(예:
     // HARD 탭 전환 직후) "속성을 읽지 못함" 에러로 큐 전체가 멈췄다. SPA
@@ -2067,7 +2108,7 @@
     } else {
       await M.goToBossListViaMenu();
     }
-    await M.waitFor(() => M.findBossCardActionButton(bossLabel), 8000, 200);
+    await M.ensureBossDifficultyTab(bossLabel, { hard });
     return { targetElement, currentElement };
   };
 
@@ -2119,17 +2160,9 @@
 
   M.enterBossBattle = async (bossLabel, { hard = false } = {}) => {
     M.throwIfStopped();
-    // 일반/HARD 탭이 있으면 대상 탭 보장. 기존 4개 보스는 전부 일반 모드,
-    // 타락한 정화자(하드)처럼 HARD 전용 보스는 hard:true로 호출한다.
-    const targetTabLabel = hard ? 'HARD' : '일반';
-    const targetTab = M.findButtonByText(targetTabLabel);
-    if (targetTab) {
-      M.throwIfStopped();
-      targetTab.click();
-      await M.sleep(300);
-    }
-    let btn = M.findBossCardActionButton(bossLabel);
-    if (!btn) throw new Error(`"${bossLabel}" 카드에서 도전 버튼을 못찾음 (목록 페이지가 맞는지 확인 필요)`);
+    // 속성 확인 뒤 목록으로 돌아오는 과정에서도 기본 탭이 일반으로 바뀔 수
+    // 있으므로 클릭 직전에 난이도와 대상 카드 렌더링을 다시 검증한다.
+    let btn = await M.ensureBossDifficultyTab(bossLabel, { hard });
     let btnText = btn.textContent.trim();
     M.throwIfStopped();
     btn.click();
@@ -2362,7 +2395,8 @@
             return { entered: false, cleared: false, blockedByOtherBoss: otherInProgress };
           }
           if (M.uiLog) M.uiLog(`🔎 "${entry.label}" 속성 확인 중...`);
-          await M.ensureElementForBoss(entry.label);
+          await M.ensureBossDifficultyTab(entry.label, { hard: !!entry.hard });
+          await M.ensureElementForBoss(entry.label, { hard: !!entry.hard });
           if (M.uiLog) M.uiLog(`🧭 "${entry.label}" 카드 찾는 중...`);
           await M.enterBossBattle(entry.label, { hard: !!entry.hard });
           // 기존엔 sleep(500) 뒤 딱 한 번만 확인해서, SPA 렌더가 조금만 느려도
@@ -2757,16 +2791,25 @@
       M.assertBossRunAuthorized(auth.id);
     }
 
-    await M.waitFor(() => selected.some((key) => M.findBossCardActionButton(BOSS_REGISTRY[key].label)), 10000, 250);
-    M.assertBossRunAuthorized(auth.id);
     await M.claimBossRewardsAndVerify();
     M.assertBossRunAuthorized(auth.id);
 
-    const progressBefore = await Promise.all(selected.map(async (key) => ({
-      key,
-      label: BOSS_REGISTRY[key].label,
-      progress: await M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label),
-    })));
+    // 보상 잔여량은 API로 읽지만 "오늘 이미 처치했는지"는 카드 버튼
+    // (재도전 여부)을 읽는다. 일반/HARD 보스가 섞여 있어도 각 보스의 실제
+    // 난이도 탭을 연 뒤 순차적으로 카드 상태를 확인한다. 탭 전환을 Promise.all
+    // 로 병렬 실행하면 서로 탭을 덮어쓰므로 반드시 순차 처리한다.
+    const progressBefore = [];
+    for (const key of selected) {
+      const entry = BOSS_REGISTRY[key];
+      M.assertBossRunAuthorized(auth.id);
+      await M.ensureBossDifficultyTab(entry.label, { hard: !!entry.hard });
+      progressBefore.push({
+        key,
+        label: entry.label,
+        progress: await M.getWeeklyRewardProgress(entry.label),
+        alreadyCleared: M.isBossAlreadyCleared(entry.label),
+      });
+    }
     const unreadable = progressBefore.filter((item) => !item.progress);
     if (unreadable.length) {
       throw new Error(`주간 보상 횟수를 읽지 못한 보스: ${unreadable.map((item) => item.label).join(', ')}`);
@@ -2782,7 +2825,7 @@
     // 수령까지 끝난 보스 3마리를 그대로 다시 큐에 넣어 불필요하게
     // 재처치(전투 스크롤 등 자원 소모)시키는 걸 실전에서 직접 확인함.
     const remaining = progressBefore
-      .filter((item) => !item.progress.exhausted && !M.isBossAlreadyCleared(item.label))
+      .filter((item) => !item.progress.exhausted && !item.alreadyCleared)
       .map((item) => item.key);
 
     if (remaining.length === 0) {
@@ -2809,7 +2852,20 @@
       } catch (e) {
         purifierRunName = null;
       }
-      const purifierAlreadyClearedToday = M.isBossAlreadyCleared(BOSS_REGISTRY.corruptedPurifier.label);
+      let purifierAlreadyClearedToday = true;
+      if (
+        purifierUserSelected &&
+        IMPLEMENTED_PURIFIER_DAYS.includes(todayKstDay) &&
+        purifierRunName
+      ) {
+        await M.ensureBossDifficultyTab(
+          BOSS_REGISTRY.corruptedPurifier.label,
+          { hard: true }
+        );
+        purifierAlreadyClearedToday = M.isBossAlreadyCleared(
+          BOSS_REGISTRY.corruptedPurifier.label
+        );
+      }
       if (
         purifierUserSelected &&
         IMPLEMENTED_PURIFIER_DAYS.includes(todayKstDay) &&
