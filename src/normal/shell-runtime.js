@@ -178,8 +178,10 @@
       const cycleLabel =
         id === 'dungeon'
           ? `오늘 클리어 ${mod.cycleCount}개`
-          : id === 'arena' || id === 'preseason'
-          ? `오늘 전투 ${mod.cycleCount}/${mod.config.targetBattles}회`
+          : id === 'arena'
+          ? `오늘 전투 ${mod.cycleCount}회 (무료인 동안 반복)`
+          : id === 'preseason'
+          ? `오늘 전투 ${mod.cycleCount}회 (보석 한도까지 반복)`
           : id === 'deepdungeon'
           ? `던전의 주인 도전 ${mod.cycleCount}회`
           : `사이클 ${mod.cycleCount}`;

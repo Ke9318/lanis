@@ -865,20 +865,26 @@
     }
     if (step === 'arena') {
       await this.runCoreModule('arena');
+      // ⚠ 사용자 요청(2026-08): 고정 목표 횟수 대신 "다음 전투 에너지
+      // 비용이 무료가 아니게 됐는지"로 완료를 판정한다(정규 아레나는 하루
+      // 20회부터 유료 전환).
+      const energyCost = Modules.arena.readNextBattleEnergyCost();
       const count = Modules.arena.readTodayBattleCount();
-      if (count === null || count < Modules.arena.config.targetBattles) {
-        throw new Error(`아레나 목표 횟수 확인 실패: ${count ?? '읽기 실패'}/${Modules.arena.config.targetBattles}`);
+      if (!energyCost || energyCost.isFree) {
+        throw new Error(`아레나 완료 확인 실패: 아직 무료 전투가 남아있거나 확인 못함 (오늘 ${count ?? '읽기 실패'}회)`);
       }
-      return `오늘 아레나 ${count}/${Modules.arena.config.targetBattles}회 확인`;
+      return `오늘 아레나 ${count}회 완료(무료 전투 소진 확인)`;
     }
     // ⚠ 사용자 요청(2026-08): 프리시즌 기간엔 정규 아레나와 별개로 평일에도
     // 돌려야 한다. 화면/버튼 구조가 동일해 Modules.arena.readTodayBattleCount
     // (this 안 쓰는 순수 함수)를 그대로 재사용해 검증한다.
     if (step === 'preseason') {
       await this.runCoreModule('preseason');
-      const count = Modules.arena.readTodayBattleCount();
-      if (count === null || count < Modules.preseason.config.targetBattles) {
-        throw new Error(`프리시즌 아레나 목표 횟수 확인 실패: ${count ?? '읽기 실패'}/${Modules.preseason.config.targetBattles}`);
+      // ⚠ 사용자 요청(2026-08): 고정 목표 횟수 대신 "오늘 받은 프리시즌
+      // 보석"이 하루 최대치에 도달했는지로 완료를 판정한다.
+      const gemProgress = Modules.arena.readPreseasonGemProgress();
+      if (!gemProgress || gemProgress.current < gemProgress.max) {
+        throw new Error(`프리시즌 아레나 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}`);
       }
       // ⚠ 사용자 요청(2026-08): "햇살 토큰"(여름 이벤트 한정) 일괄 사용도
       // 프리시즌 단계에 묶어서 일일 매크로 실행 시 같이 처리한다. 실패해도
@@ -888,7 +894,7 @@
       } catch (e) {
         Core.log('preseason', `⚠ 햇살 토큰 자동 사용 실패(프리시즌 전투 자체는 완료됨): ${e.message}`);
       }
-      return `오늘 프리시즌 아레나 ${count}/${Modules.preseason.config.targetBattles}회 확인`;
+      return `오늘 프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 완료`;
     }
     if (step === 'boss') {
       const boss = await Core.waitFor(() => window.__bossMacro || null, 10000, 250, null);

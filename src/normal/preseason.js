@@ -8,39 +8,16 @@
   // 바인딩 없이 그대로 재사용 가능함)를 그대로 쓰고, 요일 제약만 뺀 별도
   // 모듈로 만든다. 프리시즌이 끝나 화면에 배너가 안 뜨거나 /arena 진입
   // 자체가 막히면 goToArena가 기존과 동일하게 에러로 정지시킨다.
-  const PRESEASON_CONFIG_KEY = 'lrm-preseason-config';
   Modules.preseason = {
     id: 'preseason',
     running: false,
     stopRequested: false,
     cycleCount: 0,
-    config: {
-      targetBattles: 10,
-    },
-  };
-
-  Modules.preseason.saveConfig = function () {
-    try {
-      localStorage.setItem(PRESEASON_CONFIG_KEY, JSON.stringify(this.config));
-    } catch (e) {}
-  };
-
-  Modules.preseason.loadConfig = function () {
-    try {
-      const saved = JSON.parse(localStorage.getItem(PRESEASON_CONFIG_KEY) || '{}');
-      const value = parseInt(saved.targetBattles, 10);
-      if (Number.isFinite(value) && value >= 1 && value <= 200) this.config.targetBattles = value;
-    } catch (e) {}
   };
 
   Modules.preseason.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
-    mod.loadConfig();
-
-    const target = Math.max(1, Math.min(200, parseInt(mod.config.targetBattles, 10) || 10));
-    mod.config.targetBattles = target;
-    mod.saveConfig();
 
     await Modules.arena.goToArena();
     if (!Core.bodyText().includes('프리시즌')) {
@@ -55,12 +32,18 @@
       if (before === null) throw new Error('아레나의 오늘 전투 횟수를 읽지 못했습니다.');
       mod.cycleCount = before;
       Core.updateModuleButtons();
-      if (before >= target) {
-        Core.notifyCompleted('preseason', `오늘 프리시즌 아레나 ${before}회 완료 (설정 ${target}회)`);
+
+      // ⚠ 사용자 요청(2026-08): 고정 횟수 대신, "오늘 받은 프리시즌 보석"이
+      // 하루 최대치에 도달할 때까지 돈다. 프리시즌은 에너지가 안 드니
+      // 전투 횟수가 아니라 보석 진행률이 진짜 목표다.
+      const gemProgress = Modules.arena.readPreseasonGemProgress();
+      if (!gemProgress) throw new Error('오늘 받은 프리시즌 보석 진행률을 읽지 못했습니다.');
+      if (gemProgress.current >= gemProgress.max) {
+        Core.notifyCompleted('preseason', `오늘 프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 완료 (전투 ${before}회)`);
         return;
       }
 
-      Core.log('preseason', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}/${target}회`);
+      Core.log('preseason', `쿨타임 및 버튼 활성화 대기 중: 보석 ${gemProgress.current}/${gemProgress.max}개`);
       const startButton = await Modules.arena.waitForEnabledStart();
       if (!startButton) throw new Error('90초 안에 아레나 "전투 시작" 버튼이 활성화되지 않았습니다.');
       if (mod.stopRequested) return;
@@ -87,7 +70,8 @@
       }, 15000, 300);
       if (incremented === null) throw new Error('전투 후 오늘 전투 횟수 증가를 확인하지 못했습니다.');
       mod.cycleCount = incremented;
-      Core.log('preseason', `프리시즌 아레나 전투 완료: 오늘 ${incremented}/${target}회`);
+      const gemAfter = Modules.arena.readPreseasonGemProgress();
+      Core.log('preseason', `프리시즌 아레나 전투 완료: 오늘 ${incremented}회, 보석 ${gemAfter ? `${gemAfter.current}/${gemAfter.max}` : '?'}개`);
     }
   };
 
@@ -175,27 +159,10 @@
   function buildPreseasonTab(container) {
     const mod = Modules.preseason;
     const refs = UIRefs.preseason;
-    mod.loadConfig();
-
-    container.appendChild(labelEl('오늘 실행할 총 전투 횟수'));
-    const countInput = document.createElement('input');
-    countInput.type = 'number';
-    countInput.min = '1';
-    countInput.max = '200';
-    countInput.value = mod.config.targetBattles;
-    countInput.style.cssText = inputStyle();
-    countInput.addEventListener('change', () => {
-      const value = Math.max(1, Math.min(200, parseInt(countInput.value, 10) || 10));
-      mod.config.targetBattles = value;
-      countInput.value = value;
-      mod.saveConfig();
-      Core.updateModuleButtons();
-    });
-    container.appendChild(countInput);
 
     const description = document.createElement('div');
     description.textContent =
-      '정규 아레나는 토·일에만 열리지만, 프리시즌 기간엔 평일에도 아레나(/arena)가 열립니다. 이 탭은 요일 제약 없이 실행됩니다. "오늘 전투 횟수"를 기준으로 설정 횟수까지 실행합니다.';
+      '정규 아레나는 토·일에만 열리지만, 프리시즌 기간엔 평일에도 아레나(/arena)가 열립니다. 이 탭은 요일 제약 없이 실행됩니다. 고정 횟수가 아니라, "오늘 받은 프리시즌 보석"이 하루 최대치에 도달할 때까지 실행합니다.';
     description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin:7px 0;';
     container.appendChild(description);
 
@@ -224,7 +191,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [countInput];
+    refs.inputs = [];
 
     // ⚠ 사용자 요청(2026-08): "햇살 토큰"(여름 이벤트 한정) 일괄 사용
     // 버튼. 자동 반복 매크로가 아니라 눌렀을 때 그 자리에서 바로 실행되는

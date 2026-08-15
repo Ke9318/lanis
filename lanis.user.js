@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.13.99-stable
+// @version      1.14.2-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2834,20 +2834,26 @@
     }
     if (step === 'arena') {
       await this.runCoreModule('arena');
+      // ⚠ 사용자 요청(2026-08): 고정 목표 횟수 대신 "다음 전투 에너지
+      // 비용이 무료가 아니게 됐는지"로 완료를 판정한다(정규 아레나는 하루
+      // 20회부터 유료 전환).
+      const energyCost = Modules.arena.readNextBattleEnergyCost();
       const count = Modules.arena.readTodayBattleCount();
-      if (count === null || count < Modules.arena.config.targetBattles) {
-        throw new Error(`아레나 목표 횟수 확인 실패: ${count ?? '읽기 실패'}/${Modules.arena.config.targetBattles}`);
+      if (!energyCost || energyCost.isFree) {
+        throw new Error(`아레나 완료 확인 실패: 아직 무료 전투가 남아있거나 확인 못함 (오늘 ${count ?? '읽기 실패'}회)`);
       }
-      return `오늘 아레나 ${count}/${Modules.arena.config.targetBattles}회 확인`;
+      return `오늘 아레나 ${count}회 완료(무료 전투 소진 확인)`;
     }
     // ⚠ 사용자 요청(2026-08): 프리시즌 기간엔 정규 아레나와 별개로 평일에도
     // 돌려야 한다. 화면/버튼 구조가 동일해 Modules.arena.readTodayBattleCount
     // (this 안 쓰는 순수 함수)를 그대로 재사용해 검증한다.
     if (step === 'preseason') {
       await this.runCoreModule('preseason');
-      const count = Modules.arena.readTodayBattleCount();
-      if (count === null || count < Modules.preseason.config.targetBattles) {
-        throw new Error(`프리시즌 아레나 목표 횟수 확인 실패: ${count ?? '읽기 실패'}/${Modules.preseason.config.targetBattles}`);
+      // ⚠ 사용자 요청(2026-08): 고정 목표 횟수 대신 "오늘 받은 프리시즌
+      // 보석"이 하루 최대치에 도달했는지로 완료를 판정한다.
+      const gemProgress = Modules.arena.readPreseasonGemProgress();
+      if (!gemProgress || gemProgress.current < gemProgress.max) {
+        throw new Error(`프리시즌 아레나 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}`);
       }
       // ⚠ 사용자 요청(2026-08): "햇살 토큰"(여름 이벤트 한정) 일괄 사용도
       // 프리시즌 단계에 묶어서 일일 매크로 실행 시 같이 처리한다. 실패해도
@@ -2857,7 +2863,7 @@
       } catch (e) {
         Core.log('preseason', `⚠ 햇살 토큰 자동 사용 실패(프리시즌 전투 자체는 완료됨): ${e.message}`);
       }
-      return `오늘 프리시즌 아레나 ${count}/${Modules.preseason.config.targetBattles}회 확인`;
+      return `오늘 프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 완료`;
     }
     if (step === 'boss') {
       const boss = await Core.waitFor(() => window.__bossMacro || null, 10000, 250, null);
@@ -3144,7 +3150,6 @@
   }
 
   // -------------------------- 아레나 --------------------------
-  const ARENA_CONFIG_KEY = 'lrm-arena-config';
   const ARENA_RESUME_KEY = 'lrm-arena-resume';
   Modules.arena = {
     id: 'arena',
@@ -3153,23 +3158,6 @@
     runId: 0,
     loopPromise: null,
     cycleCount: 0,
-    config: {
-      targetBattles: 10,
-    },
-  };
-
-  Modules.arena.saveConfig = function () {
-    try {
-      localStorage.setItem(ARENA_CONFIG_KEY, JSON.stringify(this.config));
-    } catch (e) {}
-  };
-
-  Modules.arena.loadConfig = function () {
-    try {
-      const saved = JSON.parse(localStorage.getItem(ARENA_CONFIG_KEY) || '{}');
-      const value = parseInt(saved.targetBattles, 10);
-      if (Number.isFinite(value) && value >= 1 && value <= 200) this.config.targetBattles = value;
-    } catch (e) {}
   };
 
   Modules.arena.todayKey = function () {
@@ -3186,7 +3174,6 @@
       localStorage.setItem(ARENA_RESUME_KEY, JSON.stringify({
         running: true,
         date: this.todayKey(),
-        targetBattles: this.config.targetBattles,
       }));
     } catch (e) {}
   };
@@ -3217,6 +3204,44 @@
     for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
       const match = (node.textContent || '').match(/오늘 전투 횟수\s*(\d+)\s*회/);
       if (match) return parseInt(match[1], 10);
+    }
+    return null;
+  };
+
+  // ⚠ 사용자 요청(2026-08, 실전 확인): 정규 아레나는 하루 20회부터 전투마다
+  // 에너지가 소모된다(20-39회:1, 40-59회:2 ... 게임 자체 규칙 설명에 명시).
+  // "오늘 전투 횟수"라는 고정 목표 대신, 화면의 "다음 전투 에너지 비용"이
+  // "무료"인 동안에만 계속 돌리고 무료가 아니게 되는 순간 멈추는 게 맞다.
+  // 실전 확인: 라벨과 값이 델리미터 없이 붙어서 나온다
+  // (예: "다음 전투 에너지 비용무료").
+  Modules.arena.readNextBattleEnergyCost = function () {
+    const marker = Core.gameElements('*').find((el) =>
+      el.children.length === 0 && el.textContent.trim() === '다음 전투 에너지 비용'
+    );
+    if (!marker) return null;
+    let node = marker.parentElement;
+    for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+      const text = node.textContent || '';
+      if (text.includes('다음 전투 에너지 비용') && text.length < 60) {
+        return { isFree: text.includes('무료'), raw: text.replace('다음 전투 에너지 비용', '').trim() };
+      }
+    }
+    return null;
+  };
+
+  // ⚠ 사용자 요청(2026-08, 실전 확인): 프리시즌은 에너지가 전혀 소모되지
+  // 않는 대신, "오늘 받은 프리시즌 보석"이 하루 최대치(실전 확인: 150개,
+  // 전투 1회당 5개 지급이라 30회분)에 도달하면 더 받을 게 없다. 고정 전투
+  // 횟수 대신 이 진행률을 기준으로 반복해야 한다.
+  Modules.arena.readPreseasonGemProgress = function () {
+    const marker = Core.gameElements('*').find((el) =>
+      el.children.length === 0 && el.textContent.trim() === '오늘 받은 프리시즌 보석'
+    );
+    if (!marker) return null;
+    let node = marker.parentElement;
+    for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+      const match = (node.textContent || '').match(/오늘 받은 프리시즌 보석\s*(\d+)\s*\/\s*(\d+)\s*개/);
+      if (match) return { current: parseInt(match[1], 10), max: parseInt(match[2], 10) };
     }
     return null;
   };
@@ -3304,16 +3329,12 @@
   Modules.arena.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
-    mod.loadConfig();
 
     if (!mod.isWeekend()) {
       mod.clearResume();
       Core.notifyStopped('arena', '아레나는 토요일과 일요일에만 자동 실행할 수 있습니다.');
       return;
     }
-    const target = Math.max(1, Math.min(200, parseInt(mod.config.targetBattles, 10) || 10));
-    mod.config.targetBattles = target;
-    mod.saveConfig();
     mod.saveResume();
     await mod.goToArena();
 
@@ -3325,9 +3346,15 @@
       if (before === null) throw new Error('아레나의 오늘 전투 횟수를 읽지 못했습니다.');
       mod.cycleCount = before;
       Core.updateModuleButtons();
-      if (before >= target) {
+
+      // ⚠ 사용자 요청(2026-08): 고정 횟수 대신, 다음 전투 에너지 비용이
+      // "무료"인 동안만 계속 돈다. 무료가 아니게 된 순간 정지한다(보통
+      // 20회 지점).
+      const energyCost = mod.readNextBattleEnergyCost();
+      if (!energyCost) throw new Error('아레나의 "다음 전투 에너지 비용"을 읽지 못했습니다.');
+      if (!energyCost.isFree) {
         mod.clearResume();
-        Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (설정 ${target}회)`);
+        Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (에너지 비용이 "${energyCost.raw}"로 전환됨 - 무료 전투 소진)`);
         return;
       }
 
@@ -3336,7 +3363,7 @@
       // 이중 구조였다. 결과창에서 "돌아가기"를 누르고 곧바로 이 자리로 돌아오므로,
       // 고정 대기 없이 진짜 쿨타임 감지(0.5초 간격 폴링)만으로 버튼이 켜지는
       // 즉시 공격하도록 단순화한다.
-      Core.log('arena', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}/${target}회`);
+      Core.log('arena', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}회 (다음 전투 비용: 무료)`);
       const startButton = await mod.waitForEnabledStart();
       if (!startButton) throw new Error('90초 안에 아레나 "전투 시작" 버튼이 활성화되지 않았습니다.');
       if (mod.stopRequested) return;
@@ -3363,7 +3390,7 @@
       }, 15000, 300);
       if (incremented === null) throw new Error('전투 후 오늘 전투 횟수 증가를 확인하지 못했습니다.');
       mod.cycleCount = incremented;
-      Core.log('arena', `아레나 전투 완료: 오늘 ${incremented}/${target}회`);
+      Core.log('arena', `아레나 전투 완료: 오늘 ${incremented}회`);
     }
   };
 
@@ -3371,27 +3398,10 @@
   function buildArenaTab(container) {
     const mod = Modules.arena;
     const refs = UIRefs.arena;
-    mod.loadConfig();
-
-    container.appendChild(labelEl('오늘 실행할 총 전투 횟수'));
-    const countInput = document.createElement('input');
-    countInput.type = 'number';
-    countInput.min = '1';
-    countInput.max = '200';
-    countInput.value = mod.config.targetBattles;
-    countInput.style.cssText = inputStyle();
-    countInput.addEventListener('change', () => {
-      const value = Math.max(1, Math.min(200, parseInt(countInput.value, 10) || 10));
-      mod.config.targetBattles = value;
-      countInput.value = value;
-      mod.saveConfig();
-      Core.updateModuleButtons();
-    });
-    container.appendChild(countInput);
 
     const description = document.createElement('div');
     description.textContent =
-      '아레나 화면의 "오늘 전투 횟수"를 기준으로 설정 횟수까지 실행합니다. 중간에 새로고침되거나 다시 시작해도 오늘 이미 진행한 횟수를 빼고 이어서 실행합니다.';
+      '고정 횟수가 아니라, 화면의 "다음 전투 에너지 비용"이 "무료"인 동안만 계속 실행합니다. 무료가 아니게 되는 순간(보통 하루 20회) 자동으로 멈춥니다.';
     description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin:7px 0;';
     container.appendChild(description);
 
@@ -3420,7 +3430,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [countInput];
+    refs.inputs = [];
   }
 
   // -------------------------- 프리시즌 아레나 --------------------------
@@ -3433,39 +3443,16 @@
   // 바인딩 없이 그대로 재사용 가능함)를 그대로 쓰고, 요일 제약만 뺀 별도
   // 모듈로 만든다. 프리시즌이 끝나 화면에 배너가 안 뜨거나 /arena 진입
   // 자체가 막히면 goToArena가 기존과 동일하게 에러로 정지시킨다.
-  const PRESEASON_CONFIG_KEY = 'lrm-preseason-config';
   Modules.preseason = {
     id: 'preseason',
     running: false,
     stopRequested: false,
     cycleCount: 0,
-    config: {
-      targetBattles: 10,
-    },
-  };
-
-  Modules.preseason.saveConfig = function () {
-    try {
-      localStorage.setItem(PRESEASON_CONFIG_KEY, JSON.stringify(this.config));
-    } catch (e) {}
-  };
-
-  Modules.preseason.loadConfig = function () {
-    try {
-      const saved = JSON.parse(localStorage.getItem(PRESEASON_CONFIG_KEY) || '{}');
-      const value = parseInt(saved.targetBattles, 10);
-      if (Number.isFinite(value) && value >= 1 && value <= 200) this.config.targetBattles = value;
-    } catch (e) {}
   };
 
   Modules.preseason.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
-    mod.loadConfig();
-
-    const target = Math.max(1, Math.min(200, parseInt(mod.config.targetBattles, 10) || 10));
-    mod.config.targetBattles = target;
-    mod.saveConfig();
 
     await Modules.arena.goToArena();
     if (!Core.bodyText().includes('프리시즌')) {
@@ -3480,12 +3467,18 @@
       if (before === null) throw new Error('아레나의 오늘 전투 횟수를 읽지 못했습니다.');
       mod.cycleCount = before;
       Core.updateModuleButtons();
-      if (before >= target) {
-        Core.notifyCompleted('preseason', `오늘 프리시즌 아레나 ${before}회 완료 (설정 ${target}회)`);
+
+      // ⚠ 사용자 요청(2026-08): 고정 횟수 대신, "오늘 받은 프리시즌 보석"이
+      // 하루 최대치에 도달할 때까지 돈다. 프리시즌은 에너지가 안 드니
+      // 전투 횟수가 아니라 보석 진행률이 진짜 목표다.
+      const gemProgress = Modules.arena.readPreseasonGemProgress();
+      if (!gemProgress) throw new Error('오늘 받은 프리시즌 보석 진행률을 읽지 못했습니다.');
+      if (gemProgress.current >= gemProgress.max) {
+        Core.notifyCompleted('preseason', `오늘 프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 완료 (전투 ${before}회)`);
         return;
       }
 
-      Core.log('preseason', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}/${target}회`);
+      Core.log('preseason', `쿨타임 및 버튼 활성화 대기 중: 보석 ${gemProgress.current}/${gemProgress.max}개`);
       const startButton = await Modules.arena.waitForEnabledStart();
       if (!startButton) throw new Error('90초 안에 아레나 "전투 시작" 버튼이 활성화되지 않았습니다.');
       if (mod.stopRequested) return;
@@ -3512,7 +3505,8 @@
       }, 15000, 300);
       if (incremented === null) throw new Error('전투 후 오늘 전투 횟수 증가를 확인하지 못했습니다.');
       mod.cycleCount = incremented;
-      Core.log('preseason', `프리시즌 아레나 전투 완료: 오늘 ${incremented}/${target}회`);
+      const gemAfter = Modules.arena.readPreseasonGemProgress();
+      Core.log('preseason', `프리시즌 아레나 전투 완료: 오늘 ${incremented}회, 보석 ${gemAfter ? `${gemAfter.current}/${gemAfter.max}` : '?'}개`);
     }
   };
 
@@ -3600,27 +3594,10 @@
   function buildPreseasonTab(container) {
     const mod = Modules.preseason;
     const refs = UIRefs.preseason;
-    mod.loadConfig();
-
-    container.appendChild(labelEl('오늘 실행할 총 전투 횟수'));
-    const countInput = document.createElement('input');
-    countInput.type = 'number';
-    countInput.min = '1';
-    countInput.max = '200';
-    countInput.value = mod.config.targetBattles;
-    countInput.style.cssText = inputStyle();
-    countInput.addEventListener('change', () => {
-      const value = Math.max(1, Math.min(200, parseInt(countInput.value, 10) || 10));
-      mod.config.targetBattles = value;
-      countInput.value = value;
-      mod.saveConfig();
-      Core.updateModuleButtons();
-    });
-    container.appendChild(countInput);
 
     const description = document.createElement('div');
     description.textContent =
-      '정규 아레나는 토·일에만 열리지만, 프리시즌 기간엔 평일에도 아레나(/arena)가 열립니다. 이 탭은 요일 제약 없이 실행됩니다. "오늘 전투 횟수"를 기준으로 설정 횟수까지 실행합니다.';
+      '정규 아레나는 토·일에만 열리지만, 프리시즌 기간엔 평일에도 아레나(/arena)가 열립니다. 이 탭은 요일 제약 없이 실행됩니다. 고정 횟수가 아니라, "오늘 받은 프리시즌 보석"이 하루 최대치에 도달할 때까지 실행합니다.';
     description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin:7px 0;';
     container.appendChild(description);
 
@@ -3649,7 +3626,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [countInput];
+    refs.inputs = [];
 
     // ⚠ 사용자 요청(2026-08): "햇살 토큰"(여름 이벤트 한정) 일괄 사용
     // 버튼. 자동 반복 매크로가 아니라 눌렀을 때 그 자리에서 바로 실행되는
@@ -9729,8 +9706,10 @@
       const cycleLabel =
         id === 'dungeon'
           ? `오늘 클리어 ${mod.cycleCount}개`
-          : id === 'arena' || id === 'preseason'
-          ? `오늘 전투 ${mod.cycleCount}/${mod.config.targetBattles}회`
+          : id === 'arena'
+          ? `오늘 전투 ${mod.cycleCount}회 (무료인 동안 반복)`
+          : id === 'preseason'
+          ? `오늘 전투 ${mod.cycleCount}회 (보석 한도까지 반복)`
           : id === 'deepdungeon'
           ? `던전의 주인 도전 ${mod.cycleCount}회`
           : `사이클 ${mod.cycleCount}`;

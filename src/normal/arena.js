@@ -1,5 +1,4 @@
   // -------------------------- 아레나 --------------------------
-  const ARENA_CONFIG_KEY = 'lrm-arena-config';
   const ARENA_RESUME_KEY = 'lrm-arena-resume';
   Modules.arena = {
     id: 'arena',
@@ -8,23 +7,6 @@
     runId: 0,
     loopPromise: null,
     cycleCount: 0,
-    config: {
-      targetBattles: 10,
-    },
-  };
-
-  Modules.arena.saveConfig = function () {
-    try {
-      localStorage.setItem(ARENA_CONFIG_KEY, JSON.stringify(this.config));
-    } catch (e) {}
-  };
-
-  Modules.arena.loadConfig = function () {
-    try {
-      const saved = JSON.parse(localStorage.getItem(ARENA_CONFIG_KEY) || '{}');
-      const value = parseInt(saved.targetBattles, 10);
-      if (Number.isFinite(value) && value >= 1 && value <= 200) this.config.targetBattles = value;
-    } catch (e) {}
   };
 
   Modules.arena.todayKey = function () {
@@ -41,7 +23,6 @@
       localStorage.setItem(ARENA_RESUME_KEY, JSON.stringify({
         running: true,
         date: this.todayKey(),
-        targetBattles: this.config.targetBattles,
       }));
     } catch (e) {}
   };
@@ -72,6 +53,44 @@
     for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
       const match = (node.textContent || '').match(/오늘 전투 횟수\s*(\d+)\s*회/);
       if (match) return parseInt(match[1], 10);
+    }
+    return null;
+  };
+
+  // ⚠ 사용자 요청(2026-08, 실전 확인): 정규 아레나는 하루 20회부터 전투마다
+  // 에너지가 소모된다(20-39회:1, 40-59회:2 ... 게임 자체 규칙 설명에 명시).
+  // "오늘 전투 횟수"라는 고정 목표 대신, 화면의 "다음 전투 에너지 비용"이
+  // "무료"인 동안에만 계속 돌리고 무료가 아니게 되는 순간 멈추는 게 맞다.
+  // 실전 확인: 라벨과 값이 델리미터 없이 붙어서 나온다
+  // (예: "다음 전투 에너지 비용무료").
+  Modules.arena.readNextBattleEnergyCost = function () {
+    const marker = Core.gameElements('*').find((el) =>
+      el.children.length === 0 && el.textContent.trim() === '다음 전투 에너지 비용'
+    );
+    if (!marker) return null;
+    let node = marker.parentElement;
+    for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+      const text = node.textContent || '';
+      if (text.includes('다음 전투 에너지 비용') && text.length < 60) {
+        return { isFree: text.includes('무료'), raw: text.replace('다음 전투 에너지 비용', '').trim() };
+      }
+    }
+    return null;
+  };
+
+  // ⚠ 사용자 요청(2026-08, 실전 확인): 프리시즌은 에너지가 전혀 소모되지
+  // 않는 대신, "오늘 받은 프리시즌 보석"이 하루 최대치(실전 확인: 150개,
+  // 전투 1회당 5개 지급이라 30회분)에 도달하면 더 받을 게 없다. 고정 전투
+  // 횟수 대신 이 진행률을 기준으로 반복해야 한다.
+  Modules.arena.readPreseasonGemProgress = function () {
+    const marker = Core.gameElements('*').find((el) =>
+      el.children.length === 0 && el.textContent.trim() === '오늘 받은 프리시즌 보석'
+    );
+    if (!marker) return null;
+    let node = marker.parentElement;
+    for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+      const match = (node.textContent || '').match(/오늘 받은 프리시즌 보석\s*(\d+)\s*\/\s*(\d+)\s*개/);
+      if (match) return { current: parseInt(match[1], 10), max: parseInt(match[2], 10) };
     }
     return null;
   };
@@ -159,16 +178,12 @@
   Modules.arena.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
-    mod.loadConfig();
 
     if (!mod.isWeekend()) {
       mod.clearResume();
       Core.notifyStopped('arena', '아레나는 토요일과 일요일에만 자동 실행할 수 있습니다.');
       return;
     }
-    const target = Math.max(1, Math.min(200, parseInt(mod.config.targetBattles, 10) || 10));
-    mod.config.targetBattles = target;
-    mod.saveConfig();
     mod.saveResume();
     await mod.goToArena();
 
@@ -180,9 +195,15 @@
       if (before === null) throw new Error('아레나의 오늘 전투 횟수를 읽지 못했습니다.');
       mod.cycleCount = before;
       Core.updateModuleButtons();
-      if (before >= target) {
+
+      // ⚠ 사용자 요청(2026-08): 고정 횟수 대신, 다음 전투 에너지 비용이
+      // "무료"인 동안만 계속 돈다. 무료가 아니게 된 순간 정지한다(보통
+      // 20회 지점).
+      const energyCost = mod.readNextBattleEnergyCost();
+      if (!energyCost) throw new Error('아레나의 "다음 전투 에너지 비용"을 읽지 못했습니다.');
+      if (!energyCost.isFree) {
         mod.clearResume();
-        Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (설정 ${target}회)`);
+        Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (에너지 비용이 "${energyCost.raw}"로 전환됨 - 무료 전투 소진)`);
         return;
       }
 
@@ -191,7 +212,7 @@
       // 이중 구조였다. 결과창에서 "돌아가기"를 누르고 곧바로 이 자리로 돌아오므로,
       // 고정 대기 없이 진짜 쿨타임 감지(0.5초 간격 폴링)만으로 버튼이 켜지는
       // 즉시 공격하도록 단순화한다.
-      Core.log('arena', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}/${target}회`);
+      Core.log('arena', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}회 (다음 전투 비용: 무료)`);
       const startButton = await mod.waitForEnabledStart();
       if (!startButton) throw new Error('90초 안에 아레나 "전투 시작" 버튼이 활성화되지 않았습니다.');
       if (mod.stopRequested) return;
@@ -218,7 +239,7 @@
       }, 15000, 300);
       if (incremented === null) throw new Error('전투 후 오늘 전투 횟수 증가를 확인하지 못했습니다.');
       mod.cycleCount = incremented;
-      Core.log('arena', `아레나 전투 완료: 오늘 ${incremented}/${target}회`);
+      Core.log('arena', `아레나 전투 완료: 오늘 ${incremented}회`);
     }
   };
 
@@ -226,27 +247,10 @@
   function buildArenaTab(container) {
     const mod = Modules.arena;
     const refs = UIRefs.arena;
-    mod.loadConfig();
-
-    container.appendChild(labelEl('오늘 실행할 총 전투 횟수'));
-    const countInput = document.createElement('input');
-    countInput.type = 'number';
-    countInput.min = '1';
-    countInput.max = '200';
-    countInput.value = mod.config.targetBattles;
-    countInput.style.cssText = inputStyle();
-    countInput.addEventListener('change', () => {
-      const value = Math.max(1, Math.min(200, parseInt(countInput.value, 10) || 10));
-      mod.config.targetBattles = value;
-      countInput.value = value;
-      mod.saveConfig();
-      Core.updateModuleButtons();
-    });
-    container.appendChild(countInput);
 
     const description = document.createElement('div');
     description.textContent =
-      '아레나 화면의 "오늘 전투 횟수"를 기준으로 설정 횟수까지 실행합니다. 중간에 새로고침되거나 다시 시작해도 오늘 이미 진행한 횟수를 빼고 이어서 실행합니다.';
+      '고정 횟수가 아니라, 화면의 "다음 전투 에너지 비용"이 "무료"인 동안만 계속 실행합니다. 무료가 아니게 되는 순간(보통 하루 20회) 자동으로 멈춥니다.';
     description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin:7px 0;';
     container.appendChild(description);
 
@@ -275,5 +279,5 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [countInput];
+    refs.inputs = [];
   }
