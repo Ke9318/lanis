@@ -1841,7 +1841,16 @@
     Core.moduleResults[moduleId] = { ok: false, message: msg, at: Date.now() };
     Core.log(moduleId, `⚠ ${msg}`);
     Core.showBanner(moduleId, msg, false);
-    Core.playStopSound();
+    // ⚠ 버그 수정(2026-08, 사용자 확인): 일일 매크로가 하위 모듈(던전·보스·
+    // 자동사냥 등)을 순서대로 실행하는 동안, 각 하위 모듈이 끝날 때마다
+    // 이 함수가 그대로 호출되어 그때마다 소리가 났다 - 일일 한 번 돌리는
+    // 동안 선택된 단계 수만큼(최대 6~7번) 소리가 울리고, 거기에 일일
+    // 전체 완료 소리까지 더해져 "중간에 여러 번 들린다"는 문제가 있었다.
+    // 일일 매크로 실행 중(Core.dailyActive)에는 개별 하위 모듈 소리를
+    // 내지 않고 배너·로그만 남긴다 - 최종 소리는 일일 자체 종료 처리에서
+    // (dailyActive를 false로 되돌린 뒤) 딱 한 번만 울린다. 개별 모듈을
+    // 단독 실행할 때(dailyActive=false)는 기존처럼 그대로 소리가 난다.
+    if (!Core.dailyActive) Core.playStopSound();
     Core.stopModule(moduleId);
   };
 
@@ -1849,7 +1858,7 @@
     Core.moduleResults[moduleId] = { ok: true, message: msg, at: Date.now() };
     Core.log(moduleId, `✅ ${msg}`);
     Core.showBanner(moduleId, msg, true);
-    Core.playCompleteSound();
+    if (!Core.dailyActive) Core.playCompleteSound();
     Core.stopModule(moduleId);
   };
 

@@ -69,7 +69,10 @@
         if (!Core.isRunCancelled(moduleId, runId)) {
           Core.log(moduleId, `처리되지 않은 오류: ${e && e.message ? e.message : String(e)}`);
           Core.showBanner(moduleId, `처리되지 않은 오류로 정지했습니다: ${e && e.message ? e.message : String(e)}`, false);
-          Core.playStopSound();
+          // ⚠ 버그 수정(2026-08): notifyStopped/notifyCompleted와 동일한
+          // 이유로, 일일 매크로 실행 중에는 하위 모듈 개별 오류 소리를
+          // 억제한다(최종 소리는 일일 종료 처리에서 한 번만 울림).
+          if (!Core.dailyActive) Core.playStopSound();
         }
       })
       .finally(() => {
