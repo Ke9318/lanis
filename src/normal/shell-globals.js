@@ -4,14 +4,14 @@
   const MODULE_LABELS = {
     daily: '일일',
     rejob: '재전직',
-    autohunt: '자동사냥',
     raremap: '레어맵',
     dungeon: '던전',
-    arena: '아레나',
-    preseason: '이벤트',
-    deepdungeon: '심층던전',
-    guildboss: '길드보스',
+    autohunt: '자동사냥',
     boss: '보스',
+    deepdungeon: '심층던전',
+    arena: '아레나',
+    guildboss: '길드보스',
+    preseason: '이벤트',
   };
   const moduleDisplayLabel = (moduleId) => MODULE_LABELS[moduleId] || moduleId;
 

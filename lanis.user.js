@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.4-stable
+// @version      1.14.5-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -1962,14 +1962,14 @@
   const MODULE_LABELS = {
     daily: '일일',
     rejob: '재전직',
-    autohunt: '자동사냥',
     raremap: '레어맵',
     dungeon: '던전',
-    arena: '아레나',
-    preseason: '이벤트',
-    deepdungeon: '심층던전',
-    guildboss: '길드보스',
+    autohunt: '자동사냥',
     boss: '보스',
+    deepdungeon: '심층던전',
+    arena: '아레나',
+    guildboss: '길드보스',
+    preseason: '이벤트',
   };
   const moduleDisplayLabel = (moduleId) => MODULE_LABELS[moduleId] || moduleId;
 
@@ -9848,18 +9848,30 @@
     header.append(title, dailyHeaderBtn);
     panel.appendChild(header);
 
-    const tabBar = document.createElement('div');
-    tabBar.style.cssText = 'display:flex; border-bottom:1px solid #444; flex-wrap:wrap;';
+    // ⚠ 사용자 요청(2026-08): 탭을 종류별로 정확히 4줄로 고정해서 배치한다
+    // (화면 너비에 따라 자동 줄바꿈되는 flex-wrap 한 덩어리가 아니라, 그룹별
+    // 로 명시적인 행을 나눔) - 성장/파밍(재전직·레어맵), 전투 콘텐츠(던전·
+    // 자동사냥·보스·심층던전·아레나), 길드(길드보스), 이벤트(이벤트) 순.
+    const TAB_ROWS = [
+      ['rejob', 'raremap'],
+      ['dungeon', 'autohunt', 'boss', 'deepdungeon', 'arena'],
+      ['guildboss'],
+      ['preseason'],
+    ];
     const tabButtons = {};
-    Object.keys(MODULE_LABELS).filter((id) => id !== 'daily').forEach((id) => {
-      const tabBtn = document.createElement('button');
-      tabBtn.textContent = MODULE_LABELS[id];
-      tabBtn.style.cssText = 'flex:1; min-width:60px; padding:6px 0; background:#1a1a1a; color:#eee; border:none; cursor:pointer; font-size:12px;';
-      tabBtn.addEventListener('click', () => switchTab(id));
-      tabBar.appendChild(tabBtn);
-      tabButtons[id] = tabBtn;
+    TAB_ROWS.forEach((rowIds) => {
+      const rowEl = document.createElement('div');
+      rowEl.style.cssText = 'display:flex; border-bottom:1px solid #444;';
+      rowIds.forEach((id) => {
+        const tabBtn = document.createElement('button');
+        tabBtn.textContent = MODULE_LABELS[id];
+        tabBtn.style.cssText = 'flex:1; min-width:60px; padding:6px 0; background:#1a1a1a; color:#eee; border:none; cursor:pointer; font-size:12px;';
+        tabBtn.addEventListener('click', () => switchTab(id));
+        rowEl.appendChild(tabBtn);
+        tabButtons[id] = tabBtn;
+      });
+      panel.appendChild(rowEl);
     });
-    panel.appendChild(tabBar);
 
     const tabContents = {};
     const contentWrap = document.createElement('div');
