@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.7-stable
+// @version      1.14.8-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -13499,6 +13499,12 @@
   // 재사용). 목/토 패턴(방깎 단계가 별도로 있음)과는 완전히 다른 흐름이라
   // 별도 함수로 유지하고, M.runCorruptedPurifierSword가 요일을 보고 이
   // 함수와 목/토 패턴 중 하나로 위임한다.
+  M.getCorruptedPurifierScrollDefenseThreshold = (
+    element,
+    baseThreshold = 400,
+    kstDay = M.getKstDayOfWeek()
+  ) => kstDay === 0 && element === '어둠' ? 280 : baseThreshold;
+
   M.runCorruptedPurifierSwordSealPattern = async ({
     requiredSeals = ['불굴', '엔드 블로킹'],
     sealRoundsPerAttempt = 2, // 5턴씩 2회 = 10턴
@@ -13557,6 +13563,14 @@
     const dealPresetName = `${element} 딜`;
     await M.applyBossPreset(dealPresetName);
     push(`[딜] 오늘 속성(${element}) 기준 프리셋 "${dealPresetName}" 적용`);
+    const effectiveDefenseDropThreshold =
+      M.getCorruptedPurifierScrollDefenseThreshold(element, defenseDropThreshold);
+    if (effectiveDefenseDropThreshold !== defenseDropThreshold) {
+      push(
+        `[딜] 일요일 어둠 속성 저확률 보정: 공격 스크롤 기준 ` +
+        `방↓${defenseDropThreshold} → 방↓${effectiveDefenseDropThreshold}`
+      );
+    }
 
     // 3단계: 딜 - HP/MP 기준 회복/공격 반복, 방↓400 이상일 때마다 스크롤 재사용
     let state = M.getHpMpNumbers();
@@ -13574,10 +13588,17 @@
       } else {
         const defDrop = M.getLatestBossDefenseDrop();
         const scrollReady = !scrollExhausted && (turnsSinceScroll === null || turnsSinceScroll >= scrollDurationTurns);
-        if (scrollReady && defDrop !== null && defDrop >= defenseDropThreshold) {
+        if (
+          scrollReady &&
+          defDrop !== null &&
+          defDrop >= effectiveDefenseDropThreshold
+        ) {
           try {
             await M.useScrolls(['공격']);
-            push(`[딜 ${round}] 방↓${defDrop} >= ${defenseDropThreshold} -> 공격 스크롤 사용`);
+            push(
+              `[딜 ${round}] 방↓${defDrop} >= ${effectiveDefenseDropThreshold} ` +
+              '-> 공격 스크롤 사용'
+            );
             turnsSinceScroll = 0;
           } catch (e) {
             scrollExhausted = true;
