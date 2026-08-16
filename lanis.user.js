@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.8-stable
+// @version      1.14.9-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5576,6 +5576,15 @@
     return 1200 + Math.random() * 900;
   };
 
+  // 지도 사용은 각 클릭 뒤의 실제 DOM 변화를 확인하므로, 정상 경로에서
+  // 긴 선행 대기를 세 번씩 겹칠 필요가 없다. 짧은 입력 간격으로 진행하고
+  // 렌더링이 느릴 때는 아래 waitFor가 준비될 때까지 기다린다.
+  Modules.raremap.MAP_ACTION_DELAYS = {
+    open: { beforeMin: 120, beforeMax: 280 },
+    select: { beforeMin: 80, beforeMax: 180 },
+    use: { beforeMin: 100, beforeMax: 220 },
+  };
+
   Modules.raremap.getMapIcon = function () {
     return document.querySelector('div[aria-label="지도 아이템을 사용해 레어맵으로 이동하기"]');
   };
@@ -5710,7 +5719,7 @@
       if (!this.getMapDialog()) {
         const opened = await Core.safeClick(
           () => this.getMapIcon(),
-          { beforeMin: 600, beforeMax: 1300 }
+          this.MAP_ACTION_DELAYS.open
         );
         if (!opened) {
           Core.log('raremap', `지도 아이콘 클릭 실패 (${attempt}/3)`);
@@ -5751,7 +5760,7 @@
       const selected = await Core.safeClick(() => {
         const freshDialog = this.getMapDialog();
         return freshDialog ? this.getTopRadio(freshDialog) : null;
-      }, { beforeMin: 600, beforeMax: 1300 });
+      }, this.MAP_ACTION_DELAYS.select);
       if (!selected) {
         Core.log('raremap', `지도 항목 선택 실패 (${attempt}/3)`);
         await this.closeMapDialog();
@@ -5780,7 +5789,7 @@
         return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true'
           ? button
           : null;
-      }, { beforeMin: 600, beforeMax: 1300 });
+      }, this.MAP_ACTION_DELAYS.use);
       if (!used) {
         Core.log('raremap', `사용하기 버튼 클릭 실패 (${attempt}/3)`);
         await this.closeMapDialog();
@@ -5885,10 +5894,18 @@
     const mod = this;
     mod.cycleCount = 0;
     mod.stopReason = '';
+    let nextBatchPauseAt = Core.rand(5, 8);
     while (mod.running && mod.cycleCount < mod.config.maxCycles) {
       await mod.runCycle();
       if (!mod.running) break;
-      await Core.sleep(1600);
+      if (mod.cycleCount >= nextBatchPauseAt) {
+        const pauseMs = Core.rand(1800, 3200);
+        Core.log('raremap', `${mod.cycleCount}장 처리 완료 → ${Math.round(pauseMs / 100) / 10}초 묶음 휴식`);
+        await Core.sleep(pauseMs);
+        nextBatchPauseAt = mod.cycleCount + Core.rand(5, 8);
+      } else {
+        await Core.sleep(Core.rand(250, 550));
+      }
     }
     if (mod.stopRequested) {
       Core.log('raremap', '사용자 요청으로 레어맵 매크로를 종료했습니다.');
