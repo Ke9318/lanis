@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.9-stable
+// @version      1.14.10-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -122,6 +122,17 @@
   window.__lanisBackgroundSleep = Core.sleep;
   Core.rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
   Core.humanDelay = (minMs, maxMs) => Core.sleep(minMs + Math.random() * (maxMs - minMs));
+  // Fisher–Yates shuffle. 원본 배열은 건드리지 않고 새 배열을 반환한다.
+  // (sort(() => Math.random() - 0.5) 방식은 비교 함수 특성상 분포가 고르지
+  // 않다고 알려져 있어 이 방식을 쓴다.)
+  Core.shuffleArray = function (arr) {
+    const result = [...arr];
+    for (let i = result.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [result[i], result[j]] = [result[j], result[i]];
+    }
+    return result;
+  };
 
   Core.isRunCancelled = function (moduleId, runId) {
     if (!moduleId) return false;
@@ -368,7 +379,8 @@
   Core.clickNavMenuExact = async function (
     navLabel,
     itemText,
-    shouldCancel = Core.defaultShouldCancel
+    shouldCancel = Core.defaultShouldCancel,
+    { nav = { min: 500, max: 1000 }, item = { min: 500, max: 1300 } } = {}
   ) {
     // ⚠ 실전 확인(진단 스크립트로 직접 잡음): 이전 사이클에서 상단 메뉴가 안
     // 닫힌 채 남아있으면, 그 동안 동작하는 MUI 메뉴 트리거(이 경우 "${navLabel}")
@@ -391,29 +403,30 @@
       );
       if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
       if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), {
-        beforeMin: 500,
-        beforeMax: 1000,
+        beforeMin: nav.min,
+        beforeMax: nav.max,
         shouldCancel,
       }))) {
         throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
       }
-      const item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
-      if (!item) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
-      if (!(await Core.safeClick(findItem, { shouldCancel }))) {
+      const itemEl = await Core.waitFor(findItem, 15000, 300, shouldCancel);
+      if (!itemEl) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
+      if (!(await Core.safeClick(findItem, { beforeMin: item.min, beforeMax: item.max, shouldCancel }))) {
         throw new Error(`메뉴 항목 "${itemText}"가 클릭 직전에 사라짐`);
       }
     };
     // 이전 화면 전환 중 남아있던 메뉴 항목은 클릭하는 순간 스스로 닫혀
     // 사라질 수 있다. 그 첫 시도가 실패해도 곧장 예외를 던지지 않고,
     // "캐릭" 버튼을 새로 눌러 메뉴를 여는 정상 경로로 재시도한다.
-    if (findItem() && (await Core.safeClick(findItem, { shouldCancel }))) return;
+    if (findItem() && (await Core.safeClick(findItem, { beforeMin: item.min, beforeMax: item.max, shouldCancel }))) return;
     await openFresh();
   };
 
   Core.clickNavMenuSuffix = async function (
     navLabel,
     suffixText,
-    shouldCancel = Core.defaultShouldCancel
+    shouldCancel = Core.defaultShouldCancel,
+    { nav = { min: 500, max: 1000 }, item = { min: 500, max: 1300 } } = {}
   ) {
     // ⚠ clickNavMenuExact와 동일한 이유로 메뉴 항목이 이미 열려있는지 먼저 확인한다.
     const findItem = () => [...document.querySelectorAll('[role="menuitem"]')].find(
@@ -428,21 +441,21 @@
       );
       if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
       if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), {
-        beforeMin: 500,
-        beforeMax: 1000,
+        beforeMin: nav.min,
+        beforeMax: nav.max,
         shouldCancel,
       }))) {
         throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
       }
-      const item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
-      if (!item) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
-      if (!(await Core.safeClick(findItem, { shouldCancel }))) {
+      const itemEl = await Core.waitFor(findItem, 15000, 300, shouldCancel);
+      if (!itemEl) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
+      if (!(await Core.safeClick(findItem, { beforeMin: item.min, beforeMax: item.max, shouldCancel }))) {
         throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
       }
     };
     // clickNavMenuExact와 동일한 이유로, 재사용하려던 메뉴 항목의 첫 클릭이
     // 실패해도 곧장 실패 처리하지 않고 메뉴를 새로 열어 재시도한다.
-    if (findItem() && (await Core.safeClick(findItem, { shouldCancel }))) return;
+    if (findItem() && (await Core.safeClick(findItem, { beforeMin: item.min, beforeMax: item.max, shouldCancel }))) return;
     await openFresh();
   };
 
@@ -1666,9 +1679,14 @@
     return true;
   };
 
-  Core.bankDepositAll = async function (moduleId) {
+  Core.bankDepositAll = async function (moduleId, { fast = false } = {}) {
     Core.log(moduleId, '은행으로 이동해 전액 입금 진행');
-    await Core.clickNavMenuExact('마을', '은행');
+    await Core.clickNavMenuExact(
+      '마을',
+      '은행',
+      Core.defaultShouldCancel,
+      fast ? { nav: { min: 250, max: 500 }, item: { min: 250, max: 500 } } : undefined
+    );
     await Core.waitFor(() => Core.bodyText().includes('전액 입금'));
     const depositBtn = await Core.retryStep('"전액 입금" 버튼 찾기', () => Core.findButtonByText('전액 입금'));
     if (!depositBtn) {
@@ -1676,7 +1694,7 @@
       return false;
     }
     depositBtn.click();
-    await Core.humanDelay(800, 1600);
+    await Core.humanDelay(fast ? 450 : 800, fast ? 900 : 1600);
     Core.log(moduleId, '전액 입금 완료');
     return true;
   };
@@ -1986,6 +2004,11 @@
       boss: true,
       autohunt: true,
       deepdungeon: true,
+      // ⚠ 사용자 요청(2026-08): 매일 똑같은 순서(던전→보스→자동사냥→…)로만
+      // 도니까 패턴이 너무 뻔하다는 의견이 있어, 중간 작업들의 실행 순서를
+      // 매 실행마다(또는 원하면 계속 고정) 랜덤으로 섞을 수 있는 옵션을
+      // 추가한다. 기본값은 false(기존 고정 순서 그대로) — 켜야만 랜덤화된다.
+      randomOrder: false,
     },
   };
 
@@ -1996,7 +2019,11 @@
   // 사용자가 이 탭에서 직접 시작했을 때만 sessionStorage 허가가 생기며,
   // 정지/탭 종료 시 사라진다.
   const DAILY_AUTH_KEY = 'lrm-daily-explicit-run-auth';
-  const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'preseason', 'boss', 'autohunt', 'deepdungeon'];
+  const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'preseason', 'boss', 'autohunt', 'deepdungeon', 'randomOrder'];
+  // 순서를 섞어도 되는 "중간" 작업들. weeklyRewards/attendance는 항상 먼저,
+  // dailyQuests는 항상 마지막 — 이 셋은 절대 섞지 않는다(Core.startDaily
+  // 주석 참고: 진행도/선행조건 때문에 순서가 고정되어야 함).
+  const DAILY_RANDOMIZABLE_STEPS = ['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena', 'preseason'];
   // ⚠ 사용자 요청(2026-08): 심층던전/아레나 주간 보상은 그 매크로를 돌리지
   // 않아도 "일일" 실행 시 최우선으로 받아야 하고, 일주일에 한 번만 확인하면
   // 된다. Core.getKstMondayWeekId()가 반환하는 값(매주 월요일 00:00 KST마다
@@ -3013,13 +3040,26 @@
     // 끝난 뒤에야 정확한 진행도를 확인할 수 있으므로 항상 맨 마지막에
     // 실행한다(매일). 주간 퀘스트는 이제 요일 제약 없이 매일 dailyQuests
     // 단계 안에서 함께 확인·처리한다(예전엔 토·일에만 별도 실행했음).
+    // ⚠ 사용자 요청(2026-08): 매일 순서가 똑같으면 패턴이 뻔해서, "일일 작업
+    // 순서 랜덤" 체크박스가 켜져 있으면 아래 중간 작업들만 실행마다 무작위로
+    // 섞는다(weeklyRewards/attendance/dailyQuests는 진행도 확인 순서상
+    // 절대 고정 — 섞지 않음). 한 번 섞은 순서는 state.steps에 그대로 저장돼
+    // mainLoop가 순서대로 소비하므로, 탭 복원 등으로 재개되어도 도중에 다시
+    // 섞이지 않는다.
+    const enabledMiddleSteps = DAILY_RANDOMIZABLE_STEPS.filter((key) => mod.config[key]);
+    const middleSteps = mod.config.randomOrder
+      ? Core.shuffleArray(enabledMiddleSteps)
+      : enabledMiddleSteps;
     const steps = [
       'weeklyRewards',
       'attendance',
-      ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena', 'preseason']
-        .filter((key) => mod.config[key]),
+      ...middleSteps,
       'dailyQuests',
     ];
+    if (mod.config.randomOrder) {
+      const orderLabels = middleSteps.map((key) => DAILY_STEP_LABELS[key] || key).join(' → ');
+      Core.log('daily', `🔀 일일 작업 순서 랜덤 적용: ${orderLabels || '(선택된 작업 없음)'}`);
+    }
     if (
       steps.includes('dungeon') &&
       !Core.ELEMENT_OPTIONS.includes(Modules.dungeon.config.originalElement)
@@ -3141,6 +3181,22 @@
       container.appendChild(row);
       inputs.push(check);
     });
+
+    const randomRow = document.createElement('label');
+    randomRow.style.cssText = 'display:flex; align-items:flex-start; gap:7px; margin:10px 0 7px; padding-top:8px; border-top:1px solid #444; cursor:pointer;';
+    const randomCheck = document.createElement('input');
+    randomCheck.type = 'checkbox';
+    randomCheck.checked = !!mod.config.randomOrder;
+    randomCheck.addEventListener('change', () => {
+      mod.config.randomOrder = randomCheck.checked;
+      Core.saveModuleConfig('daily', DAILY_CONFIG_KEYS);
+    });
+    const randomLabel = document.createElement('span');
+    randomLabel.textContent = '일일 작업 순서 랜덤 — 체크 시 던전/보스/자동사냥/심층던전/아레나/프리시즌 순서를 실행마다 무작위로 섞습니다 (주간 보상·출석체크·일간+주간 퀘스트는 항상 처음/마지막 고정)';
+    randomLabel.style.cssText = 'font-size:11px; color:#ccc; line-height:1.4;';
+    randomRow.append(randomCheck, randomLabel);
+    container.appendChild(randomRow);
+    inputs.push(randomCheck);
 
     const note = document.createElement('div');
     note.textContent = '월간 출석체크는 항상 실행하며 이미 수령했거나 받을 보상이 없으면 건너뜁니다. 보스 보상이 모두 끝난 날은 수호자에 입장한 뒤 포기하여 일일 도전 과제만 처리합니다. 문제가 생긴 단계는 기록하고 다음 단계로 넘어갑니다.';
@@ -4794,12 +4850,15 @@
       return !!findBtn();
     }
     try {
-      await Core.clickNavMenuSuffix('전투', groundSuffix, shouldCancel);
+      await Core.clickNavMenuSuffix('전투', groundSuffix, shouldCancel, {
+        nav: { min: 250, max: 500 },
+        item: { min: 250, max: 500 },
+      });
     } catch (e) {
       Core.log('autohunt', `오류: ${e.message}`);
       return false;
     }
-    await Core.sleep(600);
+    await Core.sleep(300);
     if (shouldCancel && shouldCancel()) return false;
     if (floor) {
       const floorSelected = await this.selectFloor(floor, shouldCancel);
@@ -5021,7 +5080,7 @@
     Core.log('autohunt', `${label} 부족 확인 - 회복 절차 시작 (은행입금 → 여관회복 → 데자브 포션구매 → 사냥터 복귀)`);
 
     // 1. 은행 입금 (보유 골드 보호)
-    await Core.bankDepositAll('autohunt');
+    await Core.bankDepositAll('autohunt', { fast: true });
 
     // 2. 여관에서 무료로 HP/MP 완전 회복 (현재 마을에서 바로 가능, 이동 불필요)
     try {
@@ -5061,7 +5120,7 @@
   Modules.autohunt.checkPotionExhaustedAndStop = async function () {
     const expPotion = this.readExpPotionRemaining();
     if (expPotion !== null && expPotion <= 0) {
-      await Core.bankDepositAll('autohunt');
+      await Core.bankDepositAll('autohunt', { fast: true });
       Core.notifyStopped('autohunt', '농축 경험의 물약 효과가 모두 소진되었습니다 — 은행에 입금 후 정지합니다. 인벤토리에서 물약을 채워주세요.');
       return true;
     }
@@ -5208,7 +5267,7 @@
     const gold = this.readGold();
     if (gold !== null && gold > this.config.goldThreshold) {
       Core.log('autohunt', `현재 골드 ${gold.toLocaleString()}G가 기준(${this.config.goldThreshold.toLocaleString()}G)을 초과하여 입금합니다.`);
-      await Core.bankDepositAll('autohunt');
+      await Core.bankDepositAll('autohunt', { fast: true });
     }
   };
 
@@ -5381,7 +5440,7 @@
         // 은행 입금 전에 반드시 포션 소진 여부부터 확인한다.
         if (await mod.checkPotionExhaustedAndStop()) break;
         Core.log('autohunt', '은행에 남은 골드를 모두 입금한 뒤 다시 사냥을 이어갑니다.');
-        await Core.bankDepositAll('autohunt');
+        await Core.bankDepositAll('autohunt', { fast: true });
         await Core.sleep(600);
         continue;
       }
@@ -10852,6 +10911,10 @@
         `클릭 누락 가능성이 있어 중복 공격 없이 중단합니다.`
       );
     }
+    // ⚠ 사용자 피드백(실전): 보스전 진행이 너무 빨라 로그를 눈으로 따라가기
+    // 어렵다는 요청. 턴 증가가 확인된 직후 짧게 쉬어 다음 조작으로 넘어가는
+    // 속도를 늦춘다.
+    await M.humanPause(1000, 1800);
     return advanced;
   };
   M.clickTurn = async (n) => {
