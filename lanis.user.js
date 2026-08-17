@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.10-stable
+// @version      1.14.13-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8494,7 +8494,41 @@
     return true;
   };
 
+  // ⚠ 가을 이벤트(2026-08, 사용자 요청): 50층 클리어 후 "던전의 주인 도전"
+  // 버튼을 누르기 전에 "완주 기록 저장" 모달이 뜰 수 있다(심층던전/아레나 중
+  // 원하는 슬롯에 이번 완주 기록을 저장할지 묻는 이벤트 한정 팝업). 이 모달이
+  // 떠 있는 채로 도전 버튼을 누르면 모달에 가려 클릭이 안 먹는다. 규칙: 빈
+  // 슬롯이 있으면 슬롯 1→2→3 순서로 첫 번째 빈 슬롯에 저장하고, 셋 다 이미
+  // 차있으면 슬롯 3에 덮어쓴다. 이벤트가 끝나 모달 자체가 안 뜨면(텍스트가
+  // 없으면) 아무것도 하지 않고 그대로 지나간다(기존 동작 그대로 유지).
+  Modules.deepdungeon.handleRunRecordSaveModal = async function () {
+    if (!Core.bodyText().includes('완주 기록 저장')) return false;
+
+    for (const slotLabel of ['슬롯 1', '슬롯 2', '슬롯 3']) {
+      const card = this.findLeafCardStartsWith(slotLabel);
+      if (card && (card.textContent || '').includes('빈 슬롯')) {
+        card.click();
+        Core.log('deepdungeon', `🍂 가을 이벤트: 완주 기록을 "${slotLabel}"(빈 슬롯)에 저장`);
+        await Core.humanDelay(500, 1000);
+        return true;
+      }
+    }
+
+    const slot3 = this.findLeafCardStartsWith('슬롯 3');
+    if (slot3) {
+      slot3.click();
+      Core.log('deepdungeon', '🍂 가을 이벤트: 슬롯 1~3 모두 차있어 "슬롯 3"에 덮어씀');
+      await Core.humanDelay(500, 1000);
+      return true;
+    }
+
+    Core.log('deepdungeon', '⚠ 가을 이벤트 "완주 기록 저장" 모달을 감지했지만 슬롯 버튼을 찾지 못했습니다.');
+    return false;
+  };
+
   Modules.deepdungeon.handleDungeonMaster = async function () {
+    await this.handleRunRecordSaveModal();
+
     const challengeBtn = Core.findButtonByText('던전의 주인 도전');
     if (!challengeBtn) return false;
     challengeBtn.click();
@@ -11524,6 +11558,20 @@
     corruptedPurifier: { label: '타락한 정화자', hard: true },
     voidEmperorEmpty: { label: '허무의 황제', hard: true },
   };
+  // ⚠ 버그 수정(2026-08, 실전 확인): "이번 주 보상 보스" 선택(최대 3마리)은
+  // 게임 자체의 별도 설정으로, 매크로가 보스를 처치해도 이 선택에 없으면
+  // 카드에 "이번 주 보상 대상으로 선택되지 않았습니다"가 뜨며 보상이
+  // 전혀 지급되지 않는다. weeklyTierLimits(진행률)와는 완전히 별개 데이터라
+  // 기존 코드는 이 선택 자체를 전혀 건드리지 않고 있었다. API의 보스 id는
+  // 우리 BOSS_REGISTRY 키와 이름이 달라(영문 snake_case) 매핑이 필요하다.
+  const BOSS_API_ID_MAP = {
+    fallenGuardian: 'corrupted_guardian',
+    voidEmperor: 'void_emperor',
+    vineEnt: 'underground_ent',
+    vineWraith: 'lord_of_duality',
+    corruptedPurifier: 'corrupted_guardian_hard',
+    voidEmperorEmpty: 'void_emperor_hard',
+  };
   // 임시 실전 테스트 옵션. true인 동안에는 카드에 "클리어"가 표시되어도
   // 자동 완료 처리하지 않고 도전/재도전 버튼을 계속 탐색한다.
   // 검증 완료 후 통합할 때 false로 되돌릴 것.
@@ -12766,6 +12814,61 @@
     return data;
   };
 
+  // ⚠ 버그 수정(2026-08, 실전 확인): "이번 주 보상 보스" 선택이 비어있으면
+  // (또는 최대 인원 미만이면) 사용자가 체크한 보스 중에서 빈 슬롯만 채워
+  // 자동 저장한다. 이미 선택된 항목은 절대 건드리지 않는다 — 한 번
+  // rewardedBosses에 들어간 보스는 그 주에 절대 해제할 수 없다는 게 실전에서
+  // 확인됐고(400 에러: "이미 보상을 받았으므로 해제할 수 없습니다"), 잘못
+  // 건드리면 사용자가 원치 않는 보스에 보상이 잠겨버려 그 주엔 되돌릴 방법이
+  // 없다. 그래서 이 함수는 "추가만" 하고 "교체/제거"는 절대 하지 않는다.
+  M.ensureWeeklyBossSelection = async (selectedKeys) => {
+    let data;
+    try {
+      data = await M.fetchBossApiData();
+    } catch (e) {
+      if (M.uiLog) M.uiLog(`⚠ 이번 주 보상 보스 선택 확인 실패(API): ${e.message}`);
+      return;
+    }
+    const weekly = data.weeklySelection;
+    if (!weekly || !Array.isArray(weekly.selectedBosses) || typeof weekly.maxSelection !== 'number') {
+      if (M.uiLog) M.uiLog('⚠ 이번 주 보상 보스 선택 정보를 API 응답에서 찾지 못해 건너뜁니다.');
+      return;
+    }
+    const current = weekly.selectedBosses;
+    const slotsAvailable = weekly.maxSelection - current.length;
+    if (slotsAvailable <= 0) return; // 이미 꽉 참 - 손댈 것 없음(교체는 하지 않음)
+
+    const candidateIds = selectedKeys
+      .map((key) => BOSS_API_ID_MAP[key])
+      .filter((id) => id && !current.includes(id));
+    if (candidateIds.length === 0) return;
+
+    const newSelection = current.concat(candidateIds.slice(0, slotsAvailable));
+    const token = localStorage.getItem('token');
+    const res = await fetch('https://lanis.me/api/personal-boss/weekly-selection', {
+      method: 'POST',
+      credentials: 'include',
+      headers: Object.assign(
+        { 'Content-Type': 'application/json' },
+        token ? { Authorization: `Bearer ${token}` } : {}
+      ),
+      body: JSON.stringify({ selectedBosses: newSelection }),
+    });
+    M._bossApiCache = null; // 방금 바뀐 선택을 다음 fetchBossApiData 호출에서 다시 읽도록 캐시 무효화
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      if (M.uiLog) M.uiLog(`⚠ 이번 주 보상 보스 자동 선택 저장 실패 (HTTP ${res.status}) ${text}`);
+      return;
+    }
+    const addedLabels = candidateIds
+      .slice(0, slotsAvailable)
+      .map((id) => {
+        const key = Object.keys(BOSS_API_ID_MAP).find((k) => BOSS_API_ID_MAP[k] === id);
+        return (key && BOSS_REGISTRY[key] && BOSS_REGISTRY[key].label) || id;
+      });
+    if (M.uiLog) M.uiLog(`🎯 이번 주 보상 보스에 자동 추가: ${addedLabels.join(', ')} (${newSelection.length}/${weekly.maxSelection})`);
+  };
+
   M.getWeeklyRewardProgress = async (bossLabel) => {
     const data = await M.fetchBossApiData();
     const bossEntry = data.bosses.find((b) => b.name === bossLabel);
@@ -12901,6 +13004,12 @@
     M.assertBossRunAuthorized(auth && auth.id);
     let selected = BOSS_ORDER.filter((key) => loadSelectedBosses().includes(key));
     if (selected.length === 0) throw new Error('선택한 보스가 없습니다.');
+
+    // 실전 보스 처치를 시작하기 전에, 체크해둔 보스가 "이번 주 보상 보스"
+    // 슬롯에 비어있으면 먼저 채워넣는다(§ensureWeeklyBossSelection 주석 참고).
+    // 이걸 안 하면 보스를 처치해도 주간 보상 대상이 아니라서 보상이 전혀
+    // 지급되지 않는 채로 계속 헛도전만 반복하게 된다.
+    await M.ensureWeeklyBossSelection(selected);
 
     // ⚠ 사용자 확인(2026-08): 수(3)/금(5)은 타락한 정화자를 아예 도전할 수
     // 없는 요일이다. 정지시키지 않고 큐에서만 빼고 알림 로그를 남긴다 -
