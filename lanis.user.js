@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.14-stable
+// @version      1.14.15-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -12839,21 +12839,21 @@
       data = await M.fetchBossApiData();
     } catch (e) {
       if (M.uiLog) M.uiLog(`⚠ 이번 주 보상 보스 선택 확인 실패(API): ${e.message}`);
-      return;
+      return false;
     }
     const weekly = data.weeklySelection;
     if (!weekly || !Array.isArray(weekly.selectedBosses) || typeof weekly.maxSelection !== 'number') {
       if (M.uiLog) M.uiLog('⚠ 이번 주 보상 보스 선택 정보를 API 응답에서 찾지 못해 건너뜁니다.');
-      return;
+      return false;
     }
     const current = weekly.selectedBosses;
     const slotsAvailable = weekly.maxSelection - current.length;
-    if (slotsAvailable <= 0) return; // 이미 꽉 참 - 손댈 것 없음(교체는 하지 않음)
+    if (slotsAvailable <= 0) return true; // 이미 꽉 참 - 손댈 것 없음(교체는 하지 않음)
 
     const candidateIds = selectedKeys
       .map((key) => BOSS_API_ID_MAP[key])
       .filter((id) => id && !current.includes(id));
-    if (candidateIds.length === 0) return;
+    if (candidateIds.length === 0) return true;
 
     const newSelection = current.concat(candidateIds.slice(0, slotsAvailable));
     const token = localStorage.getItem('token');
@@ -12870,7 +12870,7 @@
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       if (M.uiLog) M.uiLog(`⚠ 이번 주 보상 보스 자동 선택 저장 실패 (HTTP ${res.status}) ${text}`);
-      return;
+      return false;
     }
     const addedLabels = candidateIds
       .slice(0, slotsAvailable)
@@ -12879,6 +12879,7 @@
         return (key && BOSS_REGISTRY[key] && BOSS_REGISTRY[key].label) || id;
       });
     if (M.uiLog) M.uiLog(`🎯 이번 주 보상 보스에 자동 추가: ${addedLabels.join(', ')} (${newSelection.length}/${weekly.maxSelection})`);
+    return true;
   };
 
   M.getWeeklyRewardProgress = async (bossLabel) => {
@@ -13021,7 +13022,10 @@
     // 슬롯에 비어있으면 먼저 채워넣는다(§ensureWeeklyBossSelection 주석 참고).
     // 이걸 안 하면 보스를 처치해도 주간 보상 대상이 아니라서 보상이 전혀
     // 지급되지 않는 채로 계속 헛도전만 반복하게 된다.
-    await M.ensureWeeklyBossSelection(selected);
+    const weeklySelectionReady = await M.ensureWeeklyBossSelection(selected);
+    if (!weeklySelectionReady) {
+      throw new Error('이번 주 보상 보스 선택을 확인하거나 저장하지 못해 안전하게 중단합니다.');
+    }
 
     // ⚠ 사용자 확인(2026-08): 수(3)/금(5)은 타락한 정화자를 아예 도전할 수
     // 없는 요일이다. 정지시키지 않고 큐에서만 빼고 알림 로그를 남긴다 -
@@ -13495,6 +13499,10 @@
       setRunningState(true);
       M.uiLog(`▶ 보스 도전 시작 (선택: ${checked.length}개)`);
       try {
+        const weeklySelectionReady = await M.ensureWeeklyBossSelection(checked);
+        if (!weeklySelectionReady) {
+          throw new Error('이번 주 보상 보스 선택을 확인하거나 저장하지 못해 안전하게 중단합니다.');
+        }
         await M.startBossQueue(checked, { forceChallenge: true });
         // ⚠ 실전 확인: 이 "보스 도전" 버튼 경로는 startBossQueue만 호출하고 끝나서,
         // 보상 자동 수령(M.claimBossRewardsAndVerify)이 "일일" 탭의
