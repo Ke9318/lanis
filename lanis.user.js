@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.16-stable
+// @version      1.14.17-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2898,21 +2898,17 @@
     // (this 안 쓰는 순수 함수)를 그대로 재사용해 검증한다.
     if (step === 'preseason') {
       await this.runCoreModule('preseason');
-      // ⚠ 사용자 요청(2026-08): 고정 목표 횟수 대신 "오늘 받은 프리시즌
-      // 보석"이 하루 최대치에 도달했는지로 완료를 판정한다.
-      const gemProgress = Modules.arena.readPreseasonGemProgress();
-      if (!gemProgress || gemProgress.current < gemProgress.max) {
-        throw new Error(`프리시즌 아레나 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}`);
+      const progress = Modules.preseason.readAutumnTokenProgress();
+      if (!progress || (progress.today.current < progress.today.max && progress.weekly.current < progress.weekly.max)) {
+        throw new Error('가을 심층던전 아레나 완료 확인 실패: 오늘/주간 단풍 토큰 진행률이 한도에 도달하지 않았습니다.');
       }
-      // ⚠ 사용자 요청(2026-08): "햇살 토큰"(여름 이벤트 한정) 일괄 사용도
-      // 프리시즌 단계에 묶어서 일일 매크로 실행 시 같이 처리한다. 실패해도
-      // 이미 완료된 프리시즌 전투 자체는 성공으로 보고한다.
+      // 가을 이벤트 인벤토리의 "단풍 토큰"도 같은 단계에서 전부 사용한다.
       try {
-        await Modules.preseason.useSunshineTokens();
+        await Modules.preseason.useAutumnTokens();
       } catch (e) {
-        Core.log('preseason', `⚠ 햇살 토큰 자동 사용 실패(프리시즌 전투 자체는 완료됨): ${e.message}`);
+        Core.log('preseason', `⚠ 단풍 토큰 자동 사용 실패(심층던전 아레나 전투 자체는 완료됨): ${e.message}`);
       }
-      return `오늘 프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 완료`;
+      return `가을 심층던전 아레나 완료: 오늘 ${progress.today.current}/${progress.today.max}, 주간 ${progress.weekly.current}/${progress.weekly.max}`;
     }
     if (step === 'boss') {
       const boss = await Core.waitFor(() => window.__bossMacro || null, 10000, 250, null);
@@ -3153,7 +3149,7 @@
     Core.loadModuleConfig('daily', DAILY_CONFIG_KEYS);
 
     const intro = document.createElement('div');
-    intro.textContent = '출석체크를 먼저 수행한 뒤 체크한 작업을 던전 → 보스 → 자동사냥 → 심층던전 → 아레나 → 프리시즌 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
+    intro.textContent = '출석체크를 먼저 수행한 뒤 체크한 작업을 던전 → 보스 → 자동사냥 → 심층던전 → 아레나 → 이벤트 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
     intro.style.cssText = 'color:#ccc; font-size:11px; line-height:1.5; margin-bottom:8px;';
     container.appendChild(intro);
 
@@ -3164,7 +3160,7 @@
       ['autohunt', '자동사냥 — 설정한 행동력 제한까지'],
       ['deepdungeon', '심층던전 — 주간 누적 피해 100만까지'],
       ['arena', '아레나 — 설정한 오늘 총 전투 횟수까지'],
-      ['preseason', '프리시즌 — 요일 제약 없이 설정한 오늘 총 전투 횟수까지'],
+      ['preseason', '이벤트 — 가을 심층던전 아레나 단풍 토큰 일일/주간 한도까지'],
     ].forEach(([key, text]) => {
       const row = document.createElement('label');
       row.style.cssText = 'display:flex; align-items:flex-start; gap:7px; margin:7px 0; cursor:pointer;';
@@ -3192,7 +3188,7 @@
       Core.saveModuleConfig('daily', DAILY_CONFIG_KEYS);
     });
     const randomLabel = document.createElement('span');
-    randomLabel.textContent = '일일 작업 순서 랜덤 — 체크 시 던전/보스/자동사냥/심층던전/아레나/프리시즌 순서를 실행마다 무작위로 섞습니다 (주간 보상·출석체크·일간+주간 퀘스트는 항상 처음/마지막 고정)';
+    randomLabel.textContent = '일일 작업 순서 랜덤 — 체크 시 던전/보스/자동사냥/심층던전/아레나/이벤트 순서를 실행마다 무작위로 섞습니다 (주간 보상·출석체크·일간+주간 퀘스트는 항상 처음/마지막 고정)';
     randomLabel.style.cssText = 'font-size:11px; color:#ccc; line-height:1.4;';
     randomRow.append(randomCheck, randomLabel);
     container.appendChild(randomRow);
@@ -3534,16 +3530,7 @@
     refs.inputs = [];
   }
 
-  // -------------------------- 프리시즌 아레나 --------------------------
-  // ⚠ 사용자 요청(2026-08): 정규 아레나는 토·일에만 열리지만, 프리시즌
-  // 기간엔 같은 화면(/arena)이 평일에도 열린다. 실전 확인: "아레나 시즌 8
-  // 프리시즌" 배너와 함께 "오늘 전투 횟수", "전투 시작" 등 기존 아레나와
-  // 완전히 동일한 화면 구조가 그대로 뜬다(같은 URL, 같은 셀렉터). 그래서
-  // Modules.arena의 이미 검증된 헬퍼(goToArena/readTodayBattleCount/
-  // waitForEnabledStart/handleResultIfPresent - 전부 순수 함수라 this
-  // 바인딩 없이 그대로 재사용 가능함)를 그대로 쓰고, 요일 제약만 뺀 별도
-  // 모듈로 만든다. 프리시즌이 끝나 화면에 배너가 안 뜨거나 /arena 진입
-  // 자체가 막히면 goToArena가 기존과 동일하게 에러로 정지시킨다.
+  // -------------------------- 가을 심층던전 아레나 --------------------------
   Modules.preseason = {
     id: 'preseason',
     running: false,
@@ -3551,67 +3538,123 @@
     cycleCount: 0,
   };
 
+  Modules.preseason.readAutumnTokenProgress = function () {
+    const text = Core.bodyText();
+    const today = text.match(/오늘 획득한 단풍 토큰\s*(\d+)\s*\/\s*(\d+)\s*개/);
+    const weekly = text.match(/이번 주 획득한 단풍 토큰\s*(\d+)\s*\/\s*(\d+)\s*개/);
+    if (!today || !weekly) return null;
+    return {
+      today: { current: Number(today[1]), max: Number(today[2]) },
+      weekly: { current: Number(weekly[1]), max: Number(weekly[2]) },
+    };
+  };
+
+  Modules.preseason.goToAutumnDeepArena = async function () {
+    const onArena = () =>
+      location.pathname.replace(/\/$/, '') === '/event/autumn' &&
+      Core.bodyText().includes('오늘 획득한 단풍 토큰') &&
+      Core.bodyText().includes('이번 주 획득한 단풍 토큰');
+    if (onArena()) return true;
+
+    // 우측 끝 프로필 아이콘 → 가을 이벤트 → 심층던전 아레나 순서로 진입한다.
+    const headerButtons = Core.gameElements('header button').filter((button) => Core.isElementVisible(button));
+    const menuButton = headerButtons[headerButtons.length - 1];
+    if (!menuButton) throw new Error('상단 오른쪽 메뉴 아이콘을 찾지 못했습니다.');
+    menuButton.click();
+    const autumnMenu = await Core.waitFor(
+      () => Core.gameElements('[role="menuitem"]').find(
+        (item) => Core.isElementVisible(item) && item.textContent.trim() === '가을 이벤트'
+      ) || null,
+      5000,
+      150
+    );
+    if (!autumnMenu) throw new Error('오른쪽 메뉴에서 "가을 이벤트"를 찾지 못했습니다.');
+    await Core.humanDelay(500, 900);
+    autumnMenu.click();
+
+    const autumnPage = await Core.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/event/autumn' ? true : null,
+      12000,
+      250
+    );
+    if (!autumnPage) throw new Error('가을 이벤트 화면 진입을 확인하지 못했습니다.');
+    const arenaTab = await Core.waitFor(
+      () => Core.findButtonByText('심층던전 아레나'),
+      7000,
+      200
+    );
+    if (!arenaTab) throw new Error('가을 이벤트의 "심층던전 아레나" 탭을 찾지 못했습니다.');
+    await Core.humanDelay(500, 900);
+    arenaTab.click();
+    const ready = await Core.waitFor(() => onArena() ? true : null, 10000, 250);
+    if (!ready) throw new Error('심층던전 아레나 진행률 화면을 확인하지 못했습니다.');
+    return true;
+  };
+
   Modules.preseason.mainLoop = async function () {
     const mod = this;
     mod.cycleCount = 0;
-
-    await Modules.arena.goToArena();
-    if (!Core.bodyText().includes('프리시즌')) {
-      throw new Error('현재 프리시즌 기간이 아닌 것으로 보입니다 (화면에 "프리시즌" 표시가 없음).');
-    }
-
-    // 전투 도중 새로고침되었을 경우 결과창부터 정리한다.
-    await Modules.arena.handleResultIfPresent();
+    await mod.goToAutumnDeepArena();
 
     while (!mod.stopRequested) {
-      const before = Modules.arena.readTodayBattleCount();
-      if (before === null) throw new Error('아레나의 오늘 전투 횟수를 읽지 못했습니다.');
-      mod.cycleCount = before;
-      Core.updateModuleButtons();
-
-      // ⚠ 사용자 요청(2026-08): 고정 횟수 대신, "오늘 받은 프리시즌 보석"이
-      // 하루 최대치에 도달할 때까지 돈다. 프리시즌은 에너지가 안 드니
-      // 전투 횟수가 아니라 보석 진행률이 진짜 목표다.
-      const gemProgress = Modules.arena.readPreseasonGemProgress();
-      if (!gemProgress) throw new Error('오늘 받은 프리시즌 보석 진행률을 읽지 못했습니다.');
-      if (gemProgress.current >= gemProgress.max) {
-        Core.notifyCompleted('preseason', `오늘 프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 완료 (전투 ${before}회)`);
+      const before = mod.readAutumnTokenProgress();
+      if (!before) throw new Error('오늘/주간 단풍 토큰 진행률을 읽지 못했습니다.');
+      if (before.today.current >= before.today.max || before.weekly.current >= before.weekly.max) {
+        Core.notifyCompleted(
+          'preseason',
+          `가을 심층던전 아레나 완료: 오늘 ${before.today.current}/${before.today.max}, 주간 ${before.weekly.current}/${before.weekly.max}`
+        );
         return;
       }
 
-      Core.log('preseason', `쿨타임 및 버튼 활성화 대기 중: 보석 ${gemProgress.current}/${gemProgress.max}개`);
-      const startButton = await Modules.arena.waitForEnabledStart();
-      if (!startButton) throw new Error('90초 안에 아레나 "전투 시작" 버튼이 활성화되지 않았습니다.');
+      Core.log(
+        'preseason',
+        `단풍 토큰 획득 전투 준비: 오늘 ${before.today.current}/${before.today.max}, 주간 ${before.weekly.current}/${before.weekly.max}`
+      );
       if (mod.stopRequested) return;
-      if (!(await Core.safeClick(() => {
-        const button = Core.findButtonByText('전투 시작');
-        return button && !button.disabled ? button : null;
-      }, { beforeMin: 700, beforeMax: 1300 }))) {
-        throw new Error('아레나 "전투 시작" 버튼 클릭에 실패했습니다.');
-      }
+      const clicked = await Core.safeClick(
+        () => {
+          const button = Core.findButtonByText('전투 시작');
+          return button && !button.disabled ? button : null;
+        },
+        { beforeMin: 900, beforeMax: 1700, afterMin: 700, afterMax: 1200 }
+      );
+      if (!clicked) throw new Error('가을 심층던전 아레나 "전투 시작" 버튼 클릭에 실패했습니다.');
 
       const resultBack = await Core.waitFor(
-        () => Core.findButtonByText('아레나로 돌아가기') || Core.findButtonByText('돌아가기'),
+        () => Core.findButtonByText('심층던전 아레나로 돌아가기'),
         15000,
-        500
+        250
       );
-      if (!resultBack) {
-        Core.log('preseason', '⚠ 전투 시작 클릭 후 결과 화면이 나타나지 않음 — 클릭 누락으로 판단, 즉시 재시도');
-        continue;
+      if (!resultBack) throw new Error('가을 심층던전 아레나 전투 결과 화면을 확인하지 못했습니다.');
+      if (mod.stopRequested) return;
+      await Core.humanDelay(1200, 2400);
+      if (!(await Core.safeClick(
+        () => Core.findButtonByText('심층던전 아레나로 돌아가기'),
+        { beforeMin: 700, beforeMax: 1300, afterMin: 900, afterMax: 1600 }
+      ))) {
+        throw new Error('"심층던전 아레나로 돌아가기" 버튼 클릭에 실패했습니다.');
       }
-      await Modules.arena.handleResultIfPresent();
-      const incremented = await Core.waitFor(() => {
-        const count = Modules.arena.readTodayBattleCount();
-        return count !== null && count > before ? count : null;
-      }, 15000, 300);
-      if (incremented === null) throw new Error('전투 후 오늘 전투 횟수 증가를 확인하지 못했습니다.');
-      mod.cycleCount = incremented;
-      const gemAfter = Modules.arena.readPreseasonGemProgress();
-      Core.log('preseason', `프리시즌 아레나 전투 완료: 오늘 ${incremented}회, 보석 ${gemAfter ? `${gemAfter.current}/${gemAfter.max}` : '?'}개`);
+
+      const increased = await Core.waitFor(() => {
+        const after = mod.readAutumnTokenProgress();
+        return after &&
+          (after.today.current > before.today.current || after.weekly.current > before.weekly.current)
+          ? after
+          : null;
+      }, 12000, 300);
+      if (!increased) throw new Error('전투 후 단풍 토큰 진행률 증가를 확인하지 못했습니다.');
+      mod.cycleCount++;
+      Core.updateModuleButtons();
+      Core.log(
+        'preseason',
+        `가을 심층던전 아레나 전투 완료: 오늘 ${increased.today.current}/${increased.today.max}, 주간 ${increased.weekly.current}/${increased.weekly.max}`
+      );
+      await Core.humanDelay(800, 1500);
     }
   };
 
-  // ⚠ 사용자 요청(2026-08): 여름 이벤트 한정 "햇살 토큰"을 인벤토리에서
+  // ⚠ 사용자 요청(2026-08): 가을 이벤트 "단풍 토큰"을 인벤토리에서
   // 찾아 "사용 가능 상태"로 전환하는 일회성 액션. 프리시즌 탭에 묶어두고
   // 프리시즌이 끝나면(여름 이벤트도 같이 끝날 것으로 예상) 이 로직도 함께
   // 폐기한다. 자동 반복 매크로가 아니라 버튼 클릭 시 즉시 실행되는 1회성
@@ -3620,11 +3663,11 @@
   // 실전 확인: "사용" 클릭 시 확인창이 뜨고, 수량 입력칸은 이미 그 아이템의
   // 1회 사용 최대치(실전 확인: 50개)로 자동 채워져 있다(수정 불필요, 손대면
   // 안 됨 - 보상 상자 사용 로직에서 겪은 것과 동일한 함정). "사용" 확정하면
-  // "햇살 토큰 N개를 사용 가능 상태로 전환했습니다"로 즉시 처리되고, 그
+  // "단풍 토큰 N개를 사용 가능 상태로 전환했습니다"로 즉시 처리되고, 그
   // 행이 목록에서 갱신된다(수량이 줄거나 완전히 사라짐). 보유 수량이
   // 많으면(예: 547개) 여러 번 반복해야 다 소진된다.
-  Modules.preseason.useSunshineTokens = async function () {
-    Core.log('preseason', '"햇살 토큰" 사용 시작');
+  Modules.preseason.useAutumnTokens = async function () {
+    Core.log('preseason', '"단풍 토큰" 사용 시작');
     await Core.clickNavMenuExact('캐릭', '인벤토리');
     const onInventoryPage = await Core.waitFor(() => location.pathname.startsWith('/inventory'), 15000, 300);
     if (!onInventoryPage) throw new Error('인벤토리 화면 진입을 확인하지 못했습니다.');
@@ -3634,7 +3677,7 @@
       throw new Error('"소모품" 탭 클릭에 실패했습니다.');
     }
 
-    const findTokenRow = () => Core.gameElements('tr').find((tr) => tr.textContent.includes('햇살 토큰') && Core.isElementVisible(tr));
+    const findTokenRow = () => Core.gameElements('tr').find((tr) => tr.textContent.includes('단풍 토큰') && Core.isElementVisible(tr));
 
     let usedCycles = 0;
     const maxCycles = 30; // 1회당 최대 50개 * 30회 = 최대 1500개까지 대응
@@ -3663,32 +3706,32 @@
       if (!row) break; // 더 이상 없음 = 소진 완료
 
       const useBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
-      if (!useBtn) throw new Error('"햇살 토큰" 사용 버튼을 찾지 못했습니다.');
+      if (!useBtn) throw new Error('"단풍 토큰" 사용 버튼을 찾지 못했습니다.');
       if (!(await Core.safeClick(() => useBtn, { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1000 }))) {
-        throw new Error('"햇살 토큰" 사용 버튼 클릭에 실패했습니다.');
+        throw new Error('"단풍 토큰" 사용 버튼 클릭에 실패했습니다.');
       }
 
       const dialog = await Core.waitFor(
-        () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d) && d.textContent.includes('햇살 토큰을(를) 사용하시겠습니까')) || null,
+        () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d) && d.textContent.includes('단풍 토큰을(를) 사용하시겠습니까')) || null,
         6000,
         250
       );
-      if (!dialog) throw new Error('"햇살 토큰" 사용 확인창을 찾지 못했습니다.');
+      if (!dialog) throw new Error('"단풍 토큰" 사용 확인창을 찾지 못했습니다.');
 
       // ⚠ 수량 입력칸은 이미 1회 사용 최대치로 채워져 있다 - 절대 건드리지 않는다.
       const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
-      if (!confirmBtn) throw new Error('"햇살 토큰" 사용 확인 버튼을 찾지 못했습니다.');
-      if (confirmBtn.disabled) throw new Error('"햇살 토큰" 사용 확인 버튼이 비활성화 상태입니다.');
+      if (!confirmBtn) throw new Error('"단풍 토큰" 사용 확인 버튼을 찾지 못했습니다.');
+      if (confirmBtn.disabled) throw new Error('"단풍 토큰" 사용 확인 버튼이 비활성화 상태입니다.');
       if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 500, beforeMax: 900, afterMin: 900, afterMax: 1400 }))) {
-        throw new Error('"햇살 토큰" 사용을 확정하지 못했습니다.');
+        throw new Error('"단풍 토큰" 사용을 확정하지 못했습니다.');
       }
-      Core.log('preseason', `"햇살 토큰" 사용 ${usedCycles + 1}회차 완료`);
+      Core.log('preseason', `"단풍 토큰" 사용 ${usedCycles + 1}회차 완료`);
     }
 
     if (usedCycles === 0) {
-      Core.log('preseason', '"햇살 토큰"이 없거나 이미 전부 사용했습니다.');
+      Core.log('preseason', '"단풍 토큰"이 없거나 이미 전부 사용했습니다.');
     } else {
-      Core.log('preseason', `"햇살 토큰" 사용 완료 (총 ${usedCycles}회 반복)`);
+      Core.log('preseason', `"단풍 토큰" 사용 완료 (총 ${usedCycles}회 반복)`);
     }
   };
 
@@ -3698,12 +3741,12 @@
 
     const description = document.createElement('div');
     description.textContent =
-      '정규 아레나는 토·일에만 열리지만, 프리시즌 기간엔 평일에도 아레나(/arena)가 열립니다. 이 탭은 요일 제약 없이 실행됩니다. 고정 횟수가 아니라, "오늘 받은 프리시즌 보석"이 하루 최대치에 도달할 때까지 실행합니다.';
+      '오른쪽 메뉴의 가을 이벤트 → 심층던전 아레나로 이동해 전투합니다. 오늘 단풍 토큰 한도 또는 주간 단풍 토큰 한도에 도달하면 자동으로 멈춥니다.';
     description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin:7px 0;';
     container.appendChild(description);
 
     const note = document.createElement('div');
-    note.textContent = '※ 화면에 "프리시즌" 표시가 없으면(프리시즌 기간이 아니면) 정지합니다.';
+    note.textContent = '※ 전투 시작과 결과 복귀 사이에 자연스러운 지연을 두며, 매 전투 후 오늘/주간 단풍 토큰 증가를 확인합니다.';
     note.style.cssText = 'font-size:10px; color:#f5a623; line-height:1.45; margin-bottom:7px;';
     container.appendChild(note);
 
@@ -3729,16 +3772,16 @@
     refs.statusEl = statusEl;
     refs.inputs = [];
 
-    // ⚠ 사용자 요청(2026-08): "햇살 토큰"(여름 이벤트 한정) 일괄 사용
+    // ⚠ 사용자 요청(2026-08): "단풍 토큰"(가을 이벤트) 일괄 사용
     // 버튼. 자동 반복 매크로가 아니라 눌렀을 때 그 자리에서 바로 실행되는
     // 1회성 액션이라 시작/정지 상태와 무관하게 별도로 둔다.
     const tokenBtnRow = document.createElement('div');
     tokenBtnRow.style.cssText = 'margin-top:10px; padding-top:10px; border-top:1px solid #333;';
     const tokenLabel = document.createElement('div');
-    tokenLabel.textContent = '햇살 토큰 일괄 사용 (여름 이벤트 한정, 이벤트 종료 시 같이 제거될 기능)';
+    tokenLabel.textContent = '단풍 토큰 일괄 사용 (가을 이벤트)';
     tokenLabel.style.cssText = 'font-size:11px; color:#ccc; margin-bottom:5px;';
     const tokenBtn = document.createElement('button');
-    tokenBtn.textContent = '햇살 토큰 사용';
+    tokenBtn.textContent = '단풍 토큰 사용';
     tokenBtn.style.cssText = btnStyle('#8e5cf7');
     const tokenStatusEl = document.createElement('span');
     tokenStatusEl.textContent = '';
@@ -3747,11 +3790,11 @@
       tokenBtn.disabled = true;
       tokenStatusEl.textContent = '사용 중...';
       try {
-        await Modules.preseason.useSunshineTokens();
+        await Modules.preseason.useAutumnTokens();
         tokenStatusEl.textContent = '완료';
       } catch (e) {
         tokenStatusEl.textContent = '실패: ' + e.message;
-        Core.log('preseason', `⚠ 햇살 토큰 사용 실패: ${e.message}`);
+        Core.log('preseason', `⚠ 단풍 토큰 사용 실패: ${e.message}`);
       }
       tokenBtn.disabled = false;
     });
@@ -9936,7 +9979,7 @@
           : id === 'arena'
           ? `오늘 전투 ${mod.cycleCount}회 (무료인 동안 반복)`
           : id === 'preseason'
-          ? `오늘 전투 ${mod.cycleCount}회 (보석 한도까지 반복)`
+          ? `가을 아레나 전투 ${mod.cycleCount}회 (단풍 토큰 한도까지 반복)`
           : id === 'deepdungeon'
           ? `던전의 주인 도전 ${mod.cycleCount}회`
           : `사이클 ${mod.cycleCount}`;
