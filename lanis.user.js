@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.17-stable
+// @version      1.14.18-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -3617,7 +3617,7 @@
           const button = Core.findButtonByText('전투 시작');
           return button && !button.disabled ? button : null;
         },
-        { beforeMin: 900, beforeMax: 1700, afterMin: 700, afterMax: 1200 }
+        { beforeMin: 180, beforeMax: 420, afterMin: 120, afterMax: 260 }
       );
       if (!clicked) throw new Error('가을 심층던전 아레나 "전투 시작" 버튼 클릭에 실패했습니다.');
 
@@ -3628,10 +3628,10 @@
       );
       if (!resultBack) throw new Error('가을 심층던전 아레나 전투 결과 화면을 확인하지 못했습니다.');
       if (mod.stopRequested) return;
-      await Core.humanDelay(1200, 2400);
+      await Core.humanDelay(180, 350);
       if (!(await Core.safeClick(
         () => Core.findButtonByText('심층던전 아레나로 돌아가기'),
-        { beforeMin: 700, beforeMax: 1300, afterMin: 900, afterMax: 1600 }
+        { beforeMin: 150, beforeMax: 320, afterMin: 180, afterMax: 380 }
       ))) {
         throw new Error('"심층던전 아레나로 돌아가기" 버튼 클릭에 실패했습니다.');
       }
@@ -3650,7 +3650,7 @@
         'preseason',
         `가을 심층던전 아레나 전투 완료: 오늘 ${increased.today.current}/${increased.today.max}, 주간 ${increased.weekly.current}/${increased.weekly.max}`
       );
-      await Core.humanDelay(800, 1500);
+      await Core.humanDelay(120, 280);
     }
   };
 
