@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.13-stable
+// @version      1.14.14-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8756,6 +8756,18 @@
 
   Modules.deepdungeon.stepOnce = async function () {
     const text = Core.bodyText();
+
+    // ⚠ 버그 수정(2026-08, 사용자 실전 확인): "완주 기록 저장" 모달(가을 이벤트)이
+    // 열려있는 동안엔 MUI 다이얼로그가 배경 화면 전체에 aria-hidden을 걸어버려서,
+    // Core.bodyText()가 배경 텍스트(예: "던전의 주인", "50층 클리어 완료")를 전부
+    // 걸러낸다 - 즉 모달이 떠 있을 땐 아래의 어떤 분기 조건도 매치되지 않고
+    // stepOnce가 계속 false만 반환하며 멈춘다(실전에서 재현됨: 로그에 심층던전
+    // 관련 진행 없이 멈춰있었음). "던전의 주인" 분기 안에 넣었던 처리는 그래서
+    // 호출조차 안 됐다 - 이 모달은 배경 상태와 무관하게 그 자체로 최우선
+    // 독립 분기여야 한다.
+    if (text.includes('완주 기록 저장')) {
+      return await this.handleRunRecordSaveModal();
+    }
 
     // ⚠ 실전 확인: enterFreshRunIfNeeded()가 처음한 번 시도에서 입장
     // 확정 버튼을 못 찾으면 경고만 남기고 그대로 진행하는데, 이 함수
