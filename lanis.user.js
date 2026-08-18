@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.15-stable
+// @version      1.14.16-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -8502,28 +8502,69 @@
   // 차있으면 슬롯 3에 덮어쓴다. 이벤트가 끝나 모달 자체가 안 뜨면(텍스트가
   // 없으면) 아무것도 하지 않고 그대로 지나간다(기존 동작 그대로 유지).
   Modules.deepdungeon.handleRunRecordSaveModal = async function () {
-    if (!Core.bodyText().includes('완주 기록 저장')) return false;
+    const findSaveDialog = () => Core.gameElements('[role="dialog"]').find(
+      (dialog) => Core.isElementVisible(dialog) && (dialog.textContent || '').includes('완주 기록 저장')
+    ) || null;
+    const saveDialog = findSaveDialog();
+    if (!saveDialog) return false;
 
-    for (const slotLabel of ['슬롯 1', '슬롯 2', '슬롯 3']) {
-      const card = this.findLeafCardStartsWith(slotLabel);
-      if (card && (card.textContent || '').includes('빈 슬롯')) {
-        card.click();
-        Core.log('deepdungeon', `🍂 가을 이벤트: 완주 기록을 "${slotLabel}"(빈 슬롯)에 저장`);
-        await Core.humanDelay(500, 1000);
-        return true;
+    // 슬롯명 <span>에서 공용 upToCard()를 쓰면 가장 가까운 버튼이 아니라
+    // 바깥 MUI Dialog(Paper)까지 올라가 버린다. 실전에서 이 때문에 모달의
+    // 빈 영역만 반복 클릭하며 50층에서 무한 대기했다. 반드시 현재 저장
+    // 모달 안의 실제 <button>을 직접 찾는다.
+    const slotButtons = [...saveDialog.querySelectorAll('button')].filter((button) =>
+      /^슬롯\s*[123]\b/.test((button.textContent || '').trim())
+    );
+    const firstEmpty = slotButtons.find((button) => (button.textContent || '').includes('빈 슬롯'));
+    const target = firstEmpty || slotButtons.find((button) => /^슬롯\s*3\b/.test((button.textContent || '').trim()));
+    if (!target) {
+      throw new Error('가을 이벤트 "완주 기록 저장" 모달에서 저장할 슬롯 버튼을 찾지 못했습니다.');
+    }
+
+    const slotMatch = (target.textContent || '').match(/슬롯\s*([123])/);
+    const slotLabel = slotMatch ? `슬롯 ${slotMatch[1]}` : '선택 슬롯';
+    const overwrite = !firstEmpty;
+    target.click();
+    await Core.humanDelay(400, 700);
+
+    // 세 슬롯이 모두 찼을 때는 슬롯 3 덮어쓰기 확인창이 추가로 뜰 수 있다.
+    // 이벤트 UI가 확인창 없이 즉시 저장하는 경우도 허용한다.
+    if (overwrite) {
+      const confirmDialog = Core.gameElements('[role="dialog"]').find((dialog) => {
+        if (!Core.isElementVisible(dialog)) return false;
+        const text = dialog.textContent || '';
+        return /덮어쓰|기존.*기록/.test(text);
+      }) || null;
+      if (confirmDialog) {
+        const confirmButton = [...confirmDialog.querySelectorAll('button')].find((button) =>
+          /^(덮어쓰기|확인|저장)$/.test((button.textContent || '').trim()) && !button.disabled
+        );
+        if (!confirmButton) throw new Error('슬롯 3 덮어쓰기 확인 버튼을 찾지 못했습니다.');
+        confirmButton.click();
+        await Core.humanDelay(400, 700);
       }
     }
 
-    const slot3 = this.findLeafCardStartsWith('슬롯 3');
-    if (slot3) {
-      slot3.click();
-      Core.log('deepdungeon', '🍂 가을 이벤트: 슬롯 1~3 모두 차있어 "슬롯 3"에 덮어씀');
-      await Core.humanDelay(500, 1000);
-      return true;
+    const saved = await Core.waitFor(
+      () => (
+        !findSaveDialog() || Core.bodyText().includes(`완주 기록이 ${slotLabel}에 저장되었습니다`)
+          ? true
+          : null
+      ),
+      6000,
+      200
+    );
+    if (!saved) {
+      throw new Error(`${slotLabel} 완주 기록 저장 완료를 확인하지 못했습니다.`);
     }
 
-    Core.log('deepdungeon', '⚠ 가을 이벤트 "완주 기록 저장" 모달을 감지했지만 슬롯 버튼을 찾지 못했습니다.');
-    return false;
+    Core.log(
+      'deepdungeon',
+      overwrite
+        ? '🍂 가을 이벤트: 슬롯 1~3이 모두 차있어 "슬롯 3"에 덮어쓰기 완료'
+        : `🍂 가을 이벤트: 완주 기록을 "${slotLabel}"(첫 빈 슬롯)에 저장 완료`
+    );
+    return true;
   };
 
   Modules.deepdungeon.handleDungeonMaster = async function () {
