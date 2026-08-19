@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.19-stable
+// @version      1.14.20-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -10847,6 +10847,21 @@
     expected.weapon === actual.weapon &&
     expected.armor === actual.armor &&
     expected.accessory === actual.accessory;
+  M.waitForStableBossEquipment = async (
+    expectedEquipment,
+    { timeout = 8000, interval = 200, consecutive = 3 } = {}
+  ) => {
+    let matchedCount = 0;
+    return M.waitFor(() => {
+      const actualEquipment = M.readLiveBossEquipmentFingerprint();
+      if (M.bossEquipmentFingerprintMatches(expectedEquipment, actualEquipment)) {
+        matchedCount++;
+        return matchedCount >= consecutive ? actualEquipment : null;
+      }
+      matchedCount = 0;
+      return null;
+    }, timeout, interval);
+  };
   M.findBossPresetVerificationCard = (expectedEquipment, targetCard) => {
     const seen = new Set();
     const weaponLabels = M.queryAll('*').filter(
@@ -10941,13 +10956,14 @@
           }
           M.throwIfStopped();
           verification.card.click();
-          const moved = await M.waitFor(() => {
-            const actual = M.readLiveBossEquipmentFingerprint();
-            return M.bossEquipmentFingerprintMatches(
-              verification.equipment,
-              actual
-            ) ? actual : null;
-          }, 5000, 150);
+          // 프리셋 전환은 서버 반영과 React 재렌더가 모두 끝나기 전에 장비가
+          // 잠깐 이전 값/중간 값으로 보일 수 있다. 클릭 직후 판정하지 않고,
+          // 먼저 기다린 다음 같은 장비가 연속으로 관찰될 때만 전환 성공으로 본다.
+          await M.humanPause(900, 1400);
+          const moved = await M.waitForStableBossEquipment(
+            verification.equipment,
+            { timeout: 8000, interval: 200, consecutive: 3 }
+          );
           if (!moved) {
             M.closePresetPanel();
             if (attempt < attempts) {
@@ -11053,6 +11069,9 @@
       try {
         M.throwIfStopped();
         clickTarget.click();
+        // 너무 빠른 프리셋 연속 전환을 막고 실제 장비 반영을 기다린다.
+        await M.humanPause(900, 1400);
+        let stableMatchCount = 0;
         const result = await M.waitFor(
           () => {
             if (confirmationFailureText) return { failed: true };
@@ -11061,12 +11080,18 @@
               M.bossEquipmentFingerprintMatches(expectedEquipment, actualEquipment) &&
               (!requiresFreshSuccessNotice || confirmationSuccessText)
             ) {
-              return { failed: false, actualEquipment };
+              stableMatchCount++;
+              // 한 번 읽힌 값만 믿지 않는다. React 재렌더를 가로질러 같은
+              // 장비가 연속 3회 확인되어야 다음 공격 단계로 넘어간다.
+              return stableMatchCount >= 3
+                ? { failed: false, actualEquipment }
+                : null;
             }
+            stableMatchCount = 0;
             return null;
           },
-          4000,
-          150
+          8000,
+          200
         );
         confirmed = !!result && !result.failed;
         confirmedEquipment = confirmed ? result.actualEquipment : null;
