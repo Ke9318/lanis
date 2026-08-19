@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.18-stable
+// @version      1.14.19-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -5915,13 +5915,12 @@
   Modules.raremap.clearRareMapsIfAny = async function () {
     let count = 0;
     let unchangedCount = 0;
-    // ⚠ 사용자 확인(2026-08): 레어맵은 같은 종류가 25회 이상 연속으로 나오는
+    // ⚠ 사용자 확인(2026-08): 레어맵은 같은 종류가 26회 이상 연속으로 나오는
     // 경우도 있다. 버튼 텍스트가 이전과 같은 것만으로는 "클릭이 안 먹혔다"와
     // "같은 종류 레어맵이 또 나왔다"를 구분할 수 없다(실전 확인: 일반 광산
     // 버튼도 클릭 후 완전히 동일한 DOM 요소가 재사용되며 텍스트도 그대로임).
-    // 그래서 안전 중단 임계값을 정상적인 연속 출현 범위보다 훨씬 크게 잡아,
-    // 진짜 멈춤(같은 화면에서 수십 번째도 전혀 진행이 없는 경우)만 잡는다.
-    const UNCHANGED_SAFETY_LIMIT = 40;
+    // 동일 텍스트 연속 횟수는 중단 조건으로 사용하지 않는다.
+    const UNCHANGED_SAFETY_LIMIT = '제한 없음';
     while (this.running && count < 150) {
       const rareBtn = this.getRareMapButton();
       if (!rareBtn) break;
@@ -5938,16 +5937,13 @@
       const changed = await Core.waitFor(() => {
         const next = this.getRareMapButton();
         return !next || next.textContent.trim() !== beforeText ? true : null;
-      }, 10000, 200);
+      }, 1200, 150);
       if (!changed) {
         unchangedCount++;
         // 텍스트가 같아도 클릭 자체는 매번 성공했으므로, 같은 종류 레어맵이
         // 연속 출현 중인 정상 상황일 가능성이 높다. 진행 카운트는 그대로
         // 늘리고, 안전장치(UNCHANGED_SAFETY_LIMIT)에만 별도로 반영한다.
         Core.log('raremap', `동일 종류 레어맵이 연속 출현 중일 수 있습니다 (연속 ${unchangedCount}/${UNCHANGED_SAFETY_LIMIT}, 정상 범위: 최대 25회 안팎).`);
-        if (unchangedCount >= UNCHANGED_SAFETY_LIMIT) {
-          throw new Error(`동일 레어맵 버튼이 ${UNCHANGED_SAFETY_LIMIT}회 연속으로 전혀 바뀌지 않아 안전을 위해 중단합니다.`);
-        }
         count++;
         continue;
       }
