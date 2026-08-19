@@ -466,6 +466,90 @@
     return true;
   };
 
+  // 일간/주간 퀘스트까지 처리한 뒤 캐릭 메뉴에 레드닷이 남아 있으면 업적을
+  // 확인한다. 업적 카테고리의 작은 빨간 점이 있는 탭만 열고, disabled가
+  // 아닌 "보상 수령" 버튼만 누른다. 한 번 수령한 뒤 다음 단계 보상이 바로
+  // 활성화될 수 있으므로 같은 카테고리에서 받을 것이 없어질 때까지 반복한다.
+  Modules.daily.claimAchievementRewardsIfIndicated = async function () {
+    const shouldCancel = () => this.stopRequested || !Core.dailyActive;
+    const hasRedDot = (root) => {
+      if (!root) return false;
+      if (root.querySelector('.MuiBadge-dot')) return true;
+      return [...root.querySelectorAll('span, div')].some((el) => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0 || rect.width > 12 || rect.height > 12) return false;
+        const color = getComputedStyle(el).backgroundColor;
+        return color === 'rgb(244, 67, 54)' || color === 'rgb(239, 68, 68)' || color === 'rgb(255, 0, 0)';
+      });
+    };
+    const characterButton = Core.allButtons().find(
+      (button) => button.textContent.trim() === '캐릭' && Core.isElementVisible(button)
+    );
+    if (!hasRedDot(characterButton)) {
+      Core.log('daily', '업적: 캐릭 레드닷 없음 - 확인 생략');
+      return '캐릭 레드닷 없음';
+    }
+
+    Core.log('daily', '업적: 캐릭 레드닷 확인 - 활성 보상 확인 시작');
+    await Core.clickNavMenuExact('캐릭', '업적', shouldCancel);
+    const onAchievementPage = await Core.waitFor(
+      () => location.pathname.startsWith('/achievements'),
+      15000,
+      300,
+      shouldCancel
+    );
+    if (!onAchievementPage) throw new Error('업적 화면 진입을 확인하지 못했습니다.');
+    await Core.humanDelay(500, 900);
+
+    const topTabs = new Set(['업적', '칭호', '프로필']);
+    const findRedCategoryTabs = () => Core.gameElements('button[role="tab"]').filter(
+      (tab) => Core.isElementVisible(tab) && !topTabs.has(tab.textContent.trim()) && hasRedDot(tab)
+    );
+    const findClaimButton = () => Core.gameElements('button').find(
+      (button) => Core.isElementVisible(button) && button.textContent.trim() === '보상 수령' && !button.disabled
+    ) || null;
+
+    let claimed = 0;
+    let visitedTabs = 0;
+    // 비정상 DOM 갱신으로 무한 반복하지 않도록 충분히 큰 상한을 둔다.
+    for (let guard = 0; guard < 100 && !shouldCancel(); guard += 1) {
+      const claimButton = findClaimButton();
+      if (claimButton) {
+        if (!(await Core.safeClick(findClaimButton, {
+          beforeMin: 350,
+          beforeMax: 650,
+          afterMin: 700,
+          afterMax: 1100,
+          shouldCancel,
+        }))) throw new Error('활성 업적 보상 버튼이 클릭 직전에 사라졌습니다.');
+        claimed += 1;
+        continue;
+      }
+
+      const redTabs = findRedCategoryTabs();
+      if (redTabs.length === 0) break;
+      const selectedRedTab = redTabs.find((tab) => tab.getAttribute('aria-selected') === 'true');
+      const targetTab = redTabs.find((tab) => tab !== selectedRedTab) || selectedRedTab;
+      // 선택된 빨간 탭인데 받을 버튼이 없다면 다른 알림이거나 갱신 대기 상태다.
+      // 같은 탭을 계속 누르지 않고 종료해 다음 일일 실행에서 다시 확인한다.
+      if (!targetTab || targetTab === selectedRedTab) break;
+      const targetLabel = targetTab.textContent.trim();
+      if (!(await Core.safeClick(() => findRedCategoryTabs().find(
+        (tab) => tab.textContent.trim() === targetLabel
+      ), {
+        beforeMin: 350,
+        beforeMax: 650,
+        afterMin: 600,
+        afterMax: 900,
+        shouldCancel,
+      }))) throw new Error(`업적 "${targetLabel}" 탭 클릭에 실패했습니다.`);
+      visitedTabs += 1;
+    }
+
+    Core.log('daily', `업적: 레드닷 카테고리 ${visitedTabs}개 확인, 보상 ${claimed}개 수령`);
+    return `업적 보상 ${claimed}개 수령`;
+  };
+
   Modules.daily.craftBoxQuestItem = async function () {
     await Core.clickNavMenuExact('마을', '대장간');
     const onCraftPage = await Core.waitFor(() => Core.bodyText().includes('조합소'), 15000, 300);
@@ -825,6 +909,9 @@
       // 무인 실행 시 이 단계에서 사실상 멈춘 것처럼 오래 걸릴 수 있었다.
       const cultivationOk = await runSubTask('꾸준한 수행', () => this.completeCultivationQuestIfNeeded());
       await runSubTask('주간 보상 수령', () => this.claimQuestRewardIfReady('주간'));
+
+      const achievementResult = await runSubTask('업적 보상 확인', () => this.claimAchievementRewardsIfIndicated());
+      if (achievementResult) Core.log('daily', achievementResult);
 
       // ⚠ 사용자 요청(2026-08): 길드 보스(히드라) 개인 보상도 일간 퀘스트
       // 보상을 받을 때 같이 처리한다.
