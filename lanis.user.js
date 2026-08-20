@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.20-stable
+// @version      1.14.22-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -3091,8 +3091,14 @@
     Core.updateModuleButtons();
 
     if (stopped) {
+      Core.moduleResults.daily = {
+        ok: false,
+        stopped: true,
+        message: '사용자 요청으로 일일 연속 실행을 정지했습니다.',
+        at: Date.now(),
+      };
       Core.showBanner('daily', '사용자 요청으로 일일 연속 실행을 정지했습니다.', false);
-      return;
+      return Core.moduleResults.daily;
     }
 
     const issues = state.reports.filter((report) => !report.ok);
@@ -3100,13 +3106,28 @@
       .map((report) => `${report.ok ? '✅' : '⚠'} ${report.label}: ${report.detail}`)
       .join('\n');
     if (issues.length === 0) {
+      Core.moduleResults.daily = {
+        ok: true,
+        stopped: false,
+        message: '선택한 일일 작업을 모두 완료하고 사후 확인했습니다.',
+        reports: state.reports.slice(),
+        at: Date.now(),
+      };
       Core.showBanner('daily', '선택한 일일 작업을 모두 완료하고 사후 확인했습니다.', true);
       Core.playCompleteSound();
     } else {
+      Core.moduleResults.daily = {
+        ok: false,
+        stopped: false,
+        message: `${issues.length}개 작업에서 이슈가 있었습니다.`,
+        reports: state.reports.slice(),
+        at: Date.now(),
+      };
       Core.showBanner('daily', `${issues.length}개 작업에서 이슈가 있었습니다. 일일 로그를 확인해주세요.`, false);
       Core.playStopSound();
     }
     alert(`일일 연속 실행 결과\n\n${summary || '실행한 작업 없음'}`);
+    return Core.moduleResults.daily;
   };
 
   Core.startDaily = function () {
@@ -3179,6 +3200,7 @@
       startedAt: Date.now(),
     };
     mod.stopRequested = false;
+    Core.moduleResults.daily = { ok: null, stopped: false, message: '실행 중', at: Date.now() };
     Core.backgroundKeeper.acquire('daily');
     sessionStorage.setItem(DAILY_AUTH_KEY, JSON.stringify({
       schema: DAILY_AUTH_SCHEMA,
@@ -3191,14 +3213,26 @@
       window.__bossMacro.armBossRun();
     }
     mod.saveState(state);
-    mod.mainLoop()
+    let loopPromise;
+    loopPromise = mod.mainLoop()
       .catch((e) => {
         Core.dailyActive = false;
         mod.running = false;
+        Core.moduleResults.daily = {
+          ok: false,
+          stopped: false,
+          message: e && e.message ? e.message : String(e),
+          at: Date.now(),
+        };
         Core.showBanner('daily', `일일 실행 자체 오류: ${e.message}`, false);
         Core.updateModuleButtons();
       })
-      .finally(() => Core.backgroundKeeper.release('daily'));
+      .finally(() => {
+        if (mod.loopPromise === loopPromise) mod.loopPromise = null;
+        Core.backgroundKeeper.release('daily');
+      });
+    mod.loopPromise = loopPromise;
+    return loopPromise;
   };
 
   Core.stopDaily = function () {
@@ -3229,6 +3263,77 @@
       }
     }
   };
+
+  // Runtime Host와 수동 UI가 같은 Core 상태/정지 수명주기를 사용하도록 하는
+  // 좁은 공유 계약이다. 게임 로직이나 네트워크 호출은 이 표면에 복제하지
+  // 않는다. 원격 start는 별도 action 승인 계약 전까지 항상 fail closed다.
+  const SHARED_CORE_ADAPTER_VERSION = '1.0.0';
+  const SHARED_CORE_RUNTIME_VERSION = '1.1.0-core-adapter';
+  const SharedCoreAdapter = Object.freeze({
+    version: SHARED_CORE_ADAPTER_VERSION,
+    runtimeVersion: SHARED_CORE_RUNTIME_VERSION,
+    getStatus() {
+      const dailyState = Modules.daily.loadState();
+      const activeModule = Core.activeModuleId ? Modules[Core.activeModuleId] : null;
+      return {
+        source: 'lanis-shared-core',
+        adapterVersion: SHARED_CORE_ADAPTER_VERSION,
+        runtimeVersion: SHARED_CORE_RUNTIME_VERSION,
+        daily: {
+          running: !!(Core.dailyActive || Modules.daily.running),
+          stopRequested: !!Modules.daily.stopRequested,
+          stepIndex: dailyState ? dailyState.index : null,
+          stepCount: dailyState && Array.isArray(dailyState.steps) ? dailyState.steps.length : null,
+          result: Core.moduleResults.daily || null,
+        },
+        activeModule: Core.activeModuleId ? {
+          id: Core.activeModuleId,
+          running: !!(activeModule && activeModule.running),
+          stopRequested: !!(activeModule && activeModule.stopRequested),
+          runId: activeModule && Number.isFinite(activeModule.runId) ? activeModule.runId : null,
+          result: Core.moduleResults[Core.activeModuleId] || null,
+        } : null,
+      };
+    },
+    startDaily(request = {}) {
+      const event = request && request.source === 'manual-ui' ? request.event : null;
+      if (!event || event.isTrusted !== true) {
+        return Promise.resolve({
+          ok: false,
+          skipped: true,
+          code: 'ACTION_EXECUTION_GATED',
+          message: '관리 프로필의 직접 daily.start는 아직 승인되지 않았습니다.',
+        });
+      }
+      const promise = Core.startDaily();
+      if (!promise) {
+        return Promise.resolve({
+          ok: false,
+          skipped: true,
+          code: 'START_REJECTED_BY_CORE',
+          message: '기존 Core 시작 조건이 실행을 차단했습니다.',
+        });
+      }
+      return promise;
+    },
+    requestStop(request = {}) {
+      const before = this.getStatus();
+      Core.stopDaily();
+      const after = this.getStatus();
+      return {
+        ok: true,
+        stopped: !!before.daily.running,
+        alreadyStopped: !before.daily.running,
+        commandId: typeof request.commandId === 'string' ? request.commandId : null,
+        before,
+        after,
+      };
+    },
+  });
+  window.__lanisSharedCoreAdapter = SharedCoreAdapter;
+  window.dispatchEvent(new CustomEvent('lanis:shared-core:ready', {
+    detail: { adapterVersion: SHARED_CORE_ADAPTER_VERSION, runtimeVersion: SHARED_CORE_RUNTIME_VERSION },
+  }));
 
   function buildDailyTab(container) {
     const mod = Modules.daily;
@@ -3295,8 +3400,8 @@
     stopBtn.textContent = '정지';
     stopBtn.style.cssText = btnStyle('#c62828');
     stopBtn.disabled = true;
-    startBtn.addEventListener('click', () => Core.startDaily());
-    stopBtn.addEventListener('click', () => Core.stopDaily());
+    startBtn.addEventListener('click', (event) => SharedCoreAdapter.startDaily({ source: 'manual-ui', event }));
+    stopBtn.addEventListener('click', () => SharedCoreAdapter.requestStop({ source: 'manual-ui' }));
     row.append(startBtn, stopBtn);
     container.appendChild(row);
 
@@ -12640,6 +12745,54 @@
     // 실제 진입 여부는 호출자가 waitFor로 확인한다(여기서 고정 sleep 안 함).
   };
 
+  // 카드/확인 버튼을 눌렀다는 사실만으로 진입 성공을 판단하지 않는다.
+  // SPA 이동, 늦게 뜨는 확인창, 다른 안내 팝업을 계속 관찰하고 실제 전투
+  // 화면 또는 명백한 실패 원인이 확인될 때만 호출자에게 결과를 돌려준다.
+  M.waitForBossEntryOutcome = async (bossLabel, timeoutMs = 30000) => {
+    const startedAt = Date.now();
+    let lastDialogDescription = '';
+    let lastPath = '';
+
+    while (Date.now() - startedAt < timeoutMs) {
+      M.throwIfStopped();
+      if (M.isInBattleScreen(bossLabel)) {
+        return { entered: true, reason: 'battle-screen' };
+      }
+
+      const path = location.pathname.replace(/\/$/, '');
+      const dialogDescription = M.describeOpenDialogs();
+      if (dialogDescription && dialogDescription !== lastDialogDescription) {
+        lastDialogDescription = dialogDescription;
+        if (M.uiLog) {
+          M.uiLog(`⏳ 전투 진입 대기 중 팝업 감지 - 상태가 확정될 때까지 관찰: ${dialogDescription}`);
+        }
+      }
+      if (path !== lastPath) {
+        lastPath = path;
+        if (M.uiLog && path !== '/personal-boss') {
+          M.uiLog(`⏳ 전투 진입 경로 전환 감지(${path || '/'}) - 화면 렌더링 대기`);
+        }
+      }
+
+      // 확인창이 늦게 나타난 경우에만 안전한 진입 버튼을 한 번 처리한다.
+      // 정체를 모르는 팝업은 임의로 닫지 않고 사용자가 확인할 시간을 준다.
+      const delayedConfirm = M.findConfirmInOpenDialog(['재도전', '도전하기', '도전', '확인']);
+      if (delayedConfirm && !delayedConfirm.dataset.lanisBossEntryHandled) {
+        delayedConfirm.dataset.lanisBossEntryHandled = '1';
+        if (M.uiLog) M.uiLog(`   늦게 나타난 확인 모달 "${delayedConfirm.textContent.trim()}" 클릭`);
+        delayedConfirm.click();
+      }
+
+      await M.sleep(250);
+    }
+
+    return {
+      entered: false,
+      reason: 'timeout',
+      detail: `${M.describeBattleEntryState(bossLabel)} / 팝업: ${M.describeOpenDialogs()}`,
+    };
+  };
+
   M.abandonCurrentBossAttempt = async () => {
     M.throwIfStopped();
     const candidates = ['도전 포기', '전투 포기', '포기하기', '포기'];
@@ -12807,22 +12960,17 @@
           await M.ensureElementForBoss(entry.label, { hard: !!entry.hard });
           if (M.uiLog) M.uiLog(`🧭 "${entry.label}" 카드 찾는 중...`);
           await M.enterBossBattle(entry.label, { hard: !!entry.hard });
-          // 기존엔 sleep(500) 뒤 딱 한 번만 확인해서, SPA 렌더가 조금만 느려도
-          // 그 자리에서 "진입 실패"로 단정하고 큐를 통째로 중단했다. 같은 일을
-          // 하는 일일 수호자 경로는 이미 waitFor로 10초를 기다리고 있어서 이 큐
-          // 경로만 유독 취약했다. 동일하게 폴링 방식으로 맞춘다.
-          const entered = await M.waitFor(() => M.isInBattleScreen(entry.label), 12000, 250);
-          if (entered) {
+          const entryOutcome = await M.waitForBossEntryOutcome(entry.label, 30000);
+          if (entryOutcome.entered) {
             localStorage.removeItem(PENDING_KEY);
             return await runAndReport();
           }
-          if (M.uiLog) {
-            M.uiLog('⚠ 전투 화면 진입 확인 실패(12초 대기). ' + M.describeBattleEntryState(entry.label));
-          }
+          const detail = entryOutcome.detail || M.describeBattleEntryState(entry.label);
+          throw new Error(`"${entry.label}" 전투 진입 상태를 30초 동안 확정하지 못함: ${detail}`);
         } catch (e) {
           if (M.uiLog) M.uiLog('⚠ ' + e.message);
+          return { entered: false, cleared: false, error: e.message };
         }
-        return { entered: false, cleared: false };
       }
 
       return { entered: false, cleared: false };
@@ -13493,6 +13641,11 @@
       //     연속 실패"는 이 경우를 말한 것)
       if (!result.entered) {
         q2.entryFailStreak++;
+        if (result.error) {
+          // 큐 내부에서 오류를 삼키면 waitForBossQueueEnd가 정상 종료로 오인해
+          // 일일매크로가 보스를 건너뛴다. 원인을 상위 실행까지 그대로 전달한다.
+          throw new Error(result.error);
+        }
         localStorage.removeItem(QUEUE_KEY);
         if (M.uiLog) M.uiLog(`🛑 [큐] "${entry.label}" 전투 진입 확인 실패 - 자동 재클릭 없이 중단`);
         M.showBossNotice(
