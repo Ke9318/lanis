@@ -1988,6 +1988,7 @@
     arena: '아레나',
     guildboss: '길드보스',
     preseason: '이벤트',
+    preseasonArena: '프리시즌 무한아레나',
   };
   const moduleDisplayLabel = (moduleId) => MODULE_LABELS[moduleId] || moduleId;
 
@@ -3960,6 +3961,153 @@
     }
   };
 
+  const PRESEASON_ARENA_FISH_INTERVAL_MS = 30 * 60 * 1000;
+  Modules.preseasonArena = {
+    id: 'preseasonArena',
+    running: false,
+    stopRequested: false,
+    runId: 0,
+    loopPromise: null,
+    cycleCount: 0,
+    nextFishingAt: 0,
+  };
+
+  Modules.preseasonArena.ensureArena = async function () {
+    await Modules.arena.goToArena();
+    await Modules.arena.handleResultIfPresent();
+    if (!Core.bodyText().includes('프리시즌')) {
+      throw new Error('현재 아레나가 프리시즌 상태가 아닙니다. 무한아레나를 중단합니다.');
+    }
+  };
+
+  Modules.preseasonArena.waitForArenaStart = async function () {
+    const deadline = Date.now() + 95000;
+    while (!this.stopRequested && Date.now() < deadline) {
+      if (location.pathname.replace(/\/$/, '') !== '/arena') {
+        Core.log('preseasonArena', '다른 화면 감지 → 아레나로 자동 복귀');
+        await this.ensureArena();
+      }
+      const button = Core.findButtonByText('전투 시작');
+      if (button && !button.disabled) return button;
+      await Core.interruptibleSleep(800, () => this.stopRequested, 400);
+    }
+    return null;
+  };
+
+  Modules.preseasonArena.runFishingCycle = async function () {
+    Core.log('preseasonArena', '30분 주기 통발 작업 시작');
+    await Core.clickNavMenuExact('마을', '낚시터', () => this.stopRequested);
+    const arrived = await Core.waitFor(
+      () => location.pathname.startsWith('/fishing') && Core.bodyText().includes('심포니아 낚시터'),
+      15000,
+      300
+    );
+    if (!arrived) throw new Error('낚시터 진입을 확인하지 못했습니다.');
+    if (this.stopRequested) return;
+
+    let installButton = Core.findButtonByText('통발 설치하기');
+    if (!installButton) {
+      const collectButton = Core.findButtonByText('통발 수거하기');
+      if (!collectButton || collectButton.disabled) {
+        Core.log('preseasonArena', '통발이 아직 수거 불가 상태라 이번 주기는 건너뜁니다.');
+        return;
+      }
+      if (!(await Core.safeClick(
+        () => {
+          const button = Core.findButtonByText('통발 수거하기');
+          return button && !button.disabled ? button : null;
+        },
+        { beforeMin: 450, beforeMax: 850, afterMin: 700, afterMax: 1100 }
+      ))) throw new Error('통발 수거 버튼 클릭에 실패했습니다.');
+      installButton = await Core.waitFor(() => Core.findButtonByText('통발 설치하기'), 8000, 250);
+      if (!installButton) throw new Error('통발 수거 후 설치 버튼이 나타나지 않았습니다.');
+      Core.log('preseasonArena', '통발 수거 완료');
+    }
+
+    if (this.stopRequested) return;
+    if (!(await Core.safeClick(
+      () => Core.findButtonByText('통발 설치하기'),
+      { beforeMin: 450, beforeMax: 850, afterMin: 350, afterMax: 650 }
+    ))) throw new Error('통발 설치 버튼 클릭에 실패했습니다.');
+
+    const confirmButton = await Core.waitFor(() => {
+      const dialog = Core.gameElements('[role="dialog"]').find(
+        (el) => Core.isElementVisible(el) && el.textContent.includes('통발 설치 확인')
+      );
+      return dialog
+        ? [...dialog.querySelectorAll('button')].find((button) => button.textContent.trim() === '확인' && !button.disabled) || null
+        : null;
+    }, 6000, 200);
+    if (!confirmButton) throw new Error('통발 설치 확인창의 확인 버튼을 찾지 못했습니다.');
+    if (!(await Core.safeClick(() => confirmButton, {
+      beforeMin: 400,
+      beforeMax: 750,
+      afterMin: 700,
+      afterMax: 1100,
+    }))) throw new Error('통발 설치 확인에 실패했습니다.');
+    const installed = await Core.waitFor(
+      () => {
+        const button = Core.findButtonByText('통발 설치 중');
+        return button && button.disabled ? true : null;
+      },
+      8000,
+      250
+    );
+    if (!installed) throw new Error('통발 재설치 상태를 확인하지 못했습니다.');
+    Core.log('preseasonArena', '통발 재설치 완료 → 아레나 복귀');
+  };
+
+  Modules.preseasonArena.mainLoop = async function () {
+    this.cycleCount = 0;
+    this.nextFishingAt = Date.now() + PRESEASON_ARENA_FISH_INTERVAL_MS;
+    await this.ensureArena();
+    while (!this.stopRequested) {
+      if (Date.now() >= this.nextFishingAt) {
+        await this.runFishingCycle();
+        this.nextFishingAt = Date.now() + PRESEASON_ARENA_FISH_INTERVAL_MS;
+        if (this.stopRequested) return;
+        await this.ensureArena();
+      } else {
+        await this.ensureArena();
+      }
+
+      const before = Modules.arena.readTodayBattleCount();
+      if (before === null) throw new Error('아레나의 오늘 전투 횟수를 읽지 못했습니다.');
+      const startButton = await this.waitForArenaStart();
+      if (!startButton) {
+        if (this.stopRequested) return;
+        throw new Error('95초 안에 아레나 전투 시작 버튼이 활성화되지 않았습니다.');
+      }
+      if (!(await Core.safeClick(
+        () => {
+          const button = Core.findButtonByText('전투 시작');
+          return button && !button.disabled ? button : null;
+        },
+        { beforeMin: 650, beforeMax: 1150 }
+      ))) throw new Error('프리시즌 아레나 전투 시작 클릭에 실패했습니다.');
+
+      const resultBack = await Core.waitFor(
+        () => Core.findButtonByText('아레나로 돌아가기') || Core.findButtonByText('돌아가기'),
+        15000,
+        400
+      );
+      if (!resultBack) {
+        Core.log('preseasonArena', '결과 화면을 확인하지 못해 아레나 화면부터 다시 확인합니다.');
+        continue;
+      }
+      await Modules.arena.handleResultIfPresent();
+      const after = await Core.waitFor(() => {
+        const count = Modules.arena.readTodayBattleCount();
+        return count !== null && count > before ? count : null;
+      }, 15000, 300);
+      if (after === null) throw new Error('전투 후 오늘 전투 횟수 증가를 확인하지 못했습니다.');
+      this.cycleCount++;
+      Core.updateModuleButtons();
+      const fishingIn = Math.max(0, Math.ceil((this.nextFishingAt - Date.now()) / 60000));
+      Core.log('preseasonArena', `아레나 전투 완료: 오늘 ${after}회 / 다음 통발 작업 약 ${fishingIn}분 후`);
+    }
+  };
+
   function buildPreseasonTab(container) {
     const mod = Modules.preseason;
     const refs = UIRefs.preseason;
@@ -4025,6 +4173,40 @@
     });
     tokenBtnRow.append(tokenLabel, tokenBtn, tokenStatusEl);
     container.appendChild(tokenBtnRow);
+
+    // 프리시즌 일반 아레나는 보석 일일 한도와 무관하게 계속 돌 수 있으므로
+    // 기존 가을 이벤트 아레나와 실행 상태를 완전히 분리한다. 이 실행 중에는
+    // 30분마다 통발을 수거·재설치하고 다시 아레나로 돌아온다.
+    const infiniteRow = document.createElement('div');
+    infiniteRow.style.cssText = 'margin-top:10px; padding-top:10px; border-top:1px solid #333;';
+    const infiniteLabel = document.createElement('div');
+    infiniteLabel.textContent = '프리시즌 무한아레나 (30분마다 통발 수거·재설치)';
+    infiniteLabel.style.cssText = 'font-size:11px; color:#ccc; margin-bottom:5px;';
+    const infiniteDescription = document.createElement('div');
+    infiniteDescription.textContent = '횟수 제한 없이 일반 아레나를 반복합니다. 다른 화면으로 이동하면 자동 복귀하며, 통발 작업 후에도 아레나로 돌아옵니다.';
+    infiniteDescription.style.cssText = 'font-size:10px; color:#f5a623; line-height:1.45; margin-bottom:7px;';
+    const infiniteBtnRow = document.createElement('div');
+    infiniteBtnRow.style.cssText = 'display:flex; gap:6px; align-items:center;';
+    const infiniteStartBtn = document.createElement('button');
+    infiniteStartBtn.textContent = '무한아레나 시작';
+    infiniteStartBtn.style.cssText = btnStyle('#1565c0');
+    const infiniteStopBtn = document.createElement('button');
+    infiniteStopBtn.textContent = '정지';
+    infiniteStopBtn.style.cssText = btnStyle('#c62828');
+    infiniteStopBtn.disabled = true;
+    const infiniteStatusEl = document.createElement('div');
+    infiniteStatusEl.textContent = '대기중';
+    infiniteStatusEl.style.cssText = 'font-size:11px; color:#ccc; margin-top:5px;';
+    infiniteStartBtn.addEventListener('click', () => Core.startModule('preseasonArena'));
+    infiniteStopBtn.addEventListener('click', () => Core.requestStopModule('preseasonArena'));
+    infiniteBtnRow.append(infiniteStartBtn, infiniteStopBtn);
+    infiniteRow.append(infiniteLabel, infiniteDescription, infiniteBtnRow, infiniteStatusEl);
+    container.appendChild(infiniteRow);
+
+    UIRefs.preseasonArena.startBtn = infiniteStartBtn;
+    UIRefs.preseasonArena.stopBtn = infiniteStopBtn;
+    UIRefs.preseasonArena.statusEl = infiniteStatusEl;
+    UIRefs.preseasonArena.inputs = [];
   }
 
   // -------------------------- 모듈 1: 재전직 --------------------------
@@ -10178,13 +10360,14 @@
     dungeon: {},
     arena: {},
     preseason: {},
+    preseasonArena: {},
     deepdungeon: {},
     guildboss: {},
   };
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
-    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'preseason', 'deepdungeon'].forEach((id) => {
+    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'preseason', 'preseasonArena', 'deepdungeon'].forEach((id) => {
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
@@ -10201,6 +10384,8 @@
           ? `오늘 전투 ${mod.cycleCount}회 (무료인 동안 반복)`
           : id === 'preseason'
           ? `가을 아레나 전투 ${mod.cycleCount}회 (단풍 토큰 한도까지 반복)`
+          : id === 'preseasonArena'
+          ? `전투 ${mod.cycleCount}회 / 30분마다 통발 작업`
           : id === 'deepdungeon'
           ? `던전의 주인 도전 ${mod.cycleCount}회`
           : `사이클 ${mod.cycleCount}`;
