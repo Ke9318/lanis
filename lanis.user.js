@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.23-stable
+// @version      1.14.24-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -3775,6 +3775,14 @@
     };
   };
 
+  Modules.preseason.findReadyBattleStartButton = function () {
+    return Core.allButtons().find((button) => {
+      const text = button.textContent.replace(/\s+/g, ' ').trim();
+      return text.startsWith('전투 시작') && !button.disabled &&
+        button.getAttribute('aria-disabled') !== 'true' && Core.isElementVisible(button);
+    }) || null;
+  };
+
   Modules.preseason.goToAutumnDeepArena = async function () {
     const onArena = () =>
       location.pathname.replace(/\/$/, '') === '/event/autumn' &&
@@ -3838,11 +3846,15 @@
         `단풍 토큰 획득 전투 준비: 오늘 ${before.today.current}/${before.today.max}, 주간 ${before.weekly.current}/${before.weekly.max}`
       );
       if (mod.stopRequested) return;
+      const readyButton = await Core.waitFor(
+        () => mod.findReadyBattleStartButton(),
+        12000,
+        250,
+        () => mod.stopRequested
+      );
+      if (!readyButton) throw new Error('가을 심층던전 아레나의 활성화된 "전투 시작" 버튼을 찾지 못했습니다.');
       const clicked = await Core.safeClick(
-        () => {
-          const button = Core.findButtonByText('전투 시작');
-          return button && !button.disabled ? button : null;
-        },
+        () => mod.findReadyBattleStartButton(),
         { beforeMin: 180, beforeMax: 420, afterMin: 120, afterMax: 260 }
       );
       if (!clicked) throw new Error('가을 심층던전 아레나 "전투 시작" 버튼 클릭에 실패했습니다.');
@@ -5480,10 +5492,31 @@
   };
 
   Modules.autohunt.readEnergy = function () {
-    const el = this.leafTextEls().find((e) => /^[\d,]+\/\s*2000$/.test(e.textContent.trim()));
-    if (!el) return null;
-    const f = this.parseFraction(el.textContent.trim());
-    return f ? f.cur : null;
+    const parseEnergy = (text) => {
+      const match = String(text || '').replace(/\s+/g, ' ').match(/([\d,]+)\s*\/\s*2,?000\b/);
+      if (!match) return null;
+      const value = this.parseNumber(match[1]);
+      return Number.isFinite(value) && value >= 0 && value <= 2000 ? value : null;
+    };
+    const leaves = this.leafTextEls();
+    const label = leaves.find((el) => el.textContent.trim() === '행동력');
+    if (label) {
+      let node = label.parentElement;
+      for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+        const value = parseEnergy(node.textContent);
+        if (value !== null) return value;
+      }
+      const index = leaves.indexOf(label);
+      for (let offset = 1; offset <= 3 && index + offset < leaves.length; offset++) {
+        const value = parseEnergy(leaves[index + offset].textContent);
+        if (value !== null) return value;
+      }
+    }
+    for (const el of leaves) {
+      const value = parseEnergy(el.textContent);
+      if (value !== null) return value;
+    }
+    return null;
   };
 
   Modules.autohunt.readGold = function () {
