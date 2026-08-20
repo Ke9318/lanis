@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.25-stable
+// @version      1.14.26-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -3279,6 +3279,112 @@
   // 않는다. 원격 start는 exact-session bridge가 발급한 명시 승인만 허용한다.
   const SHARED_CORE_ADAPTER_VERSION = '1.0.0';
   const SHARED_CORE_RUNTIME_VERSION = '1.2.0-daily-adapter';
+  const EXECUTION_LEASE_KEY = 'lanis:shared-core:execution-lease:v1';
+  const EXECUTION_LEASE_CHANNEL = 'lanis:shared-core:execution-lease:liveness:v1';
+  const EXECUTION_LEASE_PROBE_MS = 250;
+  const executionTabId = (() => {
+    const key = 'lanis:shared-core:execution-tab-id:v1';
+    let value = sessionStorage.getItem(key);
+    if (!value) {
+      value = `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      sessionStorage.setItem(key, value);
+    }
+    return value;
+  })();
+  const executionLeaseChannel = typeof BroadcastChannel === 'function'
+    ? new BroadcastChannel(EXECUTION_LEASE_CHANNEL)
+    : null;
+  let ownedExecutionLease = null;
+
+  const readExecutionLease = () => {
+    try {
+      const value = JSON.parse(localStorage.getItem(EXECUTION_LEASE_KEY) || 'null');
+      return value && value.schema === 'execution-lease-v1' && value.state === 'running'
+        ? value
+        : null;
+    } catch (_) {
+      return null;
+    }
+  };
+  const publicLease = (lease) => lease ? ({
+    owner: lease.owner,
+    job: lease.job,
+    sessionId: lease.sessionId,
+    startedAt: lease.startedAt,
+    state: lease.state,
+  }) : null;
+  const coreDailyIsRunning = () => !!(Core.dailyActive || Modules.daily.running);
+  const releaseExecutionLease = (leaseId) => {
+    const current = readExecutionLease();
+    if (current && current.leaseId === leaseId && current.tabId === executionTabId) {
+      localStorage.removeItem(EXECUTION_LEASE_KEY);
+    }
+    if (ownedExecutionLease && ownedExecutionLease.leaseId === leaseId) ownedExecutionLease = null;
+  };
+  const probeLeaseOwner = (lease) => new Promise((resolve) => {
+    if (!executionLeaseChannel) {
+      resolve(null);
+      return;
+    }
+    const probeId = `probe-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let settled = false;
+    const onMessage = (event) => {
+      const value = event && event.data;
+      if (!value || value.type !== 'lease-alive' || value.probeId !== probeId || value.leaseId !== lease.leaseId) return;
+      settled = true;
+      executionLeaseChannel.removeEventListener('message', onMessage);
+      resolve(true);
+    };
+    executionLeaseChannel.addEventListener('message', onMessage);
+    executionLeaseChannel.postMessage({ type: 'lease-probe', probeId, leaseId: lease.leaseId });
+    setTimeout(() => {
+      if (settled) return;
+      executionLeaseChannel.removeEventListener('message', onMessage);
+      resolve(false);
+    }, EXECUTION_LEASE_PROBE_MS);
+  });
+  executionLeaseChannel?.addEventListener('message', (event) => {
+    const value = event && event.data;
+    if (!value || value.type !== 'lease-probe' || !ownedExecutionLease) return;
+    if (value.leaseId !== ownedExecutionLease.leaseId || !coreDailyIsRunning()) return;
+    executionLeaseChannel.postMessage({
+      type: 'lease-alive',
+      probeId: value.probeId,
+      leaseId: ownedExecutionLease.leaseId,
+    });
+  });
+  const acquireExecutionLease = async (request) => {
+    const existing = readExecutionLease();
+    if (existing) {
+      const locallyLive = existing.tabId === executionTabId && coreDailyIsRunning();
+      const remotelyLive = locallyLive ? true : await probeLeaseOwner(existing);
+      const unchanged = readExecutionLease();
+      if (remotelyLive || !unchanged || unchanged.leaseId !== existing.leaseId) {
+        if (remotelyLive) return { acquired: false, lease: existing };
+        return acquireExecutionLease(request);
+      }
+      // The owning tab/session did not answer and this Core is not running it.
+      // Recovery is based on observed liveness, never lease age alone.
+      localStorage.removeItem(EXECUTION_LEASE_KEY);
+    }
+    const auth = request && request.authorization;
+    const lease = {
+      schema: 'execution-lease-v1',
+      leaseId: `lease-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      profileId: auth && auth.profileId ? auth.profileId : 'browser-profile-origin',
+      tabId: executionTabId,
+      owner: request && request.source === 'runtime-host' ? 'operator' : 'manual',
+      job: 'daily',
+      sessionId: auth && auth.sessionId ? auth.sessionId : executionTabId,
+      startedAt: Date.now(),
+      state: 'running',
+    };
+    localStorage.setItem(EXECUTION_LEASE_KEY, JSON.stringify(lease));
+    const winner = readExecutionLease();
+    if (!winner || winner.leaseId !== lease.leaseId) return { acquired: false, lease: winner };
+    ownedExecutionLease = lease;
+    return { acquired: true, lease };
+  };
   const SharedCoreAdapter = Object.freeze({
     version: SHARED_CORE_ADAPTER_VERSION,
     runtimeVersion: SHARED_CORE_RUNTIME_VERSION,
@@ -3295,6 +3401,7 @@
           stepIndex: dailyState ? dailyState.index : null,
           stepCount: dailyState && Array.isArray(dailyState.steps) ? dailyState.steps.length : null,
           result: Core.moduleResults.daily || null,
+          lease: publicLease(readExecutionLease()),
         },
         activeModule: Core.activeModuleId ? {
           id: Core.activeModuleId,
@@ -3305,7 +3412,7 @@
         } : null,
       };
     },
-    startDaily(request = {}) {
+    async startDaily(request = {}) {
       const event = request && request.source === 'manual-ui' ? request.event : null;
       const auth = request && request.source === 'runtime-host' ? request.authorization : null;
       const managedAuthorized = !!(auth && auth.schema === 'daily-runtime-explicit-v1' &&
@@ -3323,9 +3430,20 @@
           message: 'daily.start 명시 승인이 없거나 현재 세션과 일치하지 않습니다.',
         });
       }
-      Core.startDaily();
+      const leaseResult = await acquireExecutionLease(request);
+      if (!leaseResult.acquired) {
+        return {
+          ok: false,
+          skipped: true,
+          code: 'ALREADY_RUNNING',
+          message: '같은 계정/프로필에서 장기 실행 작업이 이미 실행 중입니다.',
+          existing: publicLease(leaseResult.lease),
+        };
+      }
+      const loopPromise = Core.startDaily();
       const started = !!(Core.dailyActive || Modules.daily.running);
       if (!started) {
+        releaseExecutionLease(leaseResult.lease.leaseId);
         return Promise.resolve({
           ok: false,
           skipped: true,
@@ -3333,6 +3451,7 @@
           message: '기존 Core 시작 조건이 실행을 차단했습니다.',
         });
       }
+      Promise.resolve(loopPromise).finally(() => releaseExecutionLease(leaseResult.lease.leaseId));
       if (request.source === 'manual-ui') return Promise.resolve({ ok: true, started: true });
       return new Promise((resolve) => {
         let finished = false;
