@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.24-stable
+// @version      1.14.25-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2237,7 +2237,16 @@
     );
     if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
     if (!onGround) throw new Error('사냥 종료 후 사냥터 화면을 확인하지 못함');
-    const energy = mod.readEnergy();
+    const energyReading = await Core.waitFor(
+      () => {
+        const value = mod.readEnergy();
+        return value === null ? null : { value };
+      },
+      8000,
+      250,
+      shouldCancel
+    );
+    const energy = energyReading ? energyReading.value : null;
     if (energy === null) throw new Error('사냥 종료 후 행동력을 읽지 못함');
     if (energy >= mod.config.minEnergy) {
       throw new Error(`행동력이 제한 이상으로 남음: ${energy}/2000 (기준 ${mod.config.minEnergy})`);
@@ -3846,13 +3855,31 @@
         `단풍 토큰 획득 전투 준비: 오늘 ${before.today.current}/${before.today.max}, 주간 ${before.weekly.current}/${before.weekly.max}`
       );
       if (mod.stopRequested) return;
-      const readyButton = await Core.waitFor(
-        () => mod.findReadyBattleStartButton(),
+      const readyState = await Core.waitFor(
+        () => {
+          const progress = mod.readAutumnTokenProgress();
+          if (progress && (
+            progress.today.current >= progress.today.max
+            || progress.weekly.current >= progress.weekly.max
+          )) {
+            return { completed: true, progress };
+          }
+          const button = mod.findReadyBattleStartButton();
+          return button ? { completed: false, button } : null;
+        },
         12000,
         250,
         () => mod.stopRequested
       );
-      if (!readyButton) throw new Error('가을 심층던전 아레나의 활성화된 "전투 시작" 버튼을 찾지 못했습니다.');
+      if (!readyState) throw new Error('가을 심층던전 아레나의 완료 상태나 활성화된 "전투 시작" 버튼을 확인하지 못했습니다.');
+      if (readyState.completed) {
+        const progress = readyState.progress;
+        Core.notifyCompleted(
+          'preseason',
+          `가을 심층던전 아레나 완료: 오늘 ${progress.today.current}/${progress.today.max}, 주간 ${progress.weekly.current}/${progress.weekly.max}`
+        );
+        return;
+      }
       const clicked = await Core.safeClick(
         () => mod.findReadyBattleStartButton(),
         { beforeMin: 180, beforeMax: 420, afterMin: 120, afterMax: 260 }
