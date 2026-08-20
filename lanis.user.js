@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.22-stable
+// @version      1.14.23-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -3266,9 +3266,9 @@
 
   // Runtime Host와 수동 UI가 같은 Core 상태/정지 수명주기를 사용하도록 하는
   // 좁은 공유 계약이다. 게임 로직이나 네트워크 호출은 이 표면에 복제하지
-  // 않는다. 원격 start는 별도 action 승인 계약 전까지 항상 fail closed다.
+  // 않는다. 원격 start는 exact-session bridge가 발급한 명시 승인만 허용한다.
   const SHARED_CORE_ADAPTER_VERSION = '1.0.0';
-  const SHARED_CORE_RUNTIME_VERSION = '1.1.0-core-adapter';
+  const SHARED_CORE_RUNTIME_VERSION = '1.2.0-daily-adapter';
   const SharedCoreAdapter = Object.freeze({
     version: SHARED_CORE_ADAPTER_VERSION,
     runtimeVersion: SHARED_CORE_RUNTIME_VERSION,
@@ -3297,16 +3297,25 @@
     },
     startDaily(request = {}) {
       const event = request && request.source === 'manual-ui' ? request.event : null;
-      if (!event || event.isTrusted !== true) {
+      const auth = request && request.source === 'runtime-host' ? request.authorization : null;
+      const managedAuthorized = !!(auth && auth.schema === 'daily-runtime-explicit-v1' &&
+        auth.explicit === true && auth.commandId === request.commandId &&
+        typeof auth.profileId === 'string' && auth.profileId &&
+        typeof auth.sessionId === 'string' && auth.sessionId &&
+        typeof auth.runId === 'string' && auth.runId &&
+        auth.runtimeVersion === SHARED_CORE_RUNTIME_VERSION &&
+        Number.isFinite(auth.issuedAt) && Math.abs(Date.now() - auth.issuedAt) <= 30000);
+      if ((!event || event.isTrusted !== true) && !managedAuthorized) {
         return Promise.resolve({
           ok: false,
           skipped: true,
           code: 'ACTION_EXECUTION_GATED',
-          message: '관리 프로필의 직접 daily.start는 아직 승인되지 않았습니다.',
+          message: 'daily.start 명시 승인이 없거나 현재 세션과 일치하지 않습니다.',
         });
       }
-      const promise = Core.startDaily();
-      if (!promise) {
+      Core.startDaily();
+      const started = !!(Core.dailyActive || Modules.daily.running);
+      if (!started) {
         return Promise.resolve({
           ok: false,
           skipped: true,
@@ -3314,7 +3323,31 @@
           message: '기존 Core 시작 조건이 실행을 차단했습니다.',
         });
       }
-      return promise;
+      if (request.source === 'manual-ui') return Promise.resolve({ ok: true, started: true });
+      return new Promise((resolve) => {
+        let finished = false;
+        const finish = (value) => {
+          if (finished) return;
+          finished = true;
+          document.removeEventListener('ranis:daily-result', onResult);
+          unsubscribeStop?.();
+          resolve(value);
+        };
+        const onResult = () => {
+          let result = null;
+          try { result = JSON.parse(sessionStorage.getItem('ranisOperatorDailyResult') || 'null'); } catch (_) {}
+          finish(result && result.state === 'stopped'
+            ? { ok: true, stopped: true, result }
+            : result && result.state === 'failed'
+              ? { ok: false, code: 'CORE_FAILED', message: result.message, result }
+              : { ok: true, result });
+        };
+        document.addEventListener('ranis:daily-result', onResult);
+        const unsubscribeStop = request.scope?.onStop(() => {
+          Core.stopDaily();
+          finish({ ok: true, stopped: true });
+        });
+      });
     },
     requestStop(request = {}) {
       const before = this.getStatus();
