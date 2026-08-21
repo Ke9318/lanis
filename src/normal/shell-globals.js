@@ -12,8 +12,8 @@
     arena: '아레나',
     guildboss: '길드보스',
     preseason: '이벤트',
+    preseasonArena: '프리시즌 무한아레나',
   };
   const moduleDisplayLabel = (moduleId) => MODULE_LABELS[moduleId] || moduleId;
 
   const Modules = {};
-

@@ -241,6 +241,19 @@
       }
 
       const countInfo = await Core.waitFor(() => mod.getAttackCount(), 8000, 250);
+      // 정상 공격으로 페이지가 이미 받은 결과 DOM만 짧게 관찰하고 로컬 보고한다.
+      // 이 관찰자는 fetch/XHR/WebSocket을 사용하지 않으며 최대 4초 뒤 종료된다.
+      if (window.RanisHydraClientState) {
+        window.RanisHydraClientState.observe({
+          durationMs: 4000,
+          targetHead: mod.findHeadNameByElement(bossId, mod.getBossConfig(bossId).targetElement),
+          targetElement: mod.getBossConfig(bossId).targetElement,
+        });
+        window.RanisHydraClientState.capture({
+          targetHead: mod.findHeadNameByElement(bossId, mod.getBossConfig(bossId).targetElement),
+          targetElement: mod.getBossConfig(bossId).targetElement,
+        });
+      }
       Core.log(
         'guildboss',
         `공격 ${i + 1}회 완료 (공격 횟수: ${countInfo ? `${countInfo.current}/${countInfo.max}` : '확인 불가'})`

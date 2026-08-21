@@ -72,12 +72,15 @@
       return !!findBtn();
     }
     try {
-      await Core.clickNavMenuSuffix('전투', groundSuffix, shouldCancel);
+      await Core.clickNavMenuSuffix('전투', groundSuffix, shouldCancel, {
+        nav: { min: 250, max: 500 },
+        item: { min: 250, max: 500 },
+      });
     } catch (e) {
       Core.log('autohunt', `오류: ${e.message}`);
       return false;
     }
-    await Core.sleep(600);
+    await Core.sleep(300);
     if (shouldCancel && shouldCancel()) return false;
     if (floor) {
       const floorSelected = await this.selectFloor(floor, shouldCancel);
@@ -249,10 +252,31 @@
   };
 
   Modules.autohunt.readEnergy = function () {
-    const el = this.leafTextEls().find((e) => /^[\d,]+\/\s*2000$/.test(e.textContent.trim()));
-    if (!el) return null;
-    const f = this.parseFraction(el.textContent.trim());
-    return f ? f.cur : null;
+    const parseEnergy = (text) => {
+      const match = String(text || '').replace(/\s+/g, ' ').match(/([\d,]+)\s*\/\s*2,?000\b/);
+      if (!match) return null;
+      const value = this.parseNumber(match[1]);
+      return Number.isFinite(value) && value >= 0 && value <= 2000 ? value : null;
+    };
+    const leaves = this.leafTextEls();
+    const label = leaves.find((el) => el.textContent.trim() === '행동력');
+    if (label) {
+      let node = label.parentElement;
+      for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+        const value = parseEnergy(node.textContent);
+        if (value !== null) return value;
+      }
+      const index = leaves.indexOf(label);
+      for (let offset = 1; offset <= 3 && index + offset < leaves.length; offset++) {
+        const value = parseEnergy(leaves[index + offset].textContent);
+        if (value !== null) return value;
+      }
+    }
+    for (const el of leaves) {
+      const value = parseEnergy(el.textContent);
+      if (value !== null) return value;
+    }
+    return null;
   };
 
   Modules.autohunt.readGold = function () {
@@ -299,7 +323,7 @@
     Core.log('autohunt', `${label} 부족 확인 - 회복 절차 시작 (은행입금 → 여관회복 → 데자브 포션구매 → 사냥터 복귀)`);
 
     // 1. 은행 입금 (보유 골드 보호)
-    await Core.bankDepositAll('autohunt');
+    await Core.bankDepositAll('autohunt', { fast: true });
 
     // 2. 여관에서 무료로 HP/MP 완전 회복 (현재 마을에서 바로 가능, 이동 불필요)
     try {
@@ -339,7 +363,7 @@
   Modules.autohunt.checkPotionExhaustedAndStop = async function () {
     const expPotion = this.readExpPotionRemaining();
     if (expPotion !== null && expPotion <= 0) {
-      await Core.bankDepositAll('autohunt');
+      await Core.bankDepositAll('autohunt', { fast: true });
       Core.notifyStopped('autohunt', '농축 경험의 물약 효과가 모두 소진되었습니다 — 은행에 입금 후 정지합니다. 인벤토리에서 물약을 채워주세요.');
       return true;
     }
@@ -486,7 +510,7 @@
     const gold = this.readGold();
     if (gold !== null && gold > this.config.goldThreshold) {
       Core.log('autohunt', `현재 골드 ${gold.toLocaleString()}G가 기준(${this.config.goldThreshold.toLocaleString()}G)을 초과하여 입금합니다.`);
-      await Core.bankDepositAll('autohunt');
+      await Core.bankDepositAll('autohunt', { fast: true });
     }
   };
 
@@ -659,7 +683,7 @@
         // 은행 입금 전에 반드시 포션 소진 여부부터 확인한다.
         if (await mod.checkPotionExhaustedAndStop()) break;
         Core.log('autohunt', '은행에 남은 골드를 모두 입금한 뒤 다시 사냥을 이어갑니다.');
-        await Core.bankDepositAll('autohunt');
+        await Core.bankDepositAll('autohunt', { fast: true });
         await Core.sleep(600);
         continue;
       }

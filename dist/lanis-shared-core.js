@@ -1,15 +1,3 @@
-// ==UserScript==
-// @name         lanis
-// @namespace    lanis
-// @version      1.15.0-stable
-// @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
-// @match        https://lanis.me/*
-// @run-at       document-idle
-// @grant        none
-// @updateURL    https://raw.githubusercontent.com/Ke9318/lanis/main/lanis.user.js
-// @downloadURL  https://raw.githubusercontent.com/Ke9318/lanis/main/lanis.user.js
-// ==/UserScript==
-
 // Ranis Shared Core 1.0.0
 // Generated deterministically from src/normal and src/boss.
 (function (global) {
@@ -16469,5 +16457,3 @@
     return global.__lanisSharedCoreAdapter || null;
   };
 })(window);
-
-window.__lanisSharedCoreBootstrap({ mode: 'manual' });

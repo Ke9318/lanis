@@ -162,13 +162,14 @@
     dungeon: {},
     arena: {},
     preseason: {},
+    preseasonArena: {},
     deepdungeon: {},
     guildboss: {},
   };
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
-    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'preseason', 'deepdungeon'].forEach((id) => {
+    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'preseason', 'preseasonArena', 'deepdungeon'].forEach((id) => {
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
@@ -184,7 +185,9 @@
           : id === 'arena'
           ? `오늘 전투 ${mod.cycleCount}회 (무료인 동안 반복)`
           : id === 'preseason'
-          ? `오늘 전투 ${mod.cycleCount}회 (보석 한도까지 반복)`
+          ? `가을 아레나 전투 ${mod.cycleCount}회 (단풍 토큰 한도까지 반복)`
+          : id === 'preseasonArena'
+          ? `전투 ${mod.cycleCount}회 / 30분마다 통발 작업`
           : id === 'deepdungeon'
           ? `던전의 주인 도전 ${mod.cycleCount}회`
           : `사이클 ${mod.cycleCount}`;
@@ -415,9 +418,12 @@
   // 초기화
   // ==========================================================================
   function init() {
-    if (document.getElementById('lrm-panel')) return;
-    buildPanel();
-    Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 보스 / 일일)');
+    const headless = window.__lanisSharedCoreOptions?.mode === 'headless';
+    if (!headless && document.getElementById('lrm-panel')) return;
+    if (!headless) {
+      buildPanel();
+      Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 보스 / 일일)');
+    }
     if (Core.wasDiscarded) {
       const state = Modules.daily.loadState();
       let auth = null;
@@ -477,6 +483,8 @@
     localStorage.setItem('lrm-boss-ref-user-stopped', String(Date.now()));
     Core.log('core', '새로고침 후 자동 재개 차단: 저장된 아레나/일일/보스 실행 상태 폐기');
   }
+
+  window.__mountLanisUnifiedPanel = buildPanel;
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') {
     init();

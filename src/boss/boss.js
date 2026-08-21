@@ -784,6 +784,10 @@
         `클릭 누락 가능성이 있어 중복 공격 없이 중단합니다.`
       );
     }
+    // ⚠ 사용자 피드백(실전): 보스전 진행이 너무 빨라 로그를 눈으로 따라가기
+    // 어렵다는 요청. 턴 증가가 확인된 직후 짧게 쉬어 다음 조작으로 넘어가는
+    // 속도를 늦춘다.
+    await M.humanPause(1000, 1800);
     return advanced;
   };
   M.clickTurn = async (n) => {
@@ -1392,6 +1396,20 @@
     vineWraith: { label: '지하의 망령' },
     corruptedPurifier: { label: '타락한 정화자', hard: true },
     voidEmperorEmpty: { label: '허무의 황제', hard: true },
+  };
+  // ⚠ 버그 수정(2026-08, 실전 확인): "이번 주 보상 보스" 선택(최대 3마리)은
+  // 게임 자체의 별도 설정으로, 매크로가 보스를 처치해도 이 선택에 없으면
+  // 카드에 "이번 주 보상 대상으로 선택되지 않았습니다"가 뜨며 보상이
+  // 전혀 지급되지 않는다. weeklyTierLimits(진행률)와는 완전히 별개 데이터라
+  // 기존 코드는 이 선택 자체를 전혀 건드리지 않고 있었다. API의 보스 id는
+  // 우리 BOSS_REGISTRY 키와 이름이 달라(영문 snake_case) 매핑이 필요하다.
+  const BOSS_API_ID_MAP = {
+    fallenGuardian: 'corrupted_guardian',
+    voidEmperor: 'void_emperor',
+    vineEnt: 'underground_ent',
+    vineWraith: 'lord_of_duality',
+    corruptedPurifier: 'corrupted_guardian_hard',
+    voidEmperorEmpty: 'void_emperor_hard',
   };
   // 임시 실전 테스트 옵션. true인 동안에는 카드에 "클리어"가 표시되어도
   // 자동 완료 처리하지 않고 도전/재도전 버튼을 계속 탐색한다.
@@ -2257,6 +2275,54 @@
     // 실제 진입 여부는 호출자가 waitFor로 확인한다(여기서 고정 sleep 안 함).
   };
 
+  // 카드/확인 버튼을 눌렀다는 사실만으로 진입 성공을 판단하지 않는다.
+  // SPA 이동, 늦게 뜨는 확인창, 다른 안내 팝업을 계속 관찰하고 실제 전투
+  // 화면 또는 명백한 실패 원인이 확인될 때만 호출자에게 결과를 돌려준다.
+  M.waitForBossEntryOutcome = async (bossLabel, timeoutMs = 30000) => {
+    const startedAt = Date.now();
+    let lastDialogDescription = '';
+    let lastPath = '';
+
+    while (Date.now() - startedAt < timeoutMs) {
+      M.throwIfStopped();
+      if (M.isInBattleScreen(bossLabel)) {
+        return { entered: true, reason: 'battle-screen' };
+      }
+
+      const path = location.pathname.replace(/\/$/, '');
+      const dialogDescription = M.describeOpenDialogs();
+      if (dialogDescription && dialogDescription !== lastDialogDescription) {
+        lastDialogDescription = dialogDescription;
+        if (M.uiLog) {
+          M.uiLog(`⏳ 전투 진입 대기 중 팝업 감지 - 상태가 확정될 때까지 관찰: ${dialogDescription}`);
+        }
+      }
+      if (path !== lastPath) {
+        lastPath = path;
+        if (M.uiLog && path !== '/personal-boss') {
+          M.uiLog(`⏳ 전투 진입 경로 전환 감지(${path || '/'}) - 화면 렌더링 대기`);
+        }
+      }
+
+      // 확인창이 늦게 나타난 경우에만 안전한 진입 버튼을 한 번 처리한다.
+      // 정체를 모르는 팝업은 임의로 닫지 않고 사용자가 확인할 시간을 준다.
+      const delayedConfirm = M.findConfirmInOpenDialog(['재도전', '도전하기', '도전', '확인']);
+      if (delayedConfirm && !delayedConfirm.dataset.lanisBossEntryHandled) {
+        delayedConfirm.dataset.lanisBossEntryHandled = '1';
+        if (M.uiLog) M.uiLog(`   늦게 나타난 확인 모달 "${delayedConfirm.textContent.trim()}" 클릭`);
+        delayedConfirm.click();
+      }
+
+      await M.sleep(250);
+    }
+
+    return {
+      entered: false,
+      reason: 'timeout',
+      detail: `${M.describeBattleEntryState(bossLabel)} / 팝업: ${M.describeOpenDialogs()}`,
+    };
+  };
+
   M.abandonCurrentBossAttempt = async () => {
     M.throwIfStopped();
     const candidates = ['도전 포기', '전투 포기', '포기하기', '포기'];
@@ -2424,22 +2490,17 @@
           await M.ensureElementForBoss(entry.label, { hard: !!entry.hard });
           if (M.uiLog) M.uiLog(`🧭 "${entry.label}" 카드 찾는 중...`);
           await M.enterBossBattle(entry.label, { hard: !!entry.hard });
-          // 기존엔 sleep(500) 뒤 딱 한 번만 확인해서, SPA 렌더가 조금만 느려도
-          // 그 자리에서 "진입 실패"로 단정하고 큐를 통째로 중단했다. 같은 일을
-          // 하는 일일 수호자 경로는 이미 waitFor로 10초를 기다리고 있어서 이 큐
-          // 경로만 유독 취약했다. 동일하게 폴링 방식으로 맞춘다.
-          const entered = await M.waitFor(() => M.isInBattleScreen(entry.label), 12000, 250);
-          if (entered) {
+          const entryOutcome = await M.waitForBossEntryOutcome(entry.label, 30000);
+          if (entryOutcome.entered) {
             localStorage.removeItem(PENDING_KEY);
             return await runAndReport();
           }
-          if (M.uiLog) {
-            M.uiLog('⚠ 전투 화면 진입 확인 실패(12초 대기). ' + M.describeBattleEntryState(entry.label));
-          }
+          const detail = entryOutcome.detail || M.describeBattleEntryState(entry.label);
+          throw new Error(`"${entry.label}" 전투 진입 상태를 30초 동안 확정하지 못함: ${detail}`);
         } catch (e) {
           if (M.uiLog) M.uiLog('⚠ ' + e.message);
+          return { entered: false, cleared: false, error: e.message };
         }
-        return { entered: false, cleared: false };
       }
 
       return { entered: false, cleared: false };
@@ -2635,6 +2696,62 @@
     return data;
   };
 
+  // ⚠ 버그 수정(2026-08, 실전 확인): "이번 주 보상 보스" 선택이 비어있으면
+  // (또는 최대 인원 미만이면) 사용자가 체크한 보스 중에서 빈 슬롯만 채워
+  // 자동 저장한다. 이미 선택된 항목은 절대 건드리지 않는다 — 한 번
+  // rewardedBosses에 들어간 보스는 그 주에 절대 해제할 수 없다는 게 실전에서
+  // 확인됐고(400 에러: "이미 보상을 받았으므로 해제할 수 없습니다"), 잘못
+  // 건드리면 사용자가 원치 않는 보스에 보상이 잠겨버려 그 주엔 되돌릴 방법이
+  // 없다. 그래서 이 함수는 "추가만" 하고 "교체/제거"는 절대 하지 않는다.
+  M.ensureWeeklyBossSelection = async (selectedKeys) => {
+    let data;
+    try {
+      data = await M.fetchBossApiData();
+    } catch (e) {
+      if (M.uiLog) M.uiLog(`⚠ 이번 주 보상 보스 선택 확인 실패(API): ${e.message}`);
+      return false;
+    }
+    const weekly = data.weeklySelection;
+    if (!weekly || !Array.isArray(weekly.selectedBosses) || typeof weekly.maxSelection !== 'number') {
+      if (M.uiLog) M.uiLog('⚠ 이번 주 보상 보스 선택 정보를 API 응답에서 찾지 못해 건너뜁니다.');
+      return false;
+    }
+    const current = weekly.selectedBosses;
+    const slotsAvailable = weekly.maxSelection - current.length;
+    if (slotsAvailable <= 0) return true; // 이미 꽉 참 - 손댈 것 없음(교체는 하지 않음)
+
+    const candidateIds = selectedKeys
+      .map((key) => BOSS_API_ID_MAP[key])
+      .filter((id) => id && !current.includes(id));
+    if (candidateIds.length === 0) return true;
+
+    const newSelection = current.concat(candidateIds.slice(0, slotsAvailable));
+    const token = localStorage.getItem('token');
+    const res = await fetch('https://lanis.me/api/personal-boss/weekly-selection', {
+      method: 'POST',
+      credentials: 'include',
+      headers: Object.assign(
+        { 'Content-Type': 'application/json' },
+        token ? { Authorization: `Bearer ${token}` } : {}
+      ),
+      body: JSON.stringify({ selectedBosses: newSelection }),
+    });
+    M._bossApiCache = null; // 방금 바뀐 선택을 다음 fetchBossApiData 호출에서 다시 읽도록 캐시 무효화
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      if (M.uiLog) M.uiLog(`⚠ 이번 주 보상 보스 자동 선택 저장 실패 (HTTP ${res.status}) ${text}`);
+      return false;
+    }
+    const addedLabels = candidateIds
+      .slice(0, slotsAvailable)
+      .map((id) => {
+        const key = Object.keys(BOSS_API_ID_MAP).find((k) => BOSS_API_ID_MAP[k] === id);
+        return (key && BOSS_REGISTRY[key] && BOSS_REGISTRY[key].label) || id;
+      });
+    if (M.uiLog) M.uiLog(`🎯 이번 주 보상 보스에 자동 추가: ${addedLabels.join(', ')} (${newSelection.length}/${weekly.maxSelection})`);
+    return true;
+  };
+
   M.getWeeklyRewardProgress = async (bossLabel) => {
     const data = await M.fetchBossApiData();
     const bossEntry = data.bosses.find((b) => b.name === bossLabel);
@@ -2770,6 +2887,15 @@
     M.assertBossRunAuthorized(auth && auth.id);
     let selected = BOSS_ORDER.filter((key) => loadSelectedBosses().includes(key));
     if (selected.length === 0) throw new Error('선택한 보스가 없습니다.');
+
+    // 실전 보스 처치를 시작하기 전에, 체크해둔 보스가 "이번 주 보상 보스"
+    // 슬롯에 비어있으면 먼저 채워넣는다(§ensureWeeklyBossSelection 주석 참고).
+    // 이걸 안 하면 보스를 처치해도 주간 보상 대상이 아니라서 보상이 전혀
+    // 지급되지 않는 채로 계속 헛도전만 반복하게 된다.
+    const weeklySelectionReady = await M.ensureWeeklyBossSelection(selected);
+    if (!weeklySelectionReady) {
+      throw new Error('이번 주 보상 보스 선택을 확인하거나 저장하지 못해 안전하게 중단합니다.');
+    }
 
     // ⚠ 사용자 확인(2026-08): 수(3)/금(5)은 타락한 정화자를 아예 도전할 수
     // 없는 요일이다. 정지시키지 않고 큐에서만 빼고 알림 로그를 남긴다 -
@@ -3045,6 +3171,11 @@
       //     연속 실패"는 이 경우를 말한 것)
       if (!result.entered) {
         q2.entryFailStreak++;
+        if (result.error) {
+          // 큐 내부에서 오류를 삼키면 waitForBossQueueEnd가 정상 종료로 오인해
+          // 일일매크로가 보스를 건너뛴다. 원인을 상위 실행까지 그대로 전달한다.
+          throw new Error(result.error);
+        }
         localStorage.removeItem(QUEUE_KEY);
         if (M.uiLog) M.uiLog(`🛑 [큐] "${entry.label}" 전투 진입 확인 실패 - 자동 재클릭 없이 중단`);
         M.showBossNotice(
@@ -3243,6 +3374,10 @@
       setRunningState(true);
       M.uiLog(`▶ 보스 도전 시작 (선택: ${checked.length}개)`);
       try {
+        const weeklySelectionReady = await M.ensureWeeklyBossSelection(checked);
+        if (!weeklySelectionReady) {
+          throw new Error('이번 주 보상 보스 선택을 확인하거나 저장하지 못해 안전하게 중단합니다.');
+        }
         await M.startBossQueue(checked, { forceChallenge: true });
         // ⚠ 실전 확인: 이 "보스 도전" 버튼 경로는 startBossQueue만 호출하고 끝나서,
         // 보상 자동 수령(M.claimBossRewardsAndVerify)이 "일일" 탭의
@@ -3291,7 +3426,7 @@
   }
 
   window.__mountLanisBossTool = buildPanel;
-  buildPanel();
+  if (window.__lanisSharedCoreOptions?.mode !== 'headless') buildPanel();
 
   // 일반 새로고침은 항상 중단한다. Chrome 메모리 절약으로 폐기된 탭만
   // 현재 sessionStorage 실행 허가와 큐 authId가 모두 일치할 때 재개한다.

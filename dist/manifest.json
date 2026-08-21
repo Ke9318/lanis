@@ -1,0 +1,14 @@
+{
+  "schema": "ranis-shared-core-release-v1",
+  "coreVersion": "1.0.0",
+  "artifacts": {
+    "lanis-shared-core.js": {
+      "sha256": "5e13e581dad3ee4166638a8b36b2b4ef711ad2ab217453d017402466b3f47716",
+      "bytes": 744334
+    },
+    "lanis.user.js": {
+      "sha256": "3e7b4166ae93b2e3918d74b72f63c7da228315fd4f05141587fff7965e466ff3",
+      "bytes": 744986
+    }
+  }
+}

@@ -8,6 +8,11 @@
       boss: true,
       autohunt: true,
       deepdungeon: true,
+      // ⚠ 사용자 요청(2026-08): 매일 똑같은 순서(던전→보스→자동사냥→…)로만
+      // 도니까 패턴이 너무 뻔하다는 의견이 있어, 중간 작업들의 실행 순서를
+      // 매 실행마다(또는 원하면 계속 고정) 랜덤으로 섞을 수 있는 옵션을
+      // 추가한다. 기본값은 false(기존 고정 순서 그대로) — 켜야만 랜덤화된다.
+      randomOrder: false,
     },
   };
 
@@ -18,7 +23,11 @@
   // 사용자가 이 탭에서 직접 시작했을 때만 sessionStorage 허가가 생기며,
   // 정지/탭 종료 시 사라진다.
   const DAILY_AUTH_KEY = 'lrm-daily-explicit-run-auth';
-  const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'preseason', 'boss', 'autohunt', 'deepdungeon'];
+  const DAILY_CONFIG_KEYS = ['dungeon', 'arena', 'preseason', 'boss', 'autohunt', 'deepdungeon', 'randomOrder'];
+  // 순서를 섞어도 되는 "중간" 작업들. weeklyRewards/attendance는 항상 먼저,
+  // dailyQuests는 항상 마지막 — 이 셋은 절대 섞지 않는다(Core.startDaily
+  // 주석 참고: 진행도/선행조건 때문에 순서가 고정되어야 함).
+  const DAILY_RANDOMIZABLE_STEPS = ['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena', 'preseason'];
   // ⚠ 사용자 요청(2026-08): 심층던전/아레나 주간 보상은 그 매크로를 돌리지
   // 않아도 "일일" 실행 시 최우선으로 받아야 하고, 일주일에 한 번만 확인하면
   // 된다. Core.getKstMondayWeekId()가 반환하는 값(매주 월요일 00:00 KST마다
@@ -231,7 +240,16 @@
     );
     if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
     if (!onGround) throw new Error('사냥 종료 후 사냥터 화면을 확인하지 못함');
-    const energy = mod.readEnergy();
+    const energyReading = await Core.waitFor(
+      () => {
+        const value = mod.readEnergy();
+        return value === null ? null : { value };
+      },
+      8000,
+      250,
+      shouldCancel
+    );
+    const energy = energyReading ? energyReading.value : null;
     if (energy === null) throw new Error('사냥 종료 후 행동력을 읽지 못함');
     if (energy >= mod.config.minEnergy) {
       throw new Error(`행동력이 제한 이상으로 남음: ${energy}/2000 (기준 ${mod.config.minEnergy})`);
@@ -980,21 +998,17 @@
     // (this 안 쓰는 순수 함수)를 그대로 재사용해 검증한다.
     if (step === 'preseason') {
       await this.runCoreModule('preseason');
-      // ⚠ 사용자 요청(2026-08): 고정 목표 횟수 대신 "오늘 받은 프리시즌
-      // 보석"이 하루 최대치에 도달했는지로 완료를 판정한다.
-      const gemProgress = Modules.arena.readPreseasonGemProgress();
-      if (!gemProgress || gemProgress.current < gemProgress.max) {
-        throw new Error(`프리시즌 아레나 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}`);
+      const progress = Modules.preseason.readAutumnTokenProgress();
+      if (!progress || (progress.today.current < progress.today.max && progress.weekly.current < progress.weekly.max)) {
+        throw new Error('가을 심층던전 아레나 완료 확인 실패: 오늘/주간 단풍 토큰 진행률이 한도에 도달하지 않았습니다.');
       }
-      // ⚠ 사용자 요청(2026-08): "햇살 토큰"(여름 이벤트 한정) 일괄 사용도
-      // 프리시즌 단계에 묶어서 일일 매크로 실행 시 같이 처리한다. 실패해도
-      // 이미 완료된 프리시즌 전투 자체는 성공으로 보고한다.
+      // 가을 이벤트 인벤토리의 "단풍 토큰"도 같은 단계에서 전부 사용한다.
       try {
-        await Modules.preseason.useSunshineTokens();
+        await Modules.preseason.useAutumnTokens();
       } catch (e) {
-        Core.log('preseason', `⚠ 햇살 토큰 자동 사용 실패(프리시즌 전투 자체는 완료됨): ${e.message}`);
+        Core.log('preseason', `⚠ 단풍 토큰 자동 사용 실패(심층던전 아레나 전투 자체는 완료됨): ${e.message}`);
       }
-      return `오늘 프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 완료`;
+      return `가을 심층던전 아레나 완료: 오늘 ${progress.today.current}/${progress.today.max}, 주간 ${progress.weekly.current}/${progress.weekly.max}`;
     }
     if (step === 'boss') {
       const boss = await Core.waitFor(() => window.__bossMacro || null, 10000, 250, null);
@@ -1090,8 +1104,14 @@
     Core.updateModuleButtons();
 
     if (stopped) {
+      Core.moduleResults.daily = {
+        ok: false,
+        stopped: true,
+        message: '사용자 요청으로 일일 연속 실행을 정지했습니다.',
+        at: Date.now(),
+      };
       Core.showBanner('daily', '사용자 요청으로 일일 연속 실행을 정지했습니다.', false);
-      return;
+      return Core.moduleResults.daily;
     }
 
     const issues = state.reports.filter((report) => !report.ok);
@@ -1099,13 +1119,28 @@
       .map((report) => `${report.ok ? '✅' : '⚠'} ${report.label}: ${report.detail}`)
       .join('\n');
     if (issues.length === 0) {
+      Core.moduleResults.daily = {
+        ok: true,
+        stopped: false,
+        message: '선택한 일일 작업을 모두 완료하고 사후 확인했습니다.',
+        reports: state.reports.slice(),
+        at: Date.now(),
+      };
       Core.showBanner('daily', '선택한 일일 작업을 모두 완료하고 사후 확인했습니다.', true);
       Core.playCompleteSound();
     } else {
+      Core.moduleResults.daily = {
+        ok: false,
+        stopped: false,
+        message: `${issues.length}개 작업에서 이슈가 있었습니다.`,
+        reports: state.reports.slice(),
+        at: Date.now(),
+      };
       Core.showBanner('daily', `${issues.length}개 작업에서 이슈가 있었습니다. 일일 로그를 확인해주세요.`, false);
       Core.playStopSound();
     }
     alert(`일일 연속 실행 결과\n\n${summary || '실행한 작업 없음'}`);
+    return Core.moduleResults.daily;
   };
 
   Core.startDaily = function () {
@@ -1122,13 +1157,26 @@
     // 끝난 뒤에야 정확한 진행도를 확인할 수 있으므로 항상 맨 마지막에
     // 실행한다(매일). 주간 퀘스트는 이제 요일 제약 없이 매일 dailyQuests
     // 단계 안에서 함께 확인·처리한다(예전엔 토·일에만 별도 실행했음).
+    // ⚠ 사용자 요청(2026-08): 매일 순서가 똑같으면 패턴이 뻔해서, "일일 작업
+    // 순서 랜덤" 체크박스가 켜져 있으면 아래 중간 작업들만 실행마다 무작위로
+    // 섞는다(weeklyRewards/attendance/dailyQuests는 진행도 확인 순서상
+    // 절대 고정 — 섞지 않음). 한 번 섞은 순서는 state.steps에 그대로 저장돼
+    // mainLoop가 순서대로 소비하므로, 탭 복원 등으로 재개되어도 도중에 다시
+    // 섞이지 않는다.
+    const enabledMiddleSteps = DAILY_RANDOMIZABLE_STEPS.filter((key) => mod.config[key]);
+    const middleSteps = mod.config.randomOrder
+      ? Core.shuffleArray(enabledMiddleSteps)
+      : enabledMiddleSteps;
     const steps = [
       'weeklyRewards',
       'attendance',
-      ...['dungeon', 'boss', 'autohunt', 'deepdungeon', 'arena', 'preseason']
-        .filter((key) => mod.config[key]),
+      ...middleSteps,
       'dailyQuests',
     ];
+    if (mod.config.randomOrder) {
+      const orderLabels = middleSteps.map((key) => DAILY_STEP_LABELS[key] || key).join(' → ');
+      Core.log('daily', `🔀 일일 작업 순서 랜덤 적용: ${orderLabels || '(선택된 작업 없음)'}`);
+    }
     if (
       steps.includes('dungeon') &&
       !Core.ELEMENT_OPTIONS.includes(Modules.dungeon.config.originalElement)
@@ -1165,6 +1213,7 @@
       startedAt: Date.now(),
     };
     mod.stopRequested = false;
+    Core.moduleResults.daily = { ok: null, stopped: false, message: '실행 중', at: Date.now() };
     Core.backgroundKeeper.acquire('daily');
     sessionStorage.setItem(DAILY_AUTH_KEY, JSON.stringify({
       schema: DAILY_AUTH_SCHEMA,
@@ -1177,14 +1226,26 @@
       window.__bossMacro.armBossRun();
     }
     mod.saveState(state);
-    mod.mainLoop()
+    let loopPromise;
+    loopPromise = mod.mainLoop()
       .catch((e) => {
         Core.dailyActive = false;
         mod.running = false;
+        Core.moduleResults.daily = {
+          ok: false,
+          stopped: false,
+          message: e && e.message ? e.message : String(e),
+          at: Date.now(),
+        };
         Core.showBanner('daily', `일일 실행 자체 오류: ${e.message}`, false);
         Core.updateModuleButtons();
       })
-      .finally(() => Core.backgroundKeeper.release('daily'));
+      .finally(() => {
+        if (mod.loopPromise === loopPromise) mod.loopPromise = null;
+        Core.backgroundKeeper.release('daily');
+      });
+    mod.loopPromise = loopPromise;
+    return loopPromise;
   };
 
   Core.stopDaily = function () {
@@ -1216,13 +1277,256 @@
     }
   };
 
+  // Runtime Host와 수동 UI가 같은 Core 상태/정지 수명주기를 사용하도록 하는
+  // 좁은 공유 계약이다. 게임 로직이나 네트워크 호출은 이 표면에 복제하지
+  // 않는다. 원격 start는 exact-session bridge가 발급한 명시 승인만 허용한다.
+  const SHARED_CORE_ADAPTER_VERSION = '1.0.0';
+  const SHARED_CORE_RUNTIME_VERSION = '1.2.0-daily-adapter';
+  const EXECUTION_LEASE_KEY = 'lanis:shared-core:execution-lease:v1';
+  const EXECUTION_LEASE_CHANNEL = 'lanis:shared-core:execution-lease:liveness:v1';
+  const EXECUTION_LEASE_PROBE_MS = 250;
+  const executionTabId = (() => {
+    const key = 'lanis:shared-core:execution-tab-id:v1';
+    let value = sessionStorage.getItem(key);
+    if (!value) {
+      value = `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      sessionStorage.setItem(key, value);
+    }
+    return value;
+  })();
+  const executionLeaseChannel = typeof BroadcastChannel === 'function'
+    ? new BroadcastChannel(EXECUTION_LEASE_CHANNEL)
+    : null;
+  let ownedExecutionLease = null;
+
+  const readExecutionLease = () => {
+    try {
+      const value = JSON.parse(localStorage.getItem(EXECUTION_LEASE_KEY) || 'null');
+      return value && value.schema === 'execution-lease-v1' && value.state === 'running'
+        ? value
+        : null;
+    } catch (_) {
+      return null;
+    }
+  };
+  const publicLease = (lease) => lease ? ({
+    owner: lease.owner,
+    job: lease.job,
+    sessionId: lease.sessionId,
+    startedAt: lease.startedAt,
+    state: lease.state,
+  }) : null;
+  const coreDailyIsRunning = () => !!(Core.dailyActive || Modules.daily.running);
+  const releaseExecutionLease = (leaseId) => {
+    const current = readExecutionLease();
+    if (current && current.leaseId === leaseId && current.tabId === executionTabId) {
+      localStorage.removeItem(EXECUTION_LEASE_KEY);
+    }
+    if (ownedExecutionLease && ownedExecutionLease.leaseId === leaseId) ownedExecutionLease = null;
+  };
+  const probeLeaseOwner = (lease) => new Promise((resolve) => {
+    if (!executionLeaseChannel) {
+      resolve(null);
+      return;
+    }
+    const probeId = `probe-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let settled = false;
+    const onMessage = (event) => {
+      const value = event && event.data;
+      if (!value || value.type !== 'lease-alive' || value.probeId !== probeId || value.leaseId !== lease.leaseId) return;
+      settled = true;
+      executionLeaseChannel.removeEventListener('message', onMessage);
+      resolve(true);
+    };
+    executionLeaseChannel.addEventListener('message', onMessage);
+    executionLeaseChannel.postMessage({ type: 'lease-probe', probeId, leaseId: lease.leaseId });
+    setTimeout(() => {
+      if (settled) return;
+      executionLeaseChannel.removeEventListener('message', onMessage);
+      resolve(false);
+    }, EXECUTION_LEASE_PROBE_MS);
+  });
+  executionLeaseChannel?.addEventListener('message', (event) => {
+    const value = event && event.data;
+    if (!value || value.type !== 'lease-probe' || !ownedExecutionLease) return;
+    if (value.leaseId !== ownedExecutionLease.leaseId || !coreDailyIsRunning()) return;
+    executionLeaseChannel.postMessage({
+      type: 'lease-alive',
+      probeId: value.probeId,
+      leaseId: ownedExecutionLease.leaseId,
+    });
+  });
+  const acquireExecutionLease = async (request) => {
+    const existing = readExecutionLease();
+    if (existing) {
+      const locallyLive = existing.tabId === executionTabId && coreDailyIsRunning();
+      const remotelyLive = locallyLive ? true : await probeLeaseOwner(existing);
+      const unchanged = readExecutionLease();
+      if (remotelyLive || !unchanged || unchanged.leaseId !== existing.leaseId) {
+        if (remotelyLive) return { acquired: false, lease: existing };
+        return acquireExecutionLease(request);
+      }
+      // The owning tab/session did not answer and this Core is not running it.
+      // Recovery is based on observed liveness, never lease age alone.
+      localStorage.removeItem(EXECUTION_LEASE_KEY);
+    }
+    const auth = request && request.authorization;
+    const lease = {
+      schema: 'execution-lease-v1',
+      leaseId: `lease-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      profileId: auth && auth.profileId ? auth.profileId : 'browser-profile-origin',
+      tabId: executionTabId,
+      owner: request && request.source === 'runtime-host' ? 'operator' : 'manual',
+      job: 'daily',
+      sessionId: auth && auth.sessionId ? auth.sessionId : executionTabId,
+      startedAt: Date.now(),
+      state: 'running',
+    };
+    localStorage.setItem(EXECUTION_LEASE_KEY, JSON.stringify(lease));
+    const winner = readExecutionLease();
+    if (!winner || winner.leaseId !== lease.leaseId) return { acquired: false, lease: winner };
+    ownedExecutionLease = lease;
+    return { acquired: true, lease };
+  };
+  const SharedCoreAdapter = Object.freeze({
+    version: SHARED_CORE_ADAPTER_VERSION,
+    runtimeVersion: SHARED_CORE_RUNTIME_VERSION,
+    getStatus() {
+      const dailyState = Modules.daily.loadState();
+      const activeModule = Core.activeModuleId ? Modules[Core.activeModuleId] : null;
+      return {
+        source: 'lanis-shared-core',
+        adapterVersion: SHARED_CORE_ADAPTER_VERSION,
+        runtimeVersion: SHARED_CORE_RUNTIME_VERSION,
+        daily: {
+          running: !!(Core.dailyActive || Modules.daily.running),
+          stopRequested: !!Modules.daily.stopRequested,
+          stepIndex: dailyState ? dailyState.index : null,
+          stepCount: dailyState && Array.isArray(dailyState.steps) ? dailyState.steps.length : null,
+          result: Core.moduleResults.daily || null,
+          lease: publicLease(readExecutionLease()),
+        },
+        activeModule: Core.activeModuleId ? {
+          id: Core.activeModuleId,
+          running: !!(activeModule && activeModule.running),
+          stopRequested: !!(activeModule && activeModule.stopRequested),
+          runId: activeModule && Number.isFinite(activeModule.runId) ? activeModule.runId : null,
+          result: Core.moduleResults[Core.activeModuleId] || null,
+        } : null,
+      };
+    },
+    async startDaily(request = {}) {
+      const event = request && request.source === 'manual-ui' ? request.event : null;
+      const auth = request && request.source === 'runtime-host' ? request.authorization : null;
+      const managedAuthorized = !!(auth && auth.schema === 'daily-runtime-explicit-v1' &&
+        auth.explicit === true && auth.commandId === request.commandId &&
+        typeof auth.profileId === 'string' && auth.profileId &&
+        typeof auth.sessionId === 'string' && auth.sessionId &&
+        typeof auth.runId === 'string' && auth.runId &&
+        auth.runtimeVersion === SHARED_CORE_RUNTIME_VERSION &&
+        Number.isFinite(auth.issuedAt) && Math.abs(Date.now() - auth.issuedAt) <= 30000);
+      if ((!event || event.isTrusted !== true) && !managedAuthorized) {
+        return Promise.resolve({
+          ok: false,
+          skipped: true,
+          code: 'ACTION_EXECUTION_GATED',
+          message: 'daily.start 명시 승인이 없거나 현재 세션과 일치하지 않습니다.',
+        });
+      }
+      const leaseResult = await acquireExecutionLease(request);
+      if (!leaseResult.acquired) {
+        return {
+          ok: false,
+          skipped: true,
+          code: 'ALREADY_RUNNING',
+          message: '같은 계정/프로필에서 장기 실행 작업이 이미 실행 중입니다.',
+          existing: publicLease(leaseResult.lease),
+        };
+      }
+      const loopPromise = Core.startDaily();
+      const started = !!(Core.dailyActive || Modules.daily.running);
+      if (!started) {
+        releaseExecutionLease(leaseResult.lease.leaseId);
+        return Promise.resolve({
+          ok: false,
+          skipped: true,
+          code: 'START_REJECTED_BY_CORE',
+          message: '기존 Core 시작 조건이 실행을 차단했습니다.',
+        });
+      }
+      Promise.resolve(loopPromise).finally(() => releaseExecutionLease(leaseResult.lease.leaseId));
+      if (request.source === 'manual-ui') return Promise.resolve({ ok: true, started: true });
+      return new Promise((resolve) => {
+        let finished = false;
+        const finish = (value) => {
+          if (finished) return;
+          finished = true;
+          document.removeEventListener('ranis:daily-result', onResult);
+          unsubscribeStop?.();
+          resolve(value);
+        };
+        const onResult = () => {
+          let result = null;
+          try { result = JSON.parse(sessionStorage.getItem('ranisOperatorDailyResult') || 'null'); } catch (_) {}
+          finish(result && result.state === 'stopped'
+            ? { ok: true, stopped: true, result }
+            : result && result.state === 'failed'
+              ? { ok: false, code: 'CORE_FAILED', message: result.message, result }
+              : { ok: true, result });
+        };
+        document.addEventListener('ranis:daily-result', onResult);
+        const unsubscribeStop = request.scope?.onStop(() => {
+          Core.stopDaily();
+          finish({ ok: true, stopped: true });
+        });
+      });
+    },
+    requestStop(request = {}) {
+      const before = this.getStatus();
+      Core.stopDaily();
+      const after = this.getStatus();
+      return {
+        ok: true,
+        stopped: !!before.daily.running,
+        alreadyStopped: !before.daily.running,
+        commandId: typeof request.commandId === 'string' ? request.commandId : null,
+        before,
+        after,
+      };
+    },
+  });
+  window.__lanisSharedCoreAdapter = SharedCoreAdapter;
+  window.dispatchEvent(new CustomEvent('lanis:shared-core:ready', {
+    detail: { adapterVersion: SHARED_CORE_ADAPTER_VERSION, runtimeVersion: SHARED_CORE_RUNTIME_VERSION },
+  }));
+
+  const reportManualDailyStartResult = (result, refs) => {
+    if (!result || result.code !== 'ALREADY_RUNNING') return result;
+    const existing = result.existing || {};
+    const ownerLabel = existing.owner === 'operator'
+      ? 'Operator'
+      : existing.owner === 'manual'
+        ? '수동 UI'
+        : '다른 실행 주체';
+    const jobLabel = existing.job === 'daily' ? '일일 작업' : '장기 작업';
+    const message = `이미 ${ownerLabel}에서 ${jobLabel} 실행 중입니다.`;
+    const sessionDetail = existing.sessionId ? ` 기존 세션: ${existing.sessionId}` : '';
+    if (refs.statusEl) {
+      refs.statusEl.textContent = message;
+      refs.statusEl.title = sessionDetail.trim();
+    }
+    Core.showBanner('daily', `${message}${sessionDetail}`, false);
+    Core.log('daily', `${message}${sessionDetail}`);
+    return result;
+  };
+
   function buildDailyTab(container) {
     const mod = Modules.daily;
     const refs = UIRefs.daily;
     Core.loadModuleConfig('daily', DAILY_CONFIG_KEYS);
 
     const intro = document.createElement('div');
-    intro.textContent = '출석체크를 먼저 수행한 뒤 체크한 작업을 던전 → 보스 → 자동사냥 → 심층던전 → 아레나 → 프리시즌 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
+    intro.textContent = '출석체크를 먼저 수행한 뒤 체크한 작업을 던전 → 보스 → 자동사냥 → 심층던전 → 아레나 → 이벤트 순서로 실행하고, 각 단계의 실제 완료 상태를 확인합니다.';
     intro.style.cssText = 'color:#ccc; font-size:11px; line-height:1.5; margin-bottom:8px;';
     container.appendChild(intro);
 
@@ -1233,7 +1537,7 @@
       ['autohunt', '자동사냥 — 설정한 행동력 제한까지'],
       ['deepdungeon', '심층던전 — 주간 누적 피해 100만까지'],
       ['arena', '아레나 — 설정한 오늘 총 전투 횟수까지'],
-      ['preseason', '프리시즌 — 요일 제약 없이 설정한 오늘 총 전투 횟수까지'],
+      ['preseason', '이벤트 — 가을 심층던전 아레나 단풍 토큰 일일/주간 한도까지'],
     ].forEach(([key, text]) => {
       const row = document.createElement('label');
       row.style.cssText = 'display:flex; align-items:flex-start; gap:7px; margin:7px 0; cursor:pointer;';
@@ -1251,6 +1555,22 @@
       inputs.push(check);
     });
 
+    const randomRow = document.createElement('label');
+    randomRow.style.cssText = 'display:flex; align-items:flex-start; gap:7px; margin:10px 0 7px; padding-top:8px; border-top:1px solid #444; cursor:pointer;';
+    const randomCheck = document.createElement('input');
+    randomCheck.type = 'checkbox';
+    randomCheck.checked = !!mod.config.randomOrder;
+    randomCheck.addEventListener('change', () => {
+      mod.config.randomOrder = randomCheck.checked;
+      Core.saveModuleConfig('daily', DAILY_CONFIG_KEYS);
+    });
+    const randomLabel = document.createElement('span');
+    randomLabel.textContent = '일일 작업 순서 랜덤 — 체크 시 던전/보스/자동사냥/심층던전/아레나/이벤트 순서를 실행마다 무작위로 섞습니다 (주간 보상·출석체크·일간+주간 퀘스트는 항상 처음/마지막 고정)';
+    randomLabel.style.cssText = 'font-size:11px; color:#ccc; line-height:1.4;';
+    randomRow.append(randomCheck, randomLabel);
+    container.appendChild(randomRow);
+    inputs.push(randomCheck);
+
     const note = document.createElement('div');
     note.textContent = '월간 출석체크는 항상 실행하며 이미 수령했거나 받을 보상이 없으면 건너뜁니다. 보스 보상이 모두 끝난 날은 수호자에 입장한 뒤 포기하여 일일 도전 과제만 처리합니다. 문제가 생긴 단계는 기록하고 다음 단계로 넘어갑니다.';
     note.style.cssText = 'color:#f5a623; font-size:10px; line-height:1.45; margin:8px 0;';
@@ -1265,8 +1585,11 @@
     stopBtn.textContent = '정지';
     stopBtn.style.cssText = btnStyle('#c62828');
     stopBtn.disabled = true;
-    startBtn.addEventListener('click', () => Core.startDaily());
-    stopBtn.addEventListener('click', () => Core.stopDaily());
+    startBtn.addEventListener('click', async (event) => {
+      const result = await SharedCoreAdapter.startDaily({ source: 'manual-ui', event });
+      reportManualDailyStartResult(result, refs);
+    });
+    stopBtn.addEventListener('click', () => SharedCoreAdapter.requestStop({ source: 'manual-ui' }));
     row.append(startBtn, stopBtn);
     container.appendChild(row);
 

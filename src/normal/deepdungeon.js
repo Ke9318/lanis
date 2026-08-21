@@ -1185,7 +1185,82 @@
     return true;
   };
 
+  // ⚠ 가을 이벤트(2026-08, 사용자 요청): 50층 클리어 후 "던전의 주인 도전"
+  // 버튼을 누르기 전에 "완주 기록 저장" 모달이 뜰 수 있다(심층던전/아레나 중
+  // 원하는 슬롯에 이번 완주 기록을 저장할지 묻는 이벤트 한정 팝업). 이 모달이
+  // 떠 있는 채로 도전 버튼을 누르면 모달에 가려 클릭이 안 먹는다. 규칙: 빈
+  // 슬롯이 있으면 슬롯 1→2→3 순서로 첫 번째 빈 슬롯에 저장하고, 셋 다 이미
+  // 차있으면 슬롯 3에 덮어쓴다. 이벤트가 끝나 모달 자체가 안 뜨면(텍스트가
+  // 없으면) 아무것도 하지 않고 그대로 지나간다(기존 동작 그대로 유지).
+  Modules.deepdungeon.handleRunRecordSaveModal = async function () {
+    const findSaveDialog = () => Core.gameElements('[role="dialog"]').find(
+      (dialog) => Core.isElementVisible(dialog) && (dialog.textContent || '').includes('완주 기록 저장')
+    ) || null;
+    const saveDialog = findSaveDialog();
+    if (!saveDialog) return false;
+
+    // 슬롯명 <span>에서 공용 upToCard()를 쓰면 가장 가까운 버튼이 아니라
+    // 바깥 MUI Dialog(Paper)까지 올라가 버린다. 실전에서 이 때문에 모달의
+    // 빈 영역만 반복 클릭하며 50층에서 무한 대기했다. 반드시 현재 저장
+    // 모달 안의 실제 <button>을 직접 찾는다.
+    const slotButtons = [...saveDialog.querySelectorAll('button')].filter((button) =>
+      /^슬롯\s*[123]\b/.test((button.textContent || '').trim())
+    );
+    const firstEmpty = slotButtons.find((button) => (button.textContent || '').includes('빈 슬롯'));
+    const target = firstEmpty || slotButtons.find((button) => /^슬롯\s*3\b/.test((button.textContent || '').trim()));
+    if (!target) {
+      throw new Error('가을 이벤트 "완주 기록 저장" 모달에서 저장할 슬롯 버튼을 찾지 못했습니다.');
+    }
+
+    const slotMatch = (target.textContent || '').match(/슬롯\s*([123])/);
+    const slotLabel = slotMatch ? `슬롯 ${slotMatch[1]}` : '선택 슬롯';
+    const overwrite = !firstEmpty;
+    target.click();
+    await Core.humanDelay(400, 700);
+
+    // 세 슬롯이 모두 찼을 때는 슬롯 3 덮어쓰기 확인창이 추가로 뜰 수 있다.
+    // 이벤트 UI가 확인창 없이 즉시 저장하는 경우도 허용한다.
+    if (overwrite) {
+      const confirmDialog = Core.gameElements('[role="dialog"]').find((dialog) => {
+        if (!Core.isElementVisible(dialog)) return false;
+        const text = dialog.textContent || '';
+        return /덮어쓰|기존.*기록/.test(text);
+      }) || null;
+      if (confirmDialog) {
+        const confirmButton = [...confirmDialog.querySelectorAll('button')].find((button) =>
+          /^(덮어쓰기|확인|저장)$/.test((button.textContent || '').trim()) && !button.disabled
+        );
+        if (!confirmButton) throw new Error('슬롯 3 덮어쓰기 확인 버튼을 찾지 못했습니다.');
+        confirmButton.click();
+        await Core.humanDelay(400, 700);
+      }
+    }
+
+    const saved = await Core.waitFor(
+      () => (
+        !findSaveDialog() || Core.bodyText().includes(`완주 기록이 ${slotLabel}에 저장되었습니다`)
+          ? true
+          : null
+      ),
+      6000,
+      200
+    );
+    if (!saved) {
+      throw new Error(`${slotLabel} 완주 기록 저장 완료를 확인하지 못했습니다.`);
+    }
+
+    Core.log(
+      'deepdungeon',
+      overwrite
+        ? '🍂 가을 이벤트: 슬롯 1~3이 모두 차있어 "슬롯 3"에 덮어쓰기 완료'
+        : `🍂 가을 이벤트: 완주 기록을 "${slotLabel}"(첫 빈 슬롯)에 저장 완료`
+    );
+    return true;
+  };
+
   Modules.deepdungeon.handleDungeonMaster = async function () {
+    await this.handleRunRecordSaveModal();
+
     const challengeBtn = Core.findButtonByText('던전의 주인 도전');
     if (!challengeBtn) return false;
     challengeBtn.click();
@@ -1413,6 +1488,18 @@
 
   Modules.deepdungeon.stepOnce = async function () {
     const text = Core.bodyText();
+
+    // ⚠ 버그 수정(2026-08, 사용자 실전 확인): "완주 기록 저장" 모달(가을 이벤트)이
+    // 열려있는 동안엔 MUI 다이얼로그가 배경 화면 전체에 aria-hidden을 걸어버려서,
+    // Core.bodyText()가 배경 텍스트(예: "던전의 주인", "50층 클리어 완료")를 전부
+    // 걸러낸다 - 즉 모달이 떠 있을 땐 아래의 어떤 분기 조건도 매치되지 않고
+    // stepOnce가 계속 false만 반환하며 멈춘다(실전에서 재현됨: 로그에 심층던전
+    // 관련 진행 없이 멈춰있었음). "던전의 주인" 분기 안에 넣었던 처리는 그래서
+    // 호출조차 안 됐다 - 이 모달은 배경 상태와 무관하게 그 자체로 최우선
+    // 독립 분기여야 한다.
+    if (text.includes('완주 기록 저장')) {
+      return await this.handleRunRecordSaveModal();
+    }
 
     // ⚠ 실전 확인: enterFreshRunIfNeeded()가 처음한 번 시도에서 입장
     // 확정 버튼을 못 찾으면 경고만 남기고 그대로 진행하는데, 이 함수

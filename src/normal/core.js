@@ -109,6 +109,17 @@
   window.__lanisBackgroundSleep = Core.sleep;
   Core.rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
   Core.humanDelay = (minMs, maxMs) => Core.sleep(minMs + Math.random() * (maxMs - minMs));
+  // Fisher–Yates shuffle. 원본 배열은 건드리지 않고 새 배열을 반환한다.
+  // (sort(() => Math.random() - 0.5) 방식은 비교 함수 특성상 분포가 고르지
+  // 않다고 알려져 있어 이 방식을 쓴다.)
+  Core.shuffleArray = function (arr) {
+    const result = [...arr];
+    for (let i = result.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [result[i], result[j]] = [result[j], result[i]];
+    }
+    return result;
+  };
 
   Core.isRunCancelled = function (moduleId, runId) {
     if (!moduleId) return false;
@@ -355,7 +366,8 @@
   Core.clickNavMenuExact = async function (
     navLabel,
     itemText,
-    shouldCancel = Core.defaultShouldCancel
+    shouldCancel = Core.defaultShouldCancel,
+    { nav = { min: 500, max: 1000 }, item = { min: 500, max: 1300 } } = {}
   ) {
     // ⚠ 실전 확인(진단 스크립트로 직접 잡음): 이전 사이클에서 상단 메뉴가 안
     // 닫힌 채 남아있으면, 그 동안 동작하는 MUI 메뉴 트리거(이 경우 "${navLabel}")
@@ -378,29 +390,30 @@
       );
       if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
       if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), {
-        beforeMin: 500,
-        beforeMax: 1000,
+        beforeMin: nav.min,
+        beforeMax: nav.max,
         shouldCancel,
       }))) {
         throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
       }
-      const item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
-      if (!item) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
-      if (!(await Core.safeClick(findItem, { shouldCancel }))) {
+      const itemEl = await Core.waitFor(findItem, 15000, 300, shouldCancel);
+      if (!itemEl) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
+      if (!(await Core.safeClick(findItem, { beforeMin: item.min, beforeMax: item.max, shouldCancel }))) {
         throw new Error(`메뉴 항목 "${itemText}"가 클릭 직전에 사라짐`);
       }
     };
     // 이전 화면 전환 중 남아있던 메뉴 항목은 클릭하는 순간 스스로 닫혀
     // 사라질 수 있다. 그 첫 시도가 실패해도 곧장 예외를 던지지 않고,
     // "캐릭" 버튼을 새로 눌러 메뉴를 여는 정상 경로로 재시도한다.
-    if (findItem() && (await Core.safeClick(findItem, { shouldCancel }))) return;
+    if (findItem() && (await Core.safeClick(findItem, { beforeMin: item.min, beforeMax: item.max, shouldCancel }))) return;
     await openFresh();
   };
 
   Core.clickNavMenuSuffix = async function (
     navLabel,
     suffixText,
-    shouldCancel = Core.defaultShouldCancel
+    shouldCancel = Core.defaultShouldCancel,
+    { nav = { min: 500, max: 1000 }, item = { min: 500, max: 1300 } } = {}
   ) {
     // ⚠ clickNavMenuExact와 동일한 이유로 메뉴 항목이 이미 열려있는지 먼저 확인한다.
     const findItem = () => [...document.querySelectorAll('[role="menuitem"]')].find(
@@ -415,21 +428,21 @@
       );
       if (!navBtn) throw new Error(`상단 메뉴 "${navLabel}" 버튼을 찾을 수 없음`);
       if (!(await Core.safeClick(() => Core.findButtonByText(navLabel), {
-        beforeMin: 500,
-        beforeMax: 1000,
+        beforeMin: nav.min,
+        beforeMax: nav.max,
         shouldCancel,
       }))) {
         throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
       }
-      const item = await Core.waitFor(findItem, 15000, 300, shouldCancel);
-      if (!item) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
-      if (!(await Core.safeClick(findItem, { shouldCancel }))) {
+      const itemEl = await Core.waitFor(findItem, 15000, 300, shouldCancel);
+      if (!itemEl) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
+      if (!(await Core.safeClick(findItem, { beforeMin: item.min, beforeMax: item.max, shouldCancel }))) {
         throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
       }
     };
     // clickNavMenuExact와 동일한 이유로, 재사용하려던 메뉴 항목의 첫 클릭이
     // 실패해도 곧장 실패 처리하지 않고 메뉴를 새로 열어 재시도한다.
-    if (findItem() && (await Core.safeClick(findItem, { shouldCancel }))) return;
+    if (findItem() && (await Core.safeClick(findItem, { beforeMin: item.min, beforeMax: item.max, shouldCancel }))) return;
     await openFresh();
   };
 
@@ -1653,9 +1666,14 @@
     return true;
   };
 
-  Core.bankDepositAll = async function (moduleId) {
+  Core.bankDepositAll = async function (moduleId, { fast = false } = {}) {
     Core.log(moduleId, '은행으로 이동해 전액 입금 진행');
-    await Core.clickNavMenuExact('마을', '은행');
+    await Core.clickNavMenuExact(
+      '마을',
+      '은행',
+      Core.defaultShouldCancel,
+      fast ? { nav: { min: 250, max: 500 }, item: { min: 250, max: 500 } } : undefined
+    );
     await Core.waitFor(() => Core.bodyText().includes('전액 입금'));
     const depositBtn = await Core.retryStep('"전액 입금" 버튼 찾기', () => Core.findButtonByText('전액 입금'));
     if (!depositBtn) {
@@ -1663,7 +1681,7 @@
       return false;
     }
     depositBtn.click();
-    await Core.humanDelay(800, 1600);
+    await Core.humanDelay(fast ? 450 : 800, fast ? 900 : 1600);
     Core.log(moduleId, '전액 입금 완료');
     return true;
   };
@@ -1941,4 +1959,3 @@
     const kst = new Date(Date.now() + 9 * 60 * 60 * 1000);
     return kst.getUTCDay();
   };
-
