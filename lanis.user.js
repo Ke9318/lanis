@@ -2497,9 +2497,23 @@
         return color === 'rgb(244, 67, 54)' || color === 'rgb(239, 68, 68)' || color === 'rgb(255, 0, 0)';
       });
     };
-    const characterButton = Core.allButtons().find(
-      (button) => button.textContent.trim() === '캐릭' && Core.isElementVisible(button)
+    // MUI 메뉴가 열려 있는 동안에는 메뉴 트리거인 "캐릭" 버튼에
+    // aria-hidden이 걸릴 수 있다. 레드닷은 버튼 DOM 안에 그대로 남아 있고
+    // clickNavMenuExact도 이미 열린 메뉴 항목을 직접 처리할 수 있으므로,
+    // 여기서는 가시성으로 버튼을 제외하지 않는다. 렌더링 지연으로 버튼 DOM
+    // 자체가 아직 없다면 잠시 재시도하고, 끝내 못 찾은 경우를 "레드닷 없음"
+    // 으로 오판하지 않고 명확한 오류로 남긴다.
+    const findCharacterButton = () => Core.allButtons().find(
+      (button) => button.textContent.trim() === '캐릭'
+    ) || null;
+    const characterButton = await Core.retryStep(
+      '업적 확인용 "캐릭" 버튼 찾기',
+      findCharacterButton,
+      { attempts: 4, waits: [500, 1000, 2000], shouldCancel }
     );
+    if (!characterButton) {
+      throw new Error('업적 확인용 상단 메뉴 "캐릭" 버튼을 찾을 수 없습니다.');
+    }
     if (!hasRedDot(characterButton)) {
       Core.log('daily', '업적: 캐릭 레드닷 없음 - 확인 생략');
       return '캐릭 레드닷 없음';
