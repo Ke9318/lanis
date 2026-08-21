@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.14.26-stable
+// @version      1.14.27-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -3497,6 +3497,26 @@
     detail: { adapterVersion: SHARED_CORE_ADAPTER_VERSION, runtimeVersion: SHARED_CORE_RUNTIME_VERSION },
   }));
 
+  const reportManualDailyStartResult = (result, refs) => {
+    if (!result || result.code !== 'ALREADY_RUNNING') return result;
+    const existing = result.existing || {};
+    const ownerLabel = existing.owner === 'operator'
+      ? 'Operator'
+      : existing.owner === 'manual'
+        ? '수동 UI'
+        : '다른 실행 주체';
+    const jobLabel = existing.job === 'daily' ? '일일 작업' : '장기 작업';
+    const message = `이미 ${ownerLabel}에서 ${jobLabel} 실행 중입니다.`;
+    const sessionDetail = existing.sessionId ? ` 기존 세션: ${existing.sessionId}` : '';
+    if (refs.statusEl) {
+      refs.statusEl.textContent = message;
+      refs.statusEl.title = sessionDetail.trim();
+    }
+    Core.showBanner('daily', `${message}${sessionDetail}`, false);
+    Core.log('daily', `${message}${sessionDetail}`);
+    return result;
+  };
+
   function buildDailyTab(container) {
     const mod = Modules.daily;
     const refs = UIRefs.daily;
@@ -3562,7 +3582,10 @@
     stopBtn.textContent = '정지';
     stopBtn.style.cssText = btnStyle('#c62828');
     stopBtn.disabled = true;
-    startBtn.addEventListener('click', (event) => SharedCoreAdapter.startDaily({ source: 'manual-ui', event }));
+    startBtn.addEventListener('click', async (event) => {
+      const result = await SharedCoreAdapter.startDaily({ source: 'manual-ui', event });
+      reportManualDailyStartResult(result, refs);
+    });
     stopBtn.addEventListener('click', () => SharedCoreAdapter.requestStop({ source: 'manual-ui' }));
     row.append(startBtn, stopBtn);
     container.appendChild(row);
