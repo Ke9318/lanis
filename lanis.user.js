@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.16.2-stable
+// @version      1.16.3-stable
 // @description  재전직 / 유물 자동각인 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2982,20 +2982,52 @@
       return dungeonResult;
     }
     if (step === 'arena') {
-      await this.runCoreModule('arena');
-      const count = Modules.arena.readTodayBattleCount();
-      const gemProgress = Modules.arena.readBattleGemProgress();
-      if (gemProgress && gemProgress.current >= gemProgress.max) {
-        return `오늘 아레나 ${count}회 완료(전투 보석 ${gemProgress.current}/${gemProgress.max}개 확인)`;
+      // 새 시즌 초기 세팅은 탬플릿 생성·첫 전투·직업군 등록까지 수행한다.
+      // 이 선행 흐름 직후 아레나 모듈이 조기 반환되더라도 일일 시퀀스가
+      // 첫 전투만 완료로 오인하고 다음 단계로 넘어가지 않도록, 일일 소유자가
+      // 보석 최대치 또는 에너지 2 안전 제한을 직접 확인하며 재호출한다.
+      const maxArenaPasses = 40;
+      for (let pass = 1; pass <= maxArenaPasses; pass++) {
+        let moduleError = null;
+        try {
+          await this.runCoreModule('arena');
+        } catch (e) {
+          moduleError = e;
+        }
+
+        const count = Modules.arena.readTodayBattleCount();
+        const gemProgress = Modules.arena.readBattleGemProgress();
+        const energyCost = Modules.arena.readNextBattleEnergyCost();
+        if (gemProgress && gemProgress.current >= gemProgress.max) {
+          return `오늘 아레나 ${count}회 완료(전투 보석 ${gemProgress.current}/${gemProgress.max}개 확인)`;
+        }
+        if (gemProgress && energyCost && energyCost.amount >= 2) {
+          return `아레나 안전 중지: 보석 ${gemProgress.current}/${gemProgress.max}개, 필요 에너지 ${energyCost.amount}`;
+        }
+        if (this.stopRequested || !Core.dailyActive) {
+          throw new Error('사용자가 일일 실행을 정지했습니다.');
+        }
+        if (!gemProgress || !energyCost || energyCost.amount === null) {
+          if (moduleError) throw moduleError;
+          throw new Error(
+            `아레나 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}, ` +
+            `에너지 ${energyCost ? energyCost.raw : '읽기 실패'} (오늘 ${count ?? '읽기 실패'}회)`
+          );
+        }
+        if (pass >= maxArenaPasses) {
+          throw new Error(
+            `아레나 모듈이 ${maxArenaPasses}회 조기 종료됨: 보석 ${gemProgress.current}/${gemProgress.max}, ` +
+            `에너지 ${energyCost.raw} (오늘 ${count ?? '읽기 실패'}회)`
+          );
+        }
+
+        Core.log(
+          'daily',
+          `아레나 ${moduleError ? `오류(${moduleError.message})` : '조기 종료'} 후 보석 ` +
+          `${gemProgress.current}/${gemProgress.max}개 남음 → 아레나 모듈 재실행 (${pass}/${maxArenaPasses})`
+        );
+        await Core.humanDelay(500, 900);
       }
-      const energyCost = Modules.arena.readNextBattleEnergyCost();
-      if (gemProgress && energyCost && energyCost.amount >= 2) {
-        return `아레나 안전 중지: 보석 ${gemProgress.current}/${gemProgress.max}개, 필요 에너지 ${energyCost.amount}`;
-      }
-      throw new Error(
-        `아레나 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}, ` +
-        `에너지 ${energyCost ? energyCost.raw : '읽기 실패'} (오늘 ${count ?? '읽기 실패'}회)`
-      );
     }
     // ⚠ 사용자 요청(2026-08): 프리시즌 기간엔 정규 아레나와 별개로 평일에도
     // 돌려야 한다. 화면/버튼 구조가 동일해 Modules.arena.readTodayBattleCount
