@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.16.0-stable
+// @version      1.16.1-stable
 // @description  재전직 / 유물 자동각인 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -10685,14 +10685,17 @@
       const statElement = this.exactLeaf(dialog, mainStat);
       if (!statElement) throw new Error(`주 슬롯 "${mainStat}"을 DOM에서 찾지 못했습니다.`);
       if (!(await Core.safeClick(() => statElement.isConnected ? statElement : null, {
-        beforeMin: 120,
-        beforeMax: 260,
+        beforeMin: 450,
+        beforeMax: 750,
         shouldCancel,
       }))) throw new Error(`주 슬롯 "${mainStat}" 선택에 실패했습니다.`);
 
       const payButtons = [...dialog.querySelectorAll('button')].filter((button) => {
-        const text = button.textContent.replace(/\s+/g, ' ').trim();
-        return text === '각인 진행 1,000,000 골드' && Core.isElementVisible(button);
+        // MUI 버튼은 화면/접근성 트리에서는 두 줄 사이가 공백으로 읽히지만
+        // textContent에서는 "각인 진행1,000,000 골드"처럼 붙을 수 있다.
+        // 공백을 모두 제거한 정확한 전체 문구로 동일 버튼임을 검증한다.
+        const text = button.textContent.replace(/\s+/g, '');
+        return text === '각인진행1,000,000골드' && Core.isElementVisible(button);
       });
       if (payButtons.length !== 1 || payButtons[0].disabled) {
         throw new Error(`${round}회차 각인 진행 버튼 상태가 올바르지 않습니다.`);
@@ -10701,10 +10704,15 @@
       if (!remainingBeforeMatch) throw new Error(`${round}회차 남은 각인 횟수를 읽지 못했습니다.`);
       const remainingBefore = Number(remainingBeforeMatch[1]);
       if (!(await Core.safeClick(() => payButtons[0].isConnected ? payButtons[0] : null, {
-        beforeMin: 250,
-        beforeMax: 500,
+        beforeMin: 400,
+        beforeMax: 700,
         shouldCancel,
       }))) throw new Error(`${round}회차 각인 실행에 실패했습니다.`);
+
+      // 실전 DOM 재측정(2026-08-22, 실제 7회): 결과 갱신 2.756~2.949초,
+      // 안정 확인 2.997~3.192초. 갱신 전에 다음 작업을 시작하지 않도록 실측
+      // 하한보다 약간 이른 2.7초부터만 DOM 폴링을 허용한다.
+      if (!(await Core.interruptibleSleep(Core.rand(2700, 3200), shouldCancel))) return null;
 
       const updated = await Core.waitFor(() => {
         const completed = this.findDialog('태초의 유물 각인 완료!');
@@ -10716,6 +10724,24 @@
       }, 15000, 250, shouldCancel);
       if (!updated) throw new Error(`${round}회차 각인 결과 갱신을 확인하지 못했습니다.`);
       const latestLevels = this.parseLevels(updated);
+
+      // 애니메이션 중간 프레임이나 React의 부분 렌더를 최종 결과로 채택하지
+      // 않는다. 한 번 읽은 뒤 다시 기다리고, 동일한 대화상자에서 레벨 4개와
+      // 남은 횟수가 모두 같은지 재확인해야 다음 회차로 진행한다.
+      if (!(await Core.interruptibleSleep(Core.rand(500, 800), shouldCancel))) return null;
+      const stableDialog =
+        this.findDialog('태초의 유물 각인 완료!') ||
+        this.findDialog('태초의 유물 각인');
+      if (!stableDialog) throw new Error(`${round}회차 각인 결과 대화상자가 안정화 전에 사라졌습니다.`);
+      const stableLevels = this.parseLevels(stableDialog);
+      const levelsStable = this.config.selectedStats.every((stat) => stableLevels[stat] === latestLevels[stat]);
+      if (!levelsStable) throw new Error(`${round}회차 각인 레벨이 재확인 중 변경되어 안전 정지했습니다.`);
+      if (!stableDialog.textContent.includes('각인 완료!')) {
+        const stableRemaining = stableDialog.textContent.replace(/\s+/g, ' ').match(/각인 횟수:\s*(\d+)\s*\/\s*8회 남음/);
+        if (!stableRemaining || Number(stableRemaining[1]) !== remainingBefore - 1) {
+          throw new Error(`${round}회차 남은 횟수가 안정적으로 갱신되지 않아 안전 정지했습니다.`);
+        }
+      }
       Core.log('relic', `${round}/8회 완료 (주 슬롯: ${mainStat}) → ${this.config.selectedStats.map((stat) => `${stat} ${latestLevels[stat]}`).join(', ')}`);
     }
     return Core.waitFor(() => this.findDialog('태초의 유물 각인 완료!'), 8000, 200, shouldCancel);
