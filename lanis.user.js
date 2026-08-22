@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.15.2-stable
-// @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
+// @version      1.16.0-stable
+// @description  재전직 / 유물 자동각인 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
 // @grant        none
@@ -1995,6 +1995,7 @@
   const MODULE_LABELS = {
     daily: '일일',
     rejob: '재전직',
+    relic: '유물',
     raremap: '레어맵',
     dungeon: '던전',
     autohunt: '자동사냥',
@@ -10514,6 +10515,335 @@
     if (bossIds.length > 0) switchSubTab(bossIds[0]);
   }
 
+  // -------------------------- 유물 자동 각인 --------------------------
+  // 이 모듈의 책임은 미각인 유물의 스탯 4개를 선택하고 8회 각인한 뒤,
+  // 완료창의 스탯 합을 목표치와 비교하는 것까지다. 장착·해제·분해·초기화는
+  // 사용자의 판단 영역이므로 어떤 경우에도 자동으로 누르지 않는다.
+  const RELIC_STATS = ['힘', '생명', '지능', '정신', '속도', '행운'];
+  const RELIC_CONFIG_KEYS = ['selectedStats', 'selectionOrder', 'targetSum'];
+
+  Modules.relic = {
+    id: 'relic',
+    running: false,
+    stopRequested: false,
+    runId: 0,
+    loopPromise: null,
+    cycleCount: 0,
+    config: {
+      selectedStats: ['지능', '정신', '속도', '행운'],
+      selectionOrder: ['지능', '정신', '속도', '행운'],
+      targetSum: 26,
+    },
+  };
+  Core.loadModuleConfig('relic', RELIC_CONFIG_KEYS);
+  Modules.relic.config.selectedStats = Array.isArray(Modules.relic.config.selectedStats)
+    ? Modules.relic.config.selectedStats.filter((stat, index, all) => RELIC_STATS.includes(stat) && all.indexOf(stat) === index).slice(0, 4)
+    : [];
+  Modules.relic.config.selectionOrder = Array.isArray(Modules.relic.config.selectionOrder)
+    ? Modules.relic.config.selectionOrder.filter((stat, index, all) => Modules.relic.config.selectedStats.includes(stat) && all.indexOf(stat) === index)
+    : [];
+  Modules.relic.config.selectedStats.forEach((stat) => {
+    if (!Modules.relic.config.selectionOrder.includes(stat)) Modules.relic.config.selectionOrder.push(stat);
+  });
+  Modules.relic.config.targetSum = Math.max(0, Math.floor(Number(Modules.relic.config.targetSum) || 0));
+
+  Modules.relic.shouldCancel = function (runId) {
+    return this.stopRequested || !this.running || this.runId !== runId;
+  };
+
+  Modules.relic.visibleDialogs = function () {
+    return Core.gameElements('[role="dialog"]').filter((el) => Core.isElementVisible(el));
+  };
+
+  Modules.relic.findDialog = function (markerText) {
+    return this.visibleDialogs().find((el) => el.textContent.includes(markerText)) || null;
+  };
+
+  Modules.relic.exactButtons = function (scope, text) {
+    return [...scope.querySelectorAll('button')].filter(
+      (button) => button.textContent.replace(/\s+/g, ' ').trim() === text && Core.isElementVisible(button)
+    );
+  };
+
+  Modules.relic.exactLeaf = function (scope, text) {
+    return [...scope.querySelectorAll('*')].find(
+      (el) =>
+        el.children.length === 0 &&
+        el.textContent.trim() === text &&
+        Core.isElementVisible(el)
+    ) || null;
+  };
+
+  Modules.relic.parseLevels = function (scope) {
+    const text = scope.textContent.replace(/\s+/g, ' ').trim();
+    const levels = {};
+    this.config.selectedStats.forEach((stat) => {
+      const match = text.match(new RegExp(`${stat}\\s*Lv\\.\\s*(\\d+)`));
+      if (!match) throw new Error(`DOM에서 "${stat}" 레벨을 읽지 못했습니다.`);
+      levels[stat] = Number(match[1]);
+    });
+    return levels;
+  };
+
+  Modules.relic.statPriority = function () {
+    // 사용자 규칙: 최저 레벨이 동률이면 속도를 가장 먼저 선택한다.
+    // 나머지는 GUI에서 사용자가 체크한 순서를 유지한다.
+    return [
+      ...(this.config.selectedStats.includes('속도') ? ['속도'] : []),
+      ...this.config.selectionOrder.filter((stat) => stat !== '속도' && this.config.selectedStats.includes(stat)),
+    ];
+  };
+
+  Modules.relic.chooseMainStat = function (levels) {
+    const min = Math.min(...this.config.selectedStats.map((stat) => levels[stat]));
+    const chosen = this.statPriority().find((stat) => levels[stat] === min);
+    if (!chosen) throw new Error('주 슬롯으로 선택할 스탯을 결정하지 못했습니다.');
+    return chosen;
+  };
+
+  Modules.relic.ensureRelicPage = async function (runId) {
+    const shouldCancel = () => this.shouldCancel(runId);
+    if (location.pathname !== '/relic') {
+      await Core.clickNavMenuExact('캐릭', '유물 · 룬', shouldCancel);
+    }
+    const heading = await Core.waitFor(
+      () => Core.gameElements('h1,h2,h3,h4,h5,h6').find((el) => el.textContent.trim() === '유물' && Core.isElementVisible(el)) || null,
+      15000,
+      300,
+      shouldCancel
+    );
+    if (!heading) throw new Error('유물 페이지 진입을 확인하지 못했습니다.');
+  };
+
+  Modules.relic.openNextUnengraved = async function (runId) {
+    const shouldCancel = () => this.shouldCancel(runId);
+    const startButton = await Core.waitFor(() => {
+      const buttons = Core.allButtons().filter(
+        (button) => button.textContent.trim() === '각인 시작' && Core.isElementVisible(button) && !button.disabled
+      );
+      return buttons[0] || null;
+    }, 8000, 300, shouldCancel);
+    if (!startButton) return false;
+    if (!(await Core.safeClick(() => startButton.isConnected ? startButton : null, {
+      beforeMin: 250,
+      beforeMax: 500,
+      shouldCancel,
+    }))) throw new Error('첫 번째 미각인 유물의 "각인 시작" 클릭에 실패했습니다.');
+
+    const setup = await Core.waitFor(() => this.findDialog('각인할 스탯 설정'), 8000, 200, shouldCancel);
+    if (!setup) throw new Error('각인할 스탯 설정창을 찾지 못했습니다.');
+
+    for (const stat of this.config.selectionOrder) {
+      if (!this.config.selectedStats.includes(stat)) continue;
+      const buttons = this.exactButtons(setup, stat);
+      if (buttons.length !== 1) throw new Error(`스탯 선택 버튼 "${stat}"이 ${buttons.length}개입니다.`);
+      if (!(await Core.safeClick(() => buttons[0].isConnected ? buttons[0] : null, {
+        beforeMin: 100,
+        beforeMax: 220,
+        shouldCancel,
+      }))) throw new Error(`스탯 "${stat}" 선택에 실패했습니다.`);
+    }
+    const selectedFour = await Core.waitFor(
+      () => setup.textContent.replace(/\s+/g, ' ').includes('4개의 스탯을 선택하세요 (4/4)') ? true : null,
+      3000,
+      150,
+      shouldCancel
+    );
+    if (!selectedFour) throw new Error('각인 스탯 4개 선택을 DOM으로 확인하지 못했습니다.');
+    const setupStart = this.exactButtons(setup, '각인 시작');
+    if (setupStart.length !== 1 || setupStart[0].disabled) throw new Error('설정창의 각인 시작 버튼이 활성화되지 않았습니다.');
+    if (!(await Core.safeClick(() => setupStart[0].isConnected ? setupStart[0] : null, {
+      beforeMin: 200,
+      beforeMax: 400,
+      shouldCancel,
+    }))) throw new Error('유물 각인 준비 시작에 실패했습니다.');
+
+    const progressButton = await Core.waitFor(
+      () => Core.allButtons().find((button) => button.textContent.trim() === '각인 진행' && Core.isElementVisible(button)) || null,
+      8000,
+      200,
+      shouldCancel
+    );
+    if (!progressButton) throw new Error('준비된 유물의 "각인 진행" 버튼을 찾지 못했습니다.');
+    if (!(await Core.safeClick(() => progressButton.isConnected ? progressButton : null, {
+      beforeMin: 250,
+      beforeMax: 500,
+      shouldCancel,
+    }))) throw new Error('유물 각인창 열기에 실패했습니다.');
+    return true;
+  };
+
+  Modules.relic.runEightEngravings = async function (runId) {
+    const shouldCancel = () => this.shouldCancel(runId);
+    for (let round = 1; round <= 8; round++) {
+      if (shouldCancel()) return null;
+      const dialog = await Core.waitFor(() => this.findDialog('태초의 유물 각인'), 8000, 200, shouldCancel);
+      if (!dialog) throw new Error(`${round}회차 유물 각인창을 찾지 못했습니다.`);
+      if (dialog.textContent.includes('각인 완료!')) break;
+      const levelsBefore = this.parseLevels(dialog);
+      const mainStat = this.chooseMainStat(levelsBefore);
+      const statElement = this.exactLeaf(dialog, mainStat);
+      if (!statElement) throw new Error(`주 슬롯 "${mainStat}"을 DOM에서 찾지 못했습니다.`);
+      if (!(await Core.safeClick(() => statElement.isConnected ? statElement : null, {
+        beforeMin: 120,
+        beforeMax: 260,
+        shouldCancel,
+      }))) throw new Error(`주 슬롯 "${mainStat}" 선택에 실패했습니다.`);
+
+      const payButtons = [...dialog.querySelectorAll('button')].filter((button) => {
+        const text = button.textContent.replace(/\s+/g, ' ').trim();
+        return text === '각인 진행 1,000,000 골드' && Core.isElementVisible(button);
+      });
+      if (payButtons.length !== 1 || payButtons[0].disabled) {
+        throw new Error(`${round}회차 각인 진행 버튼 상태가 올바르지 않습니다.`);
+      }
+      const remainingBeforeMatch = dialog.textContent.replace(/\s+/g, ' ').match(/각인 횟수:\s*(\d+)\s*\/\s*8회 남음/);
+      if (!remainingBeforeMatch) throw new Error(`${round}회차 남은 각인 횟수를 읽지 못했습니다.`);
+      const remainingBefore = Number(remainingBeforeMatch[1]);
+      if (!(await Core.safeClick(() => payButtons[0].isConnected ? payButtons[0] : null, {
+        beforeMin: 250,
+        beforeMax: 500,
+        shouldCancel,
+      }))) throw new Error(`${round}회차 각인 실행에 실패했습니다.`);
+
+      const updated = await Core.waitFor(() => {
+        const completed = this.findDialog('태초의 유물 각인 완료!');
+        if (completed) return completed;
+        const current = this.findDialog('태초의 유물 각인');
+        if (!current) return null;
+        const match = current.textContent.replace(/\s+/g, ' ').match(/각인 횟수:\s*(\d+)\s*\/\s*8회 남음/);
+        return match && Number(match[1]) === remainingBefore - 1 ? current : null;
+      }, 15000, 250, shouldCancel);
+      if (!updated) throw new Error(`${round}회차 각인 결과 갱신을 확인하지 못했습니다.`);
+      const latestLevels = this.parseLevels(updated);
+      Core.log('relic', `${round}/8회 완료 (주 슬롯: ${mainStat}) → ${this.config.selectedStats.map((stat) => `${stat} ${latestLevels[stat]}`).join(', ')}`);
+    }
+    return Core.waitFor(() => this.findDialog('태초의 유물 각인 완료!'), 8000, 200, shouldCancel);
+  };
+
+  Modules.relic.mainLoop = async function (runId) {
+    if (this.config.selectedStats.length !== 4) throw new Error('각인할 스탯을 정확히 4개 선택해주세요.');
+    if (!Number.isFinite(this.config.targetSum) || this.config.targetSum < 0) throw new Error('목표 스탯 합을 0 이상으로 설정해주세요.');
+    await this.ensureRelicPage(runId);
+    while (!this.shouldCancel(runId)) {
+      const opened = await this.openNextUnengraved(runId);
+      if (!opened) {
+        Core.notifyStopped('relic', '각인할 미장착·미각인 유물이 없어 종료했습니다.');
+        return;
+      }
+      const completedDialog = await this.runEightEngravings(runId);
+      if (!completedDialog || this.shouldCancel(runId)) return;
+      const levels = this.parseLevels(completedDialog);
+      const total = this.config.selectedStats.reduce((sum, stat) => sum + levels[stat], 0);
+      this.cycleCount++;
+      Core.updateModuleButtons();
+      Core.log('relic', `유물 ${this.cycleCount}개차 완료: ${this.config.selectedStats.map((stat) => `${stat} ${levels[stat]}`).join(', ')} / 합계 ${total}`);
+
+      if (total >= this.config.targetSum) {
+        // 성공 유물은 사용자가 바로 판단할 수 있게 완료창을 그대로 남긴다.
+        Core.notifyCompleted('relic', `목표 달성: 스탯 합 ${total} (목표 ${this.config.targetSum})`);
+        return;
+      }
+
+      Core.log('relic', `목표 미달: 스탯 합 ${total} < ${this.config.targetSum} → 다음 유물로 계속`);
+      const confirmButtons = this.exactButtons(completedDialog, '확인');
+      if (confirmButtons.length !== 1) throw new Error('각인 완료창의 확인 버튼을 정확히 찾지 못했습니다.');
+      if (!(await Core.safeClick(() => confirmButtons[0].isConnected ? confirmButtons[0] : null, {
+        beforeMin: 250,
+        beforeMax: 500,
+        shouldCancel: () => this.shouldCancel(runId),
+      }))) throw new Error('각인 완료창 닫기에 실패했습니다.');
+      const closed = await Core.waitFor(() => !this.findDialog('태초의 유물 각인 완료!') ? true : null, 5000, 200, () => this.shouldCancel(runId));
+      if (!closed) throw new Error('각인 완료창이 닫히지 않아 다음 유물로 넘어가지 못했습니다.');
+    }
+  };
+
+  function buildRelicTab(container) {
+    const mod = Modules.relic;
+    const refs = UIRefs.relic;
+    const description = document.createElement('div');
+    description.textContent = '미장착·미각인 유물을 위에서부터 자동 각인합니다. 목표 합계 이상이 나오면 완료창을 남기고 정지합니다.';
+    description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin-bottom:8px;';
+    container.appendChild(description);
+
+    container.appendChild(labelEl('각인할 스탯 (4개 선택)'));
+    const statGrid = document.createElement('div');
+    statGrid.style.cssText = 'display:grid; grid-template-columns:repeat(3,1fr); gap:5px; margin:5px 0 9px;';
+    const statInputs = [];
+    RELIC_STATS.forEach((stat) => {
+      const label = document.createElement('label');
+      label.style.cssText = 'display:flex; align-items:center; gap:4px; padding:5px; border:1px solid #444; border-radius:4px; cursor:pointer;';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = mod.config.selectedStats.includes(stat);
+      input.addEventListener('change', () => {
+        if (input.checked) {
+          if (mod.config.selectedStats.length >= 4) {
+            input.checked = false;
+            Core.showBanner('relic', '각인 스탯은 4개까지 선택할 수 있습니다.');
+            return;
+          }
+          mod.config.selectedStats.push(stat);
+          mod.config.selectionOrder = mod.config.selectionOrder.filter((item) => item !== stat);
+          mod.config.selectionOrder.push(stat);
+        } else {
+          mod.config.selectedStats = mod.config.selectedStats.filter((item) => item !== stat);
+          mod.config.selectionOrder = mod.config.selectionOrder.filter((item) => item !== stat);
+        }
+        Core.saveModuleConfig('relic', RELIC_CONFIG_KEYS);
+        Core.updateModuleButtons();
+      });
+      const text = document.createElement('span');
+      text.textContent = stat;
+      label.append(input, text);
+      statGrid.appendChild(label);
+      statInputs.push(input);
+    });
+    container.appendChild(statGrid);
+
+    container.appendChild(labelEl('목표 스탯 합 (이상이면 종료)'));
+    const targetInput = document.createElement('input');
+    targetInput.type = 'number';
+    targetInput.min = '0';
+    targetInput.step = '1';
+    targetInput.value = String(mod.config.targetSum);
+    targetInput.style.cssText = inputStyle();
+    targetInput.addEventListener('change', () => {
+      const parsed = Math.max(0, Math.floor(Number(targetInput.value) || 0));
+      mod.config.targetSum = parsed;
+      targetInput.value = String(parsed);
+      Core.saveModuleConfig('relic', RELIC_CONFIG_KEYS);
+    });
+    container.appendChild(targetInput);
+
+    const safetyNote = document.createElement('div');
+    safetyNote.textContent = '※ 속도는 최저 수치 동률 시 최우선입니다. 장착·해제·분해·초기화는 자동으로 하지 않습니다.';
+    safetyNote.style.cssText = 'font-size:10px; color:#f5a623; line-height:1.45; margin:7px 0;';
+    container.appendChild(safetyNote);
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px;';
+    const startBtn = document.createElement('button');
+    startBtn.textContent = '시작';
+    startBtn.style.cssText = btnStyle('#2e7d32');
+    const stopBtn = document.createElement('button');
+    stopBtn.textContent = '정지';
+    stopBtn.style.cssText = btnStyle('#c62828');
+    stopBtn.disabled = true;
+    const statusEl = document.createElement('div');
+    statusEl.textContent = '대기중';
+    statusEl.style.cssText = 'font-size:11px; color:#ccc; margin-top:6px;';
+    startBtn.addEventListener('click', () => Core.startModule('relic'));
+    stopBtn.addEventListener('click', () => Core.requestStopModule('relic'));
+    btnRow.append(startBtn, stopBtn);
+    container.append(btnRow, statusEl);
+
+    refs.startBtn = startBtn;
+    refs.stopBtn = stopBtn;
+    refs.statusEl = statusEl;
+    refs.inputs = [...statInputs, targetInput];
+  }
+
   Core.startModule = function (moduleId, options = {}) {
     const mod = Modules[moduleId];
     if (!mod) return null;
@@ -10673,6 +11003,7 @@
   const UIRefs = {
     daily: {},
     rejob: {},
+    relic: {},
     autohunt: {},
     raremap: {},
     dungeon: {},
@@ -10685,14 +11016,16 @@
   let activeTab = 'rejob';
 
   Core.updateModuleButtons = function () {
-    ['rejob', 'autohunt', 'raremap', 'dungeon', 'arena', 'preseason', 'preseasonArena', 'deepdungeon'].forEach((id) => {
+    ['rejob', 'relic', 'autohunt', 'raremap', 'dungeon', 'arena', 'preseason', 'preseasonArena', 'deepdungeon'].forEach((id) => {
       const mod = Modules[id];
       const refs = UIRefs[id];
       if (!refs.startBtn) return;
       const otherRunning =
         (Core.activeModuleId && Core.activeModuleId !== id) ||
         (Core.dailyActive && !mod.running);
-      const safetyLocked = id === 'rejob' && refs.safetyCheck && !refs.safetyCheck.checked;
+      const safetyLocked =
+        (id === 'rejob' && refs.safetyCheck && !refs.safetyCheck.checked) ||
+        (id === 'relic' && mod.config.selectedStats.length !== 4);
       refs.startBtn.disabled = mod.running || otherRunning || safetyLocked;
       refs.stopBtn.disabled = !mod.running;
       const cycleLabel =
@@ -10706,6 +11039,8 @@
           ? `전투 ${mod.cycleCount}회 / 30분마다 통발 작업`
           : id === 'deepdungeon'
           ? `던전의 주인 도전 ${mod.cycleCount}회`
+          : id === 'relic'
+          ? `유물 ${mod.cycleCount}개 각인 완료`
           : `사이클 ${mod.cycleCount}`;
       refs.statusEl.textContent = mod.running ? `실행중 (${cycleLabel})` : otherRunning ? '다른 모듈 실행중' : '대기중';
       if (refs.inputs) refs.inputs.forEach((inp) => (inp.disabled = mod.running));
@@ -10816,10 +11151,10 @@
 
     // ⚠ 사용자 요청(2026-08): 탭을 종류별로 정확히 4줄로 고정해서 배치한다
     // (화면 너비에 따라 자동 줄바꿈되는 flex-wrap 한 덩어리가 아니라, 그룹별
-    // 로 명시적인 행을 나눔) - 성장/파밍(재전직·레어맵), 전투 콘텐츠(던전·
+    // 로 명시적인 행을 나눔) - 성장/파밍(재전직·유물·레어맵), 전투 콘텐츠(던전·
     // 자동사냥·보스·심층던전·아레나), 길드(길드보스), 이벤트(이벤트) 순.
     const TAB_ROWS = [
-      ['rejob', 'raremap'],
+      ['rejob', 'relic', 'raremap'],
       ['dungeon', 'autohunt', 'boss', 'deepdungeon', 'arena'],
       ['guildboss'],
       ['preseason'],
@@ -10849,6 +11184,7 @@
       contentWrap.appendChild(c);
     });
     buildRejobTab(tabContents.rejob);
+    buildRelicTab(tabContents.relic);
     buildAutohuntTab(tabContents.autohunt);
     buildRaremapTab(tabContents.raremap);
     buildDungeonTab(tabContents.dungeon);
@@ -10938,7 +11274,7 @@
     if (!headless && document.getElementById('lrm-panel')) return;
     if (!headless) {
       buildPanel();
-      Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 보스 / 일일)');
+      Core.log('core', '통합 매크로 패널 로드 완료 (재전직 / 유물 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 보스 / 일일)');
     }
     if (Core.wasDiscarded) {
       const state = Modules.daily.loadState();
