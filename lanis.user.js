@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.16.1-stable
+// @version      1.16.2-stable
 // @description  재전직 / 유물 자동각인 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -10520,7 +10520,7 @@
   // 완료창의 스탯 합을 목표치와 비교하는 것까지다. 장착·해제·분해·초기화는
   // 사용자의 판단 영역이므로 어떤 경우에도 자동으로 누르지 않는다.
   const RELIC_STATS = ['힘', '생명', '지능', '정신', '속도', '행운'];
-  const RELIC_CONFIG_KEYS = ['selectedStats', 'selectionOrder', 'targetSum'];
+  const RELIC_CONFIG_KEYS = ['selectedStats', 'selectionOrder', 'targetSum', 'maxRelicCount'];
 
   Modules.relic = {
     id: 'relic',
@@ -10533,6 +10533,7 @@
       selectedStats: ['지능', '정신', '속도', '행운'],
       selectionOrder: ['지능', '정신', '속도', '행운'],
       targetSum: 26,
+      maxRelicCount: 5,
     },
   };
   Core.loadModuleConfig('relic', RELIC_CONFIG_KEYS);
@@ -10546,6 +10547,7 @@
     if (!Modules.relic.config.selectionOrder.includes(stat)) Modules.relic.config.selectionOrder.push(stat);
   });
   Modules.relic.config.targetSum = Math.max(0, Math.floor(Number(Modules.relic.config.targetSum) || 0));
+  Modules.relic.config.maxRelicCount = Math.max(0, Math.floor(Number(Modules.relic.config.maxRelicCount) || 0));
 
   Modules.relic.shouldCancel = function (runId) {
     return this.stopRequested || !this.running || this.runId !== runId;
@@ -10750,6 +10752,8 @@
   Modules.relic.mainLoop = async function (runId) {
     if (this.config.selectedStats.length !== 4) throw new Error('각인할 스탯을 정확히 4개 선택해주세요.');
     if (!Number.isFinite(this.config.targetSum) || this.config.targetSum < 0) throw new Error('목표 스탯 합을 0 이상으로 설정해주세요.');
+    if (!Number.isFinite(this.config.maxRelicCount) || this.config.maxRelicCount < 0) throw new Error('최대 시도 유물 수를 0 이상으로 설정해주세요.');
+    this.cycleCount = 0;
     await this.ensureRelicPage(runId);
     while (!this.shouldCancel(runId)) {
       const opened = await this.openNextUnengraved(runId);
@@ -10768,6 +10772,15 @@
       if (total >= this.config.targetSum) {
         // 성공 유물은 사용자가 바로 판단할 수 있게 완료창을 그대로 남긴다.
         Core.notifyCompleted('relic', `목표 달성: 스탯 합 ${total} (목표 ${this.config.targetSum})`);
+        return;
+      }
+
+      if (this.config.maxRelicCount > 0 && this.cycleCount >= this.config.maxRelicCount) {
+        // 제한에 도달한 마지막 유물도 사용자가 판단할 수 있도록 완료창을 남긴다.
+        Core.notifyCompleted(
+          'relic',
+          `최대 시도 ${this.config.maxRelicCount}개에 도달해 종료: 마지막 스탯 합 ${total} (목표 ${this.config.targetSum})`
+        );
         return;
       }
 
@@ -10842,6 +10855,21 @@
     });
     container.appendChild(targetInput);
 
+    container.appendChild(labelEl('최대 시도 유물 수 (0=무제한)'));
+    const maxRelicInput = document.createElement('input');
+    maxRelicInput.type = 'number';
+    maxRelicInput.min = '0';
+    maxRelicInput.step = '1';
+    maxRelicInput.value = String(mod.config.maxRelicCount);
+    maxRelicInput.style.cssText = inputStyle();
+    maxRelicInput.addEventListener('change', () => {
+      const parsed = Math.max(0, Math.floor(Number(maxRelicInput.value) || 0));
+      mod.config.maxRelicCount = parsed;
+      maxRelicInput.value = String(parsed);
+      Core.saveModuleConfig('relic', RELIC_CONFIG_KEYS);
+    });
+    container.appendChild(maxRelicInput);
+
     const safetyNote = document.createElement('div');
     safetyNote.textContent = '※ 속도는 최저 수치 동률 시 최우선입니다. 장착·해제·분해·초기화는 자동으로 하지 않습니다.';
     safetyNote.style.cssText = 'font-size:10px; color:#f5a623; line-height:1.45; margin:7px 0;';
@@ -10867,7 +10895,7 @@
     refs.startBtn = startBtn;
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
-    refs.inputs = [...statInputs, targetInput];
+    refs.inputs = [...statInputs, targetInput, maxRelicInput];
   }
 
   Core.startModule = function (moduleId, options = {}) {
