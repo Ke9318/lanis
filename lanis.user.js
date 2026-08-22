@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.15.1-stable
+// @version      1.15.2-stable
 // @description  재전직 / 자동사냥 / 레어맵 / 던전 / 아레나 / 심층던전 / 개인 보스 / 일일 연속 자동화를 하나의 패널에서 제공하며 각 모듈의 실행 로직은 독립적으로 격리.
 // @match        https://lanis.me/*
 // @run-at       document-idle
@@ -2982,28 +2982,19 @@
     }
     if (step === 'arena') {
       await this.runCoreModule('arena');
-      // ⚠ 버그 수정(2026-08, 사용자 확인): 프리시즌 기간엔 에너지가 절대
-      // 유료로 안 바뀌므로(게임 규칙), mainLoop와 동일하게 프리시즌
-      // 여부에 따라 검증 기준을 분기한다 - 아니면 프리시즌 기간에 정상
-      // 완료(보석 150/150)된 것도 "무료 전투가 남아있다"며 오판해 실패로
-      // 처리될 수 있다.
       const count = Modules.arena.readTodayBattleCount();
-      const isPreseason = Core.bodyText().includes('프리시즌');
-      if (isPreseason) {
-        const gemProgress = Modules.arena.readPreseasonGemProgress();
-        if (!gemProgress || gemProgress.current < gemProgress.max) {
-          throw new Error(`아레나(프리시즌) 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}`);
-        }
-        return `오늘 아레나 ${count}회 완료(프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 확인)`;
+      const gemProgress = Modules.arena.readBattleGemProgress();
+      if (gemProgress && gemProgress.current >= gemProgress.max) {
+        return `오늘 아레나 ${count}회 완료(전투 보석 ${gemProgress.current}/${gemProgress.max}개 확인)`;
       }
-      // ⚠ 사용자 요청(2026-08): 고정 목표 횟수 대신 "다음 전투 에너지
-      // 비용이 무료가 아니게 됐는지"로 완료를 판정한다(정규 아레나는 하루
-      // 20회부터 유료 전환).
       const energyCost = Modules.arena.readNextBattleEnergyCost();
-      if (!energyCost || energyCost.isFree) {
-        throw new Error(`아레나 완료 확인 실패: 아직 무료 전투가 남아있거나 확인 못함 (오늘 ${count ?? '읽기 실패'}회)`);
+      if (gemProgress && energyCost && energyCost.amount >= 2) {
+        return `아레나 안전 중지: 보석 ${gemProgress.current}/${gemProgress.max}개, 필요 에너지 ${energyCost.amount}`;
       }
-      return `오늘 아레나 ${count}회 완료(무료 전투 소진 확인)`;
+      throw new Error(
+        `아레나 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}, ` +
+        `에너지 ${energyCost ? energyCost.raw : '읽기 실패'} (오늘 ${count ?? '읽기 실패'}회)`
+      );
     }
     // ⚠ 사용자 요청(2026-08): 프리시즌 기간엔 정규 아레나와 별개로 평일에도
     // 돌려야 한다. 화면/버튼 구조가 동일해 Modules.arena.readTodayBattleCount
@@ -3648,17 +3639,100 @@
     try { localStorage.removeItem(ARENA_RESUME_KEY); } catch (e) {}
   };
 
-  Modules.arena.goToArena = async function () {
+  Modules.arena.isRegistrationScreen = function () {
+    return location.pathname.replace(/\/$/, '') === '/arena' &&
+      !!Core.findButtonByText('아레나 등록') &&
+      Core.bodyText().includes('아레나 등록 버튼을 눌러');
+  };
+
+  Modules.arena.isBattleScreen = function () {
+    return location.pathname.replace(/\/$/, '') === '/arena' &&
+      Core.bodyText().includes('오늘 전투 횟수');
+  };
+
+  Modules.arena.goToArena = async function ({ allowRegistration = false } = {}) {
     if (location.pathname.replace(/\/$/, '') !== '/arena') {
       await Core.clickNavMenuExact('전투', '아레나');
     }
     const arrived = await Core.waitFor(
-      () => location.pathname.replace(/\/$/, '') === '/arena' &&
-        Core.bodyText().includes('오늘 전투 횟수'),
+      () => this.isBattleScreen() || (allowRegistration && this.isRegistrationScreen()),
       15000,
       300
     );
     if (!arrived) throw new Error('아레나 화면 진입을 확인하지 못했습니다.');
+  };
+
+  // 새 시즌 최초 진입 때만 실행한다. 실전에서 확인한 순서 그대로
+  // 아레나 프리셋 → 시즌 등록 → 탬플릿 생성 → 첫 전투 → 직업군 등록을 마친다.
+  Modules.arena.setupNewSeasonIfNeeded = async function () {
+    if (!this.isRegistrationScreen()) return false;
+
+    Core.log('arena', '새 시즌 아레나 미등록 감지 → 초기 세팅 등록 시작');
+    await Core.applyCommonPreset('아레나', 'arena');
+    await this.goToArena({ allowRegistration: true });
+
+    if (!(await Core.safeClick(() => {
+      const button = Core.findButtonByText('아레나 등록');
+      return button && !button.disabled ? button : null;
+    }, { beforeMin: 700, beforeMax: 1200, afterMin: 900, afterMax: 1500 }))) {
+      throw new Error('새 시즌 "아레나 등록" 버튼 클릭에 실패했습니다.');
+    }
+    const registered = await Core.waitFor(() => this.isBattleScreen() || null, 15000, 300);
+    if (!registered) throw new Error('새 시즌 아레나 등록 후 전투 화면을 확인하지 못했습니다.');
+
+    if (!(await Core.safeClick(() => Core.findButtonByText('설정'), {
+      beforeMin: 500,
+      beforeMax: 900,
+      afterMin: 500,
+      afterMax: 900,
+    }))) throw new Error('아레나 "설정" 탭 클릭에 실패했습니다.');
+    const createTemplate = await Core.waitFor(() => Core.findButtonByText('탬플릿 생성'), 10000, 250);
+    if (!createTemplate) throw new Error('아레나 "탬플릿 생성" 버튼을 찾지 못했습니다.');
+    if (!(await Core.safeClick(() => Core.findButtonByText('탬플릿 생성'), {
+      beforeMin: 600,
+      beforeMax: 1000,
+      afterMin: 900,
+      afterMax: 1400,
+    }))) throw new Error('아레나 탬플릿 생성에 실패했습니다.');
+
+    const firstBattle = await this.waitForEnabledStart();
+    if (!firstBattle) throw new Error('탬플릿 생성 후 첫 아레나 전투 버튼이 활성화되지 않았습니다.');
+    if (!(await Core.safeClick(() => {
+      const button = Core.findButtonByText('전투 시작');
+      return button && !button.disabled ? button : null;
+    }, { beforeMin: 700, beforeMax: 1300 }))) {
+      throw new Error('새 시즌 첫 아레나 전투 시작에 실패했습니다.');
+    }
+    const resultBack = await Core.waitFor(
+      () => Core.findButtonByText('아레나로 돌아가기') || Core.findButtonByText('돌아가기'),
+      15000,
+      500
+    );
+    if (!resultBack) throw new Error('새 시즌 첫 전투 결과 화면을 확인하지 못했습니다.');
+    await this.handleResultIfPresent();
+
+    const findClassRegisterButton = () => Core.allButtons().find((button) =>
+      /직업군으로 등록$/.test(button.textContent.replace(/\s+/g, ' ').trim()) &&
+      !button.disabled && Core.isElementVisible(button)
+    ) || null;
+    const classRegisterButton = await Core.waitFor(findClassRegisterButton, 10000, 250);
+    if (!classRegisterButton) throw new Error('첫 전투 후 직업군 등록 버튼을 찾지 못했습니다.');
+    const className = classRegisterButton.textContent.replace(/\s*직업군으로 등록\s*$/, '').trim();
+    if (!(await Core.safeClick(findClassRegisterButton, {
+      beforeMin: 600,
+      beforeMax: 1000,
+      afterMin: 800,
+      afterMax: 1300,
+    }))) throw new Error(`${className || '현재'} 직업군 등록에 실패했습니다.`);
+    const classRegistered = await Core.waitFor(
+      () => !/현재 직업군:\s*미등록/.test(Core.bodyText()) && !findClassRegisterButton() ? true : null,
+      10000,
+      250
+    );
+    if (!classRegistered) throw new Error('직업군 등록 완료 상태를 확인하지 못했습니다.');
+
+    Core.log('arena', `새 시즌 초기 세팅 완료: 아레나 프리셋·탬플릿·첫 전투·${className || '현재'} 직업군 등록`);
+    return true;
   };
 
   Modules.arena.readTodayBattleCount = function () {
@@ -3674,12 +3748,9 @@
     return null;
   };
 
-  // ⚠ 사용자 요청(2026-08, 실전 확인): 정규 아레나는 하루 20회부터 전투마다
-  // 에너지가 소모된다(20-39회:1, 40-59회:2 ... 게임 자체 규칙 설명에 명시).
-  // "오늘 전투 횟수"라는 고정 목표 대신, 화면의 "다음 전투 에너지 비용"이
-  // "무료"인 동안에만 계속 돌리고 무료가 아니게 되는 순간 멈추는 게 맞다.
-  // 실전 확인: 라벨과 값이 델리미터 없이 붙어서 나온다
-  // (예: "다음 전투 에너지 비용무료").
+  // 아레나는 전투 20회부터 에너지 1, 40회부터 에너지 2가 든다. 보석 보상은
+  // 30회까지이므로 에너지 1은 보석이 남아 있는 동안 허용하되, 파싱 오류나
+  // 게임 규칙 변경으로 에너지 2 이상이 표시되면 안전을 위해 즉시 중지한다.
   Modules.arena.readNextBattleEnergyCost = function () {
     const marker = Core.gameElements('*').find((el) =>
       el.children.length === 0 && el.textContent.trim() === '다음 전투 에너지 비용'
@@ -3689,7 +3760,13 @@
     for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
       const text = node.textContent || '';
       if (text.includes('다음 전투 에너지 비용') && text.length < 60) {
-        return { isFree: text.includes('무료'), raw: text.replace('다음 전투 에너지 비용', '').trim() };
+        const raw = text.replace('다음 전투 에너지 비용', '').trim();
+        const amountMatch = raw.match(/\d+/);
+        return {
+          isFree: raw.includes('무료'),
+          amount: raw.includes('무료') ? 0 : (amountMatch ? parseInt(amountMatch[0], 10) : null),
+          raw,
+        };
       }
     }
     return null;
@@ -3707,6 +3784,20 @@
     let node = marker.parentElement;
     for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
       const match = (node.textContent || '').match(/오늘 받은 프리시즌 보석\s*(\d+)\s*\/\s*(\d+)\s*개/);
+      if (match) return { current: parseInt(match[1], 10), max: parseInt(match[2], 10) };
+    }
+    return null;
+  };
+
+  Modules.arena.readBattleGemProgress = function () {
+    const labels = ['오늘 받은 전투 보석', '오늘 받은 프리시즌 보석'];
+    const marker = Core.gameElements('*').find((el) =>
+      el.children.length === 0 && labels.includes(el.textContent.trim())
+    );
+    if (!marker) return null;
+    let node = marker.parentElement;
+    for (let depth = 0; node && depth < 4; depth++, node = node.parentElement) {
+      const match = (node.textContent || '').match(/오늘 받은 (?:전투|프리시즌) 보석\s*(\d+)\s*\/\s*(\d+)\s*개/);
       if (match) return { current: parseInt(match[1], 10), max: parseInt(match[2], 10) };
     }
     return null;
@@ -3802,7 +3893,8 @@
       return;
     }
     mod.saveResume();
-    await mod.goToArena();
+    await mod.goToArena({ allowRegistration: true });
+    await mod.setupNewSeasonIfNeeded();
 
     // 전투 도중 새로고침되었을 경우 결과창부터 정리한다.
     await mod.handleResultIfPresent();
@@ -3813,38 +3905,31 @@
       mod.cycleCount = before;
       Core.updateModuleButtons();
 
-      // ⚠ 버그 수정(2026-08, 사용자 확인 - 실전에서 오늘 전투 248회까지
-      // 멈추지 않고 도는 것 확인됨): 프리시즌 기간에는 "다음 전투 에너지
-      // 비용"이 몇 번을 싸우든 절대 "무료"에서 바뀌지 않는다(게임 규칙:
-      // "프리시즌 기간에는 에너지가 소모되지 않으며"). 그래서 정규 아레나
-      // 매크로가 프리시즌 기간 중에 실행되면(예: 토요일이 마침 프리시즌
-      // 기간과 겹칠 때) "무료가 아니게 될 때까지"라는 정지 조건이 절대
-      // 성립하지 않아 무한 루프에 빠졌다. 프리시즌 기간이면 에너지 체크
-      // 대신 "오늘 받은 프리시즌 보석" 진행률로 정지 조건을 판단한다
-      // (이벤트 탭의 프리시즌 매크로와 동일한 기준).
-      const isPreseason = Core.bodyText().includes('프리시즌');
-      if (isPreseason) {
-        const gemProgress = mod.readPreseasonGemProgress();
-        if (!gemProgress) throw new Error('프리시즌 기간인데 오늘 받은 프리시즌 보석 진행률을 읽지 못했습니다.');
-        if (gemProgress.current >= gemProgress.max) {
-          mod.clearResume();
-          Core.notifyCompleted(
-            'arena',
-            `오늘 프리시즌 보석 ${gemProgress.current}/${gemProgress.max}개 완료 (전투 ${before}회) - 프리시즌 기간이라 보석 기준으로 정지`
-          );
-          return;
-        }
-      } else {
-        // ⚠ 사용자 요청(2026-08): 고정 횟수 대신, 다음 전투 에너지 비용이
-        // "무료"인 동안만 계속 돈다. 무료가 아니게 된 순간 정지한다(보통
-        // 20회 지점). 프리시즌이 아닐 때만 유효한 판정이다(위 참고).
-        const energyCost = mod.readNextBattleEnergyCost();
-        if (!energyCost) throw new Error('아레나의 "다음 전투 에너지 비용"을 읽지 못했습니다.');
-        if (!energyCost.isFree) {
-          mod.clearResume();
-          Core.notifyCompleted('arena', `오늘 아레나 ${before}회 완료 (에너지 비용이 "${energyCost.raw}"로 전환됨 - 무료 전투 소진)`);
-          return;
-        }
+      const gemProgress = mod.readBattleGemProgress();
+      if (!gemProgress) throw new Error('아레나의 "오늘 받은 전투 보석" 진행률을 읽지 못했습니다.');
+      if (gemProgress.current >= gemProgress.max) {
+        mod.clearResume();
+        Core.notifyCompleted(
+          'arena',
+          `오늘 아레나 보석 ${gemProgress.current}/${gemProgress.max}개 완료 (전투 ${before}회)`
+        );
+        return;
+      }
+
+      const energyCost = mod.readNextBattleEnergyCost();
+      if (!energyCost) throw new Error('아레나의 "다음 전투 에너지 비용"을 읽지 못했습니다.');
+      if (energyCost.amount === null) {
+        mod.clearResume();
+        Core.notifyStopped('arena', `아레나 에너지 비용 "${energyCost.raw}"을 숫자로 확인할 수 없어 안전 중지합니다.`);
+        return;
+      }
+      if (energyCost.amount >= 2) {
+        mod.clearResume();
+        Core.notifyStopped(
+          'arena',
+          `아레나 보석 ${gemProgress.current}/${gemProgress.max}개 상태에서 필요 에너지가 ${energyCost.amount}로 올라 안전 중지합니다.`
+        );
+        return;
       }
 
       // ⚠ 사용자 요청(2026-08): 기존엔 마지막 공격 시각부터 고정 35초를 무조건
@@ -3852,7 +3937,10 @@
       // 이중 구조였다. 결과창에서 "돌아가기"를 누르고 곧바로 이 자리로 돌아오므로,
       // 고정 대기 없이 진짜 쿨타임 감지(0.5초 간격 폴링)만으로 버튼이 켜지는
       // 즉시 공격하도록 단순화한다.
-      Core.log('arena', `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}회 (다음 전투 비용: 무료)`);
+      Core.log(
+        'arena',
+        `쿨타임 및 버튼 활성화 대기 중: 오늘 ${before}회 / 보석 ${gemProgress.current}/${gemProgress.max} / 다음 전투 에너지 ${energyCost.amount}`
+      );
       const startButton = await mod.waitForEnabledStart();
       if (!startButton) throw new Error('90초 안에 아레나 "전투 시작" 버튼이 활성화되지 않았습니다.');
       if (mod.stopRequested) return;
@@ -3890,7 +3978,7 @@
 
     const description = document.createElement('div');
     description.textContent =
-      '고정 횟수가 아니라, 화면의 "다음 전투 에너지 비용"이 "무료"인 동안만 계속 실행합니다. 무료가 아니게 되는 순간(보통 하루 20회) 자동으로 멈춥니다.';
+      '오늘 받은 전투 보석이 최대치가 될 때까지 실행합니다. 필요 에너지 1은 허용하지만 2 이상이면 안전을 위해 즉시 멈춥니다.';
     description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin:7px 0;';
     container.appendChild(description);
 
